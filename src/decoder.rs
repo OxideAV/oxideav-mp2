@@ -16,8 +16,9 @@
 //! 36 × 32 = 1152 PCM samples per channel per frame.
 //!
 //! # Limitations
-//! - MPEG-1 only (32/44.1/48 kHz). MPEG-2 LSF and MPEG-2.5 are rejected
-//!   with `Error::Unsupported`.
+//! - MPEG-1 (32/44.1/48 kHz) and MPEG-2 LSF (16/22.05/24 kHz) are both
+//!   supported. MPEG-2.5 (8/11.025/12 kHz) is rejected with
+//!   `Error::Unsupported` at sync check time.
 //! - CRC-16 is accepted (bits advanced) but not verified.
 //! - Free-format and reserved bitrate/sample-rate indices are rejected at
 //!   header parse time.
@@ -29,10 +30,10 @@ use oxideav_core::{
 
 use crate::bitalloc::{read_layer2_side, validate_allocations};
 use crate::bitreader::BitReader;
-use crate::header::{parse_header, Mode};
+use crate::header::{parse_header, Mode, Version};
 use crate::requant::{read_samples, ReadState};
 use crate::synth::SynthesisState;
-use crate::tables::select_alloc_table;
+use crate::tables::{select_alloc_table, TABLE_LSF};
 
 /// Build a Layer II decoder. The codec parameters are consulted for the
 /// canonical `codec_id` only — everything else is derived from the
@@ -122,17 +123,22 @@ impl Mp2Decoder {
             )));
         }
 
-        // Bitrate-index derivation for allocation-table lookup.
-        // The header parser discarded the raw index, so reverse-map
-        // from bitrate_kbps.
-        let bri = bitrate_to_index(hdr.bitrate_kbps).ok_or_else(|| {
-            Error::invalid(format!(
-                "mp2: unexpected bitrate {} kbps for table lookup",
-                hdr.bitrate_kbps
-            ))
-        })?;
+        // MPEG-1 picks one of four tables from (sample_rate, mode, bitrate);
+        // MPEG-2 LSF always uses the consolidated TABLE_LSF (sblimit = 30,
+        // ISO/IEC 13818-3 §2.4.3.3).
         let stereo = !matches!(hdr.mode, Mode::Mono);
-        let table = select_alloc_table(hdr.sample_rate, stereo, bri);
+        let table = match hdr.version {
+            Version::Mpeg1 => {
+                let bri = bitrate_to_index(hdr.bitrate_kbps).ok_or_else(|| {
+                    Error::invalid(format!(
+                        "mp2: unexpected bitrate {} kbps for MPEG-1 table lookup",
+                        hdr.bitrate_kbps
+                    ))
+                })?;
+                select_alloc_table(hdr.sample_rate, stereo, bri)
+            }
+            Version::Mpeg2Lsf => &TABLE_LSF,
+        };
 
         // The joint-stereo bound must be clamped to sblimit for the
         // allocation reader.

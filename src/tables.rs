@@ -405,6 +405,115 @@ pub const TABLE_B2D: AllocTable = AllocTable {
 };
 
 // ---------------------------------------------------------------------------
+// MPEG-2 LSF allocation table (ISO/IEC 13818-3 §2.4.3.3 Table B.1 — also
+// known as "alloc_table_4" in libavcodec's `mpegaudiodata.c`). A single
+// consolidated table replaces the four MPEG-1 tables: sblimit = 30.
+//
+//   sb  0.. 3   nbal = 4   — 15 non-zero classes, every quantiser available
+//   sb  4..10   nbal = 3   —  7 non-zero classes
+//   sb 11..29   nbal = 2   —  3 non-zero classes
+//
+// The class lists are derived from libavcodec's `alloc_table_4` via the
+// quantiser-bit / step tables (indices 0..14 for nbal=4, indices {0,1,3..7}
+// for nbal=3, indices {0,1,3} for nbal=2). Each index maps back to the
+// `(bits, d)` pair used by the rest of the decoder:
+//   - Grouped (levels ∈ {3, 5, 9}): `d` positive = level count; `bits` is
+//     the shared codeword width.
+//   - Ungrouped: `bits` is the per-sample codeword width; `d = -(2^(bits-1) - 1)`.
+// Like the MPEG-1 tables, these constants come from an ISO standard and
+// are not copyrightable; the representation matches libmpg123/libavcodec
+// bit-for-bit as verified by ffmpeg decode cross-checks.
+// ---------------------------------------------------------------------------
+
+/// MPEG-2 LSF, nbal=4 block for subbands 0..3 — 15 non-zero classes.
+/// Ordering: grouped 3-lvl, grouped 5-lvl, 3-bit ungrouped, grouped 9-lvl,
+/// then ungrouped 4..15 bit.
+const BLOCK_4BIT_LSF: [AllocEntry; 16] = [
+    ae!(4, 0),
+    ae!(5, 3),
+    ae!(7, 5),
+    ae!(3, -3),
+    ae!(10, 9),
+    ae!(4, -7),
+    ae!(5, -15),
+    ae!(6, -31),
+    ae!(7, -63),
+    ae!(8, -127),
+    ae!(9, -255),
+    ae!(10, -511),
+    ae!(11, -1023),
+    ae!(12, -2047),
+    ae!(13, -4095),
+    ae!(14, -8191),
+];
+
+/// MPEG-2 LSF, nbal=3 block for subbands 4..10 — 7 non-zero classes.
+const BLOCK_3BIT_LSF: [AllocEntry; 8] = [
+    ae!(3, 0),
+    ae!(5, 3),
+    ae!(7, 5),
+    ae!(10, 9),
+    ae!(4, -7),
+    ae!(5, -15),
+    ae!(6, -31),
+    ae!(7, -63),
+];
+
+/// MPEG-2 LSF, nbal=2 block for subbands 11..29 — 3 non-zero classes.
+const BLOCK_2BIT_LSF: [AllocEntry; 4] = [ae!(2, 0), ae!(5, 3), ae!(7, 5), ae!(10, 9)];
+
+const ALLOC_LSF_LEN: usize = 4 * 16 + 7 * 8 + 19 * 4; // = 64 + 56 + 76 = 196
+
+const fn build_alloc_lsf() -> ([AllocEntry; ALLOC_LSF_LEN], [usize; 30]) {
+    let mut out = [AllocEntry { bits: 0, d: 0 }; ALLOC_LSF_LEN];
+    let mut off = [0usize; 30];
+    let mut pos = 0usize;
+    let mut sb = 0usize;
+    // sb 0..3: 4-bit block (4 × 16 = 64).
+    while sb < 4 {
+        off[sb] = pos;
+        let mut k = 0;
+        while k < 16 {
+            out[pos] = BLOCK_4BIT_LSF[k];
+            pos += 1;
+            k += 1;
+        }
+        sb += 1;
+    }
+    // sb 4..10: 3-bit block (7 × 8 = 56).
+    while sb < 11 {
+        off[sb] = pos;
+        let mut k = 0;
+        while k < 8 {
+            out[pos] = BLOCK_3BIT_LSF[k];
+            pos += 1;
+            k += 1;
+        }
+        sb += 1;
+    }
+    // sb 11..29: 2-bit block (19 × 4 = 76).
+    while sb < 30 {
+        off[sb] = pos;
+        let mut k = 0;
+        while k < 4 {
+            out[pos] = BLOCK_2BIT_LSF[k];
+            pos += 1;
+            k += 1;
+        }
+        sb += 1;
+    }
+    (out, off)
+}
+
+const ALLOC_LSF: ([AllocEntry; ALLOC_LSF_LEN], [usize; 30]) = build_alloc_lsf();
+/// MPEG-2 LSF consolidated allocation table (sblimit = 30).
+pub const TABLE_LSF: AllocTable = AllocTable {
+    sblimit: 30,
+    entries: &ALLOC_LSF.0,
+    offsets: &ALLOC_LSF.1,
+};
+
+// ---------------------------------------------------------------------------
 // Table selection — ISO/IEC 11172-3 Table 3-B.2 (§2.4.2.3).
 //
 // Maps (sample_rate_index, is_stereo, bitrate_index) → one of {B.2a, B.2b,
@@ -583,6 +692,44 @@ mod tests {
         for sb in 0..12 {
             assert_eq!(TABLE_B2D.nbal(sb), expected[sb]);
         }
+    }
+
+    #[test]
+    fn lsf_is_30_subbands_with_expected_nbal() {
+        assert_eq!(TABLE_LSF.sblimit, 30);
+        let expected: [u32; 30] = [
+            4, 4, 4, 4, // sb 0..3
+            3, 3, 3, 3, 3, 3, 3, // sb 4..10
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, // sb 11..29
+        ];
+        for sb in 0..30 {
+            assert_eq!(TABLE_LSF.nbal(sb), expected[sb], "nbal[{sb}]");
+        }
+    }
+
+    #[test]
+    fn lsf_first_subband_has_all_quantisers() {
+        // sb 0, nbal=4: allocation index 4 is the 9-level grouped quantiser
+        // (10-bit codeword) per ISO 13818-3 §2.4.3.3.
+        let (bits, d) = TABLE_LSF.class(0, 4);
+        assert_eq!(bits, 10);
+        assert_eq!(d, 9);
+        // allocation 1 is the 3-level grouped quantiser (5-bit codeword).
+        let (bits, d) = TABLE_LSF.class(0, 1);
+        assert_eq!(bits, 5);
+        assert_eq!(d, 3);
+    }
+
+    #[test]
+    fn lsf_last_subband_is_2bit_grouped_only() {
+        // sb 29, nbal=2: allocation 1 = 3-level, 2 = 5-level, 3 = 9-level.
+        assert_eq!(TABLE_LSF.nbal(29), 2);
+        let (bits, d) = TABLE_LSF.class(29, 1);
+        assert_eq!((bits, d), (5, 3));
+        let (bits, d) = TABLE_LSF.class(29, 2);
+        assert_eq!((bits, d), (7, 5));
+        let (bits, d) = TABLE_LSF.class(29, 3);
+        assert_eq!((bits, d), (10, 9));
     }
 
     #[test]

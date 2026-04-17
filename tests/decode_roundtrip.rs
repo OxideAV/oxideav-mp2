@@ -384,3 +384,80 @@ fn rms_diff_vs_ffmpeg_stereo_48k_64k_joint() {
     // bound is activated — keep the 0.05 bound.
     assert!(r < 0.1, "RMS diff too high: {r}");
 }
+
+#[test]
+fn rms_diff_vs_ffmpeg_mono_24k_64k_lsf() {
+    if !ffmpeg_on_path() {
+        eprintln!("skip: ffmpeg not on PATH");
+        return;
+    }
+    // MPEG-2 LSF: 24 kHz mono at 64 kbps.
+    let r = compare_against_ffmpeg(24_000, 1, 64, 1000.0);
+    println!("RMS diff mono 24k 64k (LSF): {r}");
+    assert!(r < 0.05, "RMS diff too high: {r}");
+}
+
+#[test]
+fn rms_diff_vs_ffmpeg_stereo_22k_96k_lsf() {
+    if !ffmpeg_on_path() {
+        eprintln!("skip: ffmpeg not on PATH");
+        return;
+    }
+    // MPEG-2 LSF: 22.05 kHz stereo at 96 kbps.
+    let r = compare_against_ffmpeg(22_050, 2, 96, 1000.0);
+    println!("RMS diff stereo 22.05k 96k (LSF): {r}");
+    assert!(r < 0.05, "RMS diff too high: {r}");
+}
+
+/// Hand-crafted MPEG-2 LSF frame with all-zero payload (no samples
+/// transmitted in any subband → silent PCM). Exercises the LSF header +
+/// table-selection path without needing ffmpeg to generate the bitstream.
+#[test]
+fn decode_mpeg2_lsf_silence_frame_24k_mono_64k() {
+    // Header word (big-endian):
+    //   sync=0xFFF, id=0 (MPEG-2 LSF), layer=10 (Layer II),
+    //   prot=1 (no CRC), bitrate_index=1000 (=8 → 64 kbps on LSF ladder),
+    //   sr_index=01 (=24 kHz on LSF table), pad=0, priv=0,
+    //   mode=11 (mono), modeext=0, cp=0, orig=0, emph=00.
+    // bits:    31..20  19  18..17  16  15..12   11..10  9  8  7..6  5..4  3  2  1..0
+    // values:  0xFFF   0   10      1   1000     01      0  0  11    00    0  0  00
+    // id=0 (MPEG-2 LSF) — bit 19 is 0, contributes nothing; omitted from the
+    // expression so clippy's identity_op lint stays happy.
+    let w: u32 = 0xFFF_u32 << 20 | 0b10 << 17 | 1 << 16 | 0b1000 << 12 | 0b01 << 10 | 0b11 << 6;
+    let header = w.to_be_bytes();
+    // frame_length = 144 * 64000 / 24000 = 384 bytes.
+    let mut frame = vec![0u8; 384];
+    frame[..4].copy_from_slice(&header);
+    // Remainder is already zeros — every allocation index reads as 0
+    // ("no samples"), scalefactors are therefore not transmitted, and
+    // the sample payload is empty. PCM output must be silence.
+
+    let mut params = CodecParameters::audio(CodecId::new("mp2"));
+    params.media_type = MediaType::Audio;
+    let mut dec = make_decoder(&params).expect("construct mp2 decoder");
+    let pkt = Packet {
+        stream_index: 0,
+        time_base: TimeBase::new(1, 24_000),
+        pts: None,
+        dts: None,
+        duration: None,
+        flags: Default::default(),
+        data: frame,
+    };
+    dec.send_packet(&pkt).expect("send_packet");
+    let frame = dec.receive_frame().expect("receive_frame");
+    let af = match frame {
+        oxideav_core::Frame::Audio(a) => a,
+        _ => panic!("expected audio frame"),
+    };
+    assert_eq!(af.sample_rate, 24_000, "LSF 24 kHz sample rate");
+    assert_eq!(af.channels, 1, "LSF mono");
+    assert_eq!(af.samples, 1152, "Layer II always 1152 samples/frame");
+    // Decode output PCM as s16 — every sample must be 0 (silence).
+    let bytes = &af.data[0];
+    assert_eq!(bytes.len(), 1152 * 2, "mono s16 frame");
+    for chunk in bytes.chunks_exact(2) {
+        let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+        assert_eq!(s, 0, "expected silence sample");
+    }
+}
