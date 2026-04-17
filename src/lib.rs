@@ -1,15 +1,20 @@
-//! MPEG-1 Audio Layer II (MP2 / MUSICAM) decoder.
+//! MPEG Audio Layer II (MP2 / MUSICAM) codec.
 //!
-//! Implements the full Layer II decode pipeline per ISO/IEC 11172-3:
-//! frame header + CRC skip → bit-allocation decode (tables B.2a–d) →
-//! SCFSI + scalefactor decode → 3-/5-/9-level grouped-sample ungrouping
-//! and per-sample requantisation → 32-band polyphase subband synthesis.
+//! Implements the full Layer II decode pipeline per ISO/IEC 11172-3 and
+//! 13818-3: frame header + CRC skip → bit-allocation decode (tables
+//! B.2a–d for MPEG-1, consolidated LSF table for MPEG-2) → SCFSI +
+//! scalefactor decode → 3-/5-/9-level grouped-sample ungrouping and
+//! per-sample requantisation → 32-band polyphase subband synthesis.
 //!
-//! Supports all MPEG-1 sample rates (32 / 44.1 / 48 kHz), every stereo
-//! mode (mono / stereo / joint-stereo / dual-channel), and all valid
-//! bitrate/mode combinations.
+//! The encoder targets CBR Layer II at any of the supported sampling
+//! rates (32 / 44.1 / 48 kHz MPEG-1 or 16 / 22.05 / 24 kHz MPEG-2 LSF),
+//! mono or plain stereo, no CRC, no joint stereo.
 //!
-//! MPEG-2 LSF (ISO 13818-3) and MPEG-2.5 are rejected with `Unsupported`.
+//! Supports MPEG-1 sample rates (32 / 44.1 / 48 kHz) and MPEG-2 LSF
+//! (16 / 22.05 / 24 kHz); every stereo mode (mono / stereo / joint-stereo
+//! / dual-channel) on decode, plain stereo / mono on encode.
+//!
+//! MPEG-2.5 is rejected with `Unsupported`.
 
 #![allow(
     clippy::needless_range_loop,

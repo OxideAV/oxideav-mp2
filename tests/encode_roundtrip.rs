@@ -208,6 +208,55 @@ fn roundtrip_stereo_48k_192kbps_440hz_tone() {
 }
 
 #[test]
+fn roundtrip_mpeg2_lsf_stereo_24k_96kbps_1khz_tone() {
+    // MPEG-2 LSF Layer II at 24 kHz / 96 kbps stereo, 1 kHz sine. This
+    // exercises the `version_id = 0b10` header path, the LSF bitrate
+    // ladder, the LSF sample-rate index table, and the consolidated
+    // TABLE_LSF bit-allocation table. Uses the same MPEG-1 + MPEG-2
+    // decoder already in the crate.
+    let sr = 24_000u32;
+    let freq = 1000.0f32;
+    let pcm = make_tone(2.0, sr, 2, freq);
+    let encoded = encode_all(&pcm, sr, 2, 96);
+    assert!(!encoded.is_empty(), "LSF encoder produced no data");
+
+    // Sanity-check the emitted header: first frame must decode as
+    // MPEG-2 LSF at 24 kHz / 96 kbps.
+    let first_hdr = parse_header(&encoded).expect("parse LSF header");
+    assert_eq!(first_hdr.sample_rate, sr);
+    assert_eq!(first_hdr.bitrate_kbps, 96);
+
+    let (decoded, dec_sr, dec_ch) = decode_all(&encoded);
+    assert_eq!(dec_sr, sr);
+    assert_eq!(dec_ch, 2);
+    assert!(
+        decoded.len() > 20_000,
+        "decoded too few samples: {}",
+        decoded.len()
+    );
+
+    let ref_all: Vec<i16> = pcm
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let ref_left: Vec<i16> = ref_all.chunks_exact(2).map(|c| c[0]).collect();
+    let dec_left: Vec<i16> = decoded.chunks_exact(2).map(|c| c[0]).collect();
+
+    let mut best = -1000.0f64;
+    for offset in 0..1500 {
+        let p = psnr_db(&ref_left, &dec_left, offset);
+        if p > best {
+            best = p;
+        }
+    }
+    println!("roundtrip PSNR (MPEG-2 LSF, stereo L, 24k, 96kbps, 1kHz): {best:.2} dB");
+    // Layer II at 24 kHz / 96 kbps has plenty of headroom for a pure
+    // sine; 20 dB is the crate-wide Layer II "signal clearly dominates"
+    // bar.
+    assert!(best >= 20.0, "LSF PSNR too low: {best:.2} dB");
+}
+
+#[test]
 fn roundtrip_mono_32k_128kbps_impulse_safety() {
     // Noise-like input: repeatedly hit the encoder with a white noise
     // buffer and assert the decoder doesn't blow up or emit NaN.

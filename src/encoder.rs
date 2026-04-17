@@ -1,10 +1,16 @@
-//! Minimum-viable CBR MPEG-1 Audio Layer II encoder.
+//! Minimum-viable CBR MPEG Audio Layer II encoder.
 //!
 //! Scope:
-//! - MPEG-1 Layer II, 32 / 44.1 / 48 kHz, mono or dual-channel stereo
-//!   (no joint stereo, no CRC).
+//! - MPEG-1 Layer II, 32 / 44.1 / 48 kHz (mono or dual-channel stereo;
+//!   no joint stereo, no CRC).
+//! - MPEG-2 LSF Layer II (ISO/IEC 13818-3 §2.4), 16 / 22.05 / 24 kHz
+//!   (same channel modes, same "no CRC" restriction). Selected
+//!   automatically based on `sample_rate` — any LSF rate emits the
+//!   MPEG-2 header (`version_id = 0b10`), the LSF bitrate ladder, and
+//!   the consolidated LSF bit-allocation table (`TABLE_LSF`).
 //! - One CBR bitrate per encoder instance, from the standard Layer II
-//!   ladder (32..=384 kbps, subject to channel-mode restrictions).
+//!   ladder (MPEG-1: 32..=384 kbps, subject to channel-mode restrictions;
+//!   MPEG-2 LSF: 8..=160 kbps, no mode restrictions).
 //! - Greedy, non-psychoacoustic bit allocation: subbands are iteratively
 //!   awarded quantiser upgrades in decreasing order of "signal energy
 //!   per extra-bit cost" until no more bits are available. Cost accounting
@@ -39,8 +45,19 @@ use oxideav_core::{
 
 use crate::analysis::{analyze_frame, AnalysisState};
 use crate::bitwriter::BitWriter;
-use crate::tables::{scalefactor_magnitude, select_alloc_table, AllocEntry, AllocTable};
+use crate::tables::{scalefactor_magnitude, select_alloc_table, AllocEntry, AllocTable, TABLE_LSF};
 use crate::CODEC_ID_STR;
+
+/// Which MPEG Audio version the encoder is emitting. Selects the header
+/// `version_id` bit, the sample-rate / bitrate ladder, and the bit
+/// allocation table. MPEG-2.5 is not in scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EncVersion {
+    /// MPEG-1 Layer II, 32 / 44.1 / 48 kHz.
+    Mpeg1,
+    /// MPEG-2 LSF Layer II (ISO/IEC 13818-3 §2.4), 16 / 22.05 / 24 kHz.
+    Mpeg2Lsf,
+}
 
 /// Build a Layer II CBR encoder for the requested parameters.
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
@@ -53,36 +70,49 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let sample_rate = params
         .sample_rate
         .ok_or_else(|| Error::invalid("MP2 encoder: missing sample_rate"))?;
-    match sample_rate {
-        32_000 | 44_100 | 48_000 => {}
+    // MPEG-2 LSF (ISO/IEC 13818-3 §2.4) adds the 16/22.05/24 kHz band;
+    // everything else (including MPEG-2.5's 8/11.025/12 kHz) is rejected.
+    let version = match sample_rate {
+        32_000 | 44_100 | 48_000 => EncVersion::Mpeg1,
+        16_000 | 22_050 | 24_000 => EncVersion::Mpeg2Lsf,
         _ => {
             return Err(Error::unsupported(format!(
-                "MP2 encoder: unsupported sample rate {sample_rate} (need 32000/44100/48000)"
+                "MP2 encoder: unsupported sample rate {sample_rate} (need 16000/22050/24000/32000/44100/48000)"
             )));
         }
-    }
+    };
 
     let bitrate_kbps = params.bit_rate.map(|b| (b / 1000) as u32).unwrap_or(192);
-    let br_index = bitrate_to_index(bitrate_kbps).ok_or_else(|| {
-        Error::unsupported(format!(
-            "MP2 encoder: unsupported bitrate {bitrate_kbps} kbps"
-        ))
-    })?;
+    let br_index = match version {
+        EncVersion::Mpeg1 => bitrate_to_index(bitrate_kbps).ok_or_else(|| {
+            Error::unsupported(format!(
+                "MP2 encoder: unsupported MPEG-1 bitrate {bitrate_kbps} kbps"
+            ))
+        })?,
+        EncVersion::Mpeg2Lsf => bitrate_to_index_lsf(bitrate_kbps).ok_or_else(|| {
+            Error::unsupported(format!(
+                "MP2 encoder: unsupported MPEG-2 LSF bitrate {bitrate_kbps} kbps"
+            ))
+        })?,
+    };
 
-    // Per ISO/IEC 11172-3 Table 3-B.2, Layer II forbids some (mode, bitrate)
-    // combos. Enforce the same subset the header parser does.
-    match channels {
-        1 if matches!(bitrate_kbps, 224 | 256 | 320 | 384) => {
-            return Err(Error::invalid(format!(
-                "MP2 encoder: bitrate {bitrate_kbps} kbps not permitted in mono mode"
-            )));
+    // Per ISO/IEC 11172-3 Table 3-B.2, Layer II MPEG-1 forbids some
+    // (mode, bitrate) combos. MPEG-2 LSF (§13818-3 §2.4.2.3) relaxes
+    // these — all 14 LSF bitrates are permitted in any channel mode.
+    if matches!(version, EncVersion::Mpeg1) {
+        match channels {
+            1 if matches!(bitrate_kbps, 224 | 256 | 320 | 384) => {
+                return Err(Error::invalid(format!(
+                    "MP2 encoder: bitrate {bitrate_kbps} kbps not permitted in mono mode"
+                )));
+            }
+            2 if matches!(bitrate_kbps, 32 | 48) => {
+                return Err(Error::invalid(format!(
+                    "MP2 encoder: bitrate {bitrate_kbps} kbps not permitted in stereo modes"
+                )));
+            }
+            _ => {}
         }
-        2 if matches!(bitrate_kbps, 32 | 48) => {
-            return Err(Error::invalid(format!(
-                "MP2 encoder: bitrate {bitrate_kbps} kbps not permitted in stereo modes"
-            )));
-        }
-        _ => {}
     }
 
     let sample_format = params.sample_format.unwrap_or(SampleFormat::S16);
@@ -92,10 +122,13 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         )));
     }
 
-    let sr_index = match sample_rate {
-        44_100 => 0u8,
-        48_000 => 1,
-        32_000 => 2,
+    let sr_index = match (version, sample_rate) {
+        (EncVersion::Mpeg1, 44_100) => 0u8,
+        (EncVersion::Mpeg1, 48_000) => 1,
+        (EncVersion::Mpeg1, 32_000) => 2,
+        (EncVersion::Mpeg2Lsf, 22_050) => 0,
+        (EncVersion::Mpeg2Lsf, 24_000) => 1,
+        (EncVersion::Mpeg2Lsf, 16_000) => 2,
         _ => unreachable!(),
     };
 
@@ -109,6 +142,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 
     Ok(Box::new(Mp2Encoder {
         output_params: output,
+        version,
         channels,
         sample_rate,
         bitrate_kbps,
@@ -126,6 +160,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 
 struct Mp2Encoder {
     output_params: CodecParameters,
+    version: EncVersion,
     channels: u16,
     sample_rate: u32,
     bitrate_kbps: u32,
@@ -229,11 +264,15 @@ impl Mp2Encoder {
             analyze_frame(&mut self.analysis_state[ch], &pcm_in[ch], &mut sub[ch]);
         }
 
-        // --- 2. Pick allocation table (channel-mode + bitrate-dependent) ---
-        // We always emit plain stereo / mono (no joint stereo), so the
-        // `stereo` flag for table selection is simply `n_ch == 2`.
+        // --- 2. Pick allocation table (channel-mode + bitrate-dependent for
+        // MPEG-1, consolidated TABLE_LSF for MPEG-2 LSF). We always emit
+        // plain stereo / mono (no joint stereo), so the `stereo` flag for
+        // MPEG-1 table selection is simply `n_ch == 2`.
         let stereo = n_ch == 2;
-        let table = select_alloc_table(self.sample_rate, stereo, self.br_index);
+        let table: &AllocTable = match self.version {
+            EncVersion::Mpeg1 => select_alloc_table(self.sample_rate, stereo, self.br_index),
+            EncVersion::Mpeg2Lsf => &TABLE_LSF,
+        };
 
         // --- 3. Per-(channel, subband, part) scalefactor indices ---
         // Layer II: subband has 36 samples = 3 × 12-sample parts. For each
@@ -362,13 +401,21 @@ impl Mp2Encoder {
         let mut w = BitWriter::with_capacity(frame_bytes);
 
         // Header (32 bits).
-        // syncword 0xFFF, ID=1 (MPEG-1), layer=10 (Layer II), protection=1
-        // (no CRC), bitrate_index, sampling_frequency_index, padding bit,
-        // private bit=0, mode (00=stereo, 11=mono for our case — we emit
-        // plain stereo, not joint), mode_extension=0, copyright=0,
-        // original=0, emphasis=0.
+        // syncword 0xFFF, ID (1 = MPEG-1, 0 = MPEG-2 LSF), layer=10
+        // (Layer II), protection=1 (no CRC), bitrate_index,
+        // sampling_frequency_index, padding bit, private bit=0, mode
+        // (00=stereo, 11=mono for our case — we emit plain stereo, not
+        // joint), mode_extension=0, copyright=0, original=0, emphasis=0.
+        //
+        // Interpreted as the 2-bit version_id of the decoder, (sync LSB, ID)
+        // decodes to 0b11 for MPEG-1 and 0b10 for MPEG-2 LSF, which matches
+        // ISO/IEC 13818-3 §2.4.1.
         w.write_u32(0xFFF, 12);
-        w.write_u32(1, 1); // ID = MPEG-1
+        let id_bit = match self.version {
+            EncVersion::Mpeg1 => 1,
+            EncVersion::Mpeg2Lsf => 0,
+        };
+        w.write_u32(id_bit, 1);
         w.write_u32(0b10, 2); // Layer II
         w.write_u32(1, 1); // protection_bit = 1 (no CRC)
         w.write_u32(self.br_index, 4);
@@ -511,6 +558,16 @@ fn bitrate_to_index(kbps: u32) -> Option<u32> {
     const LUT: [u32; 14] = [
         32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
     ];
+    LUT.iter()
+        .position(|&v| v == kbps)
+        .map(|idx| (idx + 1) as u32)
+}
+
+/// Reverse-map a bitrate in kbps to its 4-bit header-field index (1..=14)
+/// on the MPEG-2 LSF Layer II ladder (ISO/IEC 13818-3 §2.4.2.3):
+/// `[8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]`.
+fn bitrate_to_index_lsf(kbps: u32) -> Option<u32> {
+    const LUT: [u32; 14] = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
     LUT.iter()
         .position(|&v| v == kbps)
         .map(|idx| (idx + 1) as u32)
