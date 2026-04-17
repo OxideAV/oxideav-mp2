@@ -6,7 +6,7 @@ rust-version = "1.80"
 license = "MIT"
 repository = "https://github.com/OxideAV/oxideav-mp2"
 authors = ["Mark Karpeles"]
-description = "Pure-Rust MPEG-1 Audio Layer II (MP2) decoder"
+description = "Pure-Rust MPEG-1 / MPEG-2 LSF Audio Layer II (MP2) encoder and decoder"
 
 readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-mp2"
