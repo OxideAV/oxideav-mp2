@@ -51,7 +51,11 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
 struct Mp2Decoder {
     codec_id: CodecId,
     time_base: TimeBase,
-    pending: Option<Packet>,
+    /// Current input packet + byte offset of the next unparsed MP2 frame.
+    /// AVI (and a few other containers) pack multiple 1152-sample MP2
+    /// frames into a single container chunk; we need to iterate them
+    /// rather than decode only the first.
+    pending: Option<(Packet, usize)>,
     synth: [SynthesisState; 2],
     eof: bool,
 }
@@ -67,19 +71,57 @@ impl Decoder for Mp2Decoder {
                 "MP2 decoder: receive_frame must be called before sending another packet",
             ));
         }
-        self.pending = Some(packet.clone());
+        self.pending = Some((packet.clone(), 0));
         Ok(())
     }
 
     fn receive_frame(&mut self) -> Result<Frame> {
-        let Some(pkt) = self.pending.take() else {
+        let (pkt, mut offset) = match self.pending.take() {
+            Some(p) => p,
+            None => {
+                return if self.eof {
+                    Err(Error::Eof)
+                } else {
+                    Err(Error::NeedMore)
+                }
+            }
+        };
+
+        // Skip any zero padding between frames — some muxers pad to
+        // an even byte boundary or up to block_align.
+        while offset < pkt.data.len() && pkt.data[offset] == 0 {
+            offset += 1;
+        }
+        if offset >= pkt.data.len() {
             return if self.eof {
                 Err(Error::Eof)
             } else {
                 Err(Error::NeedMore)
             };
-        };
-        self.decode_packet(&pkt)
+        }
+
+        match self.decode_one(&pkt, offset) {
+            Ok((frame, consumed)) => {
+                let new_offset = offset + consumed;
+                if new_offset < pkt.data.len() {
+                    self.pending = Some((pkt, new_offset));
+                }
+                Ok(frame)
+            }
+            Err(e) => {
+                // Parse failure anywhere after the first frame of a
+                // multi-frame chunk: drop the rest of the packet rather
+                // than poison the stream.
+                if offset == 0 {
+                    return Err(e);
+                }
+                if self.eof {
+                    Err(Error::Eof)
+                } else {
+                    Err(Error::NeedMore)
+                }
+            }
+        }
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -101,9 +143,21 @@ impl Decoder for Mp2Decoder {
 }
 
 impl Mp2Decoder {
-    fn decode_packet(&mut self, pkt: &Packet) -> Result<Frame> {
-        let data = &pkt.data;
+    /// Parse and decode one MP2 frame starting at `start` inside `pkt.data`.
+    /// Returns the decoded audio frame + the number of bytes consumed (the
+    /// frame's declared length). The caller advances by that many bytes
+    /// before calling again.
+    fn decode_one(&mut self, pkt: &Packet, start: usize) -> Result<(Frame, usize)> {
+        let full_data = &pkt.data;
+        let data = &full_data[start..];
         let hdr = parse_header(data)?;
+        let frame_len = hdr.frame_length();
+        if data.len() < frame_len {
+            return Err(Error::invalid(format!(
+                "mp2: short frame: need {frame_len} bytes, got {}",
+                data.len()
+            )));
+        }
         let channels = hdr.channels() as usize;
 
         // Skip past the header and optional CRC-16.
@@ -114,13 +168,6 @@ impl Mp2Decoder {
             }
             // CRC not verified.
             offset += 2;
-        }
-        if data.len() < hdr.frame_length() {
-            return Err(Error::invalid(format!(
-                "mp2: short frame: need {} bytes, got {}",
-                hdr.frame_length(),
-                data.len()
-            )));
         }
 
         // MPEG-1 picks one of four tables from (sample_rate, mode, bitrate);
@@ -144,7 +191,7 @@ impl Mp2Decoder {
         // allocation reader.
         let bound = (hdr.bound as usize).min(table.sblimit);
 
-        let mut br = BitReader::new(&data[offset..hdr.frame_length()]);
+        let mut br = BitReader::new(&data[offset..frame_len]);
 
         // --- 1. Bit allocation, SCFSI, scalefactors ---
         let side = read_layer2_side(&mut br, table, hdr.mode, bound)?;
@@ -187,15 +234,28 @@ impl Mp2Decoder {
             }
         }
 
-        Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: channels as u16,
-            sample_rate: hdr.sample_rate,
-            samples: total_samples,
-            pts: pkt.pts,
-            time_base: self.time_base,
-            data: vec![out_bytes],
-        }))
+        // PTS: the container's packet pts applies to the first frame
+        // in the chunk. Subsequent frames step by the MP2 constant of
+        // 1152 samples (in this sample-rate time_base). AVI's
+        // per-frame pts is counted in samples (see avi demuxer) so
+        // this produces monotonically-correct values.
+        let frame_pts = pkt
+            .pts
+            .map(|p| p + (start as i64 / frame_len as i64) * 1152);
+        let _ = full_data;
+
+        Ok((
+            Frame::Audio(AudioFrame {
+                format: SampleFormat::S16,
+                channels: channels as u16,
+                sample_rate: hdr.sample_rate,
+                samples: total_samples,
+                pts: frame_pts,
+                time_base: self.time_base,
+                data: vec![out_bytes],
+            }),
+            frame_len,
+        ))
     }
 }
 
