@@ -44,9 +44,9 @@ use oxideav_core::{
 };
 
 use crate::analysis::{analyze_frame, AnalysisState};
-use crate::bitwriter::BitWriter;
 use crate::tables::{scalefactor_magnitude, select_alloc_table, AllocEntry, AllocTable, TABLE_LSF};
 use crate::CODEC_ID_STR;
+use oxideav_core::bits::BitWriter;
 
 /// Which MPEG Audio version the encoder is emitting. Selects the header
 /// `version_id` bit, the sample-rate / bitrate ladder, and the bit

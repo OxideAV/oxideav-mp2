@@ -20,8 +20,8 @@
 //!   s' = (2*i - (L-1)) / L
 //! which is then multiplied by the scalefactor as usual.
 
-use crate::bitreader::BitReader;
 use crate::tables::{scalefactor_magnitude, AllocEntry, AllocTable};
+use oxideav_core::bits::BitReader;
 use oxideav_core::{Error, Result};
 
 /// Decoded subband-sample buffer: `samples[ch][sb][i]`, `i = 0..36`.

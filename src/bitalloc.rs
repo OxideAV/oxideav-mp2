@@ -12,9 +12,9 @@
 //! 1/3-frame "sbgroup" — Layer II splits its 36-sample subband into three
 //! 12-sample groups, §2.4.2.1).
 
-use crate::bitreader::BitReader;
 use crate::header::Mode;
 use crate::tables::AllocTable;
+use oxideav_core::bits::BitReader;
 use oxideav_core::{Error, Result};
 
 /// Per-subband, per-channel bit allocation and scalefactor information.

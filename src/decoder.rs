@@ -29,11 +29,11 @@ use oxideav_core::{
 };
 
 use crate::bitalloc::{read_layer2_side, validate_allocations};
-use crate::bitreader::BitReader;
 use crate::header::{parse_header, Mode, Version};
 use crate::requant::{read_samples, ReadState};
 use crate::synth::SynthesisState;
 use crate::tables::{select_alloc_table, TABLE_LSF};
+use oxideav_core::bits::BitReader;
 
 /// Build a Layer II decoder. The codec parameters are consulted for the
 /// canonical `codec_id` only — everything else is derived from the
