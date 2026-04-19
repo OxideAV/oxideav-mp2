@@ -34,7 +34,7 @@ pub mod synth;
 pub mod tables;
 
 use oxideav_codec::{CodecRegistry, Decoder, Encoder};
-use oxideav_core::{CodecCapabilities, CodecId, CodecParameters, Result};
+use oxideav_core::{CodecCapabilities, CodecId, CodecParameters, CodecTag, Result};
 
 pub const CODEC_ID_STR: &str = "mp2";
 
@@ -44,14 +44,20 @@ pub fn register(reg: &mut CodecRegistry) {
         .with_intra_only(true)
         .with_max_channels(2)
         .with_max_sample_rate(48_000);
-    reg.register_decoder_impl(CodecId::new(CODEC_ID_STR), dec_caps, make_decoder);
+    let cid = CodecId::new(CODEC_ID_STR);
+    reg.register_decoder_impl(cid.clone(), dec_caps, make_decoder);
 
     let enc_caps = CodecCapabilities::audio("mp2_sw_enc")
         .with_lossy(true)
         .with_intra_only(true)
         .with_max_channels(2)
         .with_max_sample_rate(48_000);
-    reg.register_encoder_impl(CodecId::new(CODEC_ID_STR), enc_caps, make_encoder);
+    reg.register_encoder_impl(cid.clone(), enc_caps, make_encoder);
+
+    // AVI / WAVEFORMATEX tag: WAVE_FORMAT_MPEG = 0x0050 — MPEG-1 Audio
+    // Layer I/II. Layer III (MP3) has its own tag 0x0055 owned by the
+    // oxideav-mp3 crate.
+    reg.claim_tag(cid, CodecTag::wave_format(0x0050), 10, None);
 }
 
 fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
