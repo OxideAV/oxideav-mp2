@@ -409,6 +409,22 @@ fn rms_diff_vs_ffmpeg_stereo_22k_96k_lsf() {
     assert!(r < 0.05, "RMS diff too high: {r}");
 }
 
+/// MPEG-2 LSF Layer II at 16 kHz / 128 kbit/s stereo — the configuration
+/// the task explicitly calls out. The joint-stereo intensity-stereo path
+/// is already exercised by [`rms_diff_vs_ffmpeg_stereo_48k_64k_joint`]
+/// (shared-allocation subbands above the bound, per-channel scalefactors);
+/// this test adds LSF coverage for the same path.
+#[test]
+fn rms_diff_vs_ffmpeg_stereo_16k_128k_lsf() {
+    if !ffmpeg_on_path() {
+        eprintln!("skip: ffmpeg not on PATH");
+        return;
+    }
+    let r = compare_against_ffmpeg(16_000, 2, 128, 1000.0);
+    println!("RMS diff stereo 16k 128k (LSF): {r}");
+    assert!(r < 0.05, "RMS diff too high: {r}");
+}
+
 /// Hand-crafted MPEG-2 LSF frame with all-zero payload (no samples
 /// transmitted in any subband → silent PCM). Exercises the LSF header +
 /// table-selection path without needing ffmpeg to generate the bitstream.
