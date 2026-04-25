@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.5...v0.0.6) - 2026-04-25
+
+### Other
+
+- drop oxideav-codec/oxideav-container shims, import from oxideav-core
+- document + test Layer II intensity stereo
+- decode every frame in a multi-frame packet
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.4...v0.0.5) - 2026-04-19
 
 ### Other
