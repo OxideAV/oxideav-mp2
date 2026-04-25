@@ -1,4 +1,4 @@
-//! MP2 packet → AudioFrame decoder, wired into [`oxideav_codec::Decoder`].
+//! MP2 packet → AudioFrame decoder, wired into [`oxideav_core::Decoder`].
 //!
 //! # Layout of one Layer II frame (ISO/IEC 11172-3 §2.4.1 + §2.4.2):
 //! ```text
@@ -23,7 +23,7 @@
 //! - Free-format and reserved bitrate/sample-rate indices are rejected at
 //!   header parse time.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };
