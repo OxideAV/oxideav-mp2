@@ -163,9 +163,16 @@ fn decode_all_to_pcm(data: &[u8]) -> (Vec<i16>, u32, u16) {
     params.media_type = MediaType::Audio;
     let mut dec = make_decoder(&params).expect("construct mp2 decoder");
     let mut samples: Vec<i16> = Vec::new();
+    // Stream-level rate/channels live in the MP2 frame header now.
     let mut sr = 0u32;
     let mut ch = 0u16;
     for (i, fr) in split_frames(data).into_iter().enumerate() {
+        if sr == 0 {
+            if let Ok(h) = parse_header(fr) {
+                sr = h.sample_rate;
+                ch = h.channels();
+            }
+        }
         let pkt = Packet {
             stream_index: 0,
             time_base: TimeBase::new(1, 48_000),
@@ -182,8 +189,6 @@ fn decode_all_to_pcm(data: &[u8]) -> (Vec<i16>, u32, u16) {
                     oxideav_core::Frame::Audio(a) => a,
                     _ => panic!("expected audio frame"),
                 };
-                sr = af.sample_rate;
-                ch = af.channels;
                 let bytes = &af.data[0];
                 for chunk in bytes.chunks_exact(2) {
                     samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
@@ -466,8 +471,8 @@ fn decode_mpeg2_lsf_silence_frame_24k_mono_64k() {
         oxideav_core::Frame::Audio(a) => a,
         _ => panic!("expected audio frame"),
     };
-    assert_eq!(af.sample_rate, 24_000, "LSF 24 kHz sample rate");
-    assert_eq!(af.channels, 1, "LSF mono");
+    // Stream-level rate/channels live in the MP2 frame header (LSF 24
+    // kHz mono is built explicitly above).
     assert_eq!(af.samples, 1152, "Layer II always 1152 samples/frame");
     // Decode output PCM as s16 — every sample must be 0 (silence).
     let bytes = &af.data[0];

@@ -25,7 +25,7 @@
 
 use oxideav_core::Decoder;
 use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
+    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result,
 };
 
 use crate::bitalloc::{read_layer2_side, validate_allocations};
@@ -41,7 +41,6 @@ use oxideav_core::bits::BitReader;
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     Ok(Box::new(Mp2Decoder {
         codec_id: params.codec_id.clone(),
-        time_base: TimeBase::new(1, 48_000),
         pending: None,
         synth: [SynthesisState::new(), SynthesisState::new()],
         eof: false,
@@ -50,7 +49,6 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
 
 struct Mp2Decoder {
     codec_id: CodecId,
-    time_base: TimeBase,
     /// Current input packet + byte offset of the next unparsed MP2 frame.
     /// AVI (and a few other containers) pack multiple 1152-sample MP2
     /// frames into a single container chunk; we need to iterate them
@@ -209,7 +207,6 @@ impl Mp2Decoder {
         let subband_samples = read_samples(&mut br, &rs)?;
 
         // --- 3. 36 synthesis passes per channel → 1152 PCM samples/channel ---
-        self.time_base = TimeBase::new(1, hdr.sample_rate as i64);
         let mut pcm = vec![[0.0f32; 1152]; channels];
         for step in 0..36 {
             for ch in 0..channels {
@@ -246,12 +243,8 @@ impl Mp2Decoder {
 
         Ok((
             Frame::Audio(AudioFrame {
-                format: SampleFormat::S16,
-                channels: channels as u16,
-                sample_rate: hdr.sample_rate,
                 samples: total_samples,
                 pts: frame_pts,
-                time_base: self.time_base,
                 data: vec![out_bytes],
             }),
             frame_len,
