@@ -51,13 +51,32 @@ rejected at sync-check time.
 
 ## Encoder
 
-CBR Layer II encoder covering MPEG-1 (32 / 44.1 / 48 kHz) and MPEG-2
-LSF (16 / 22.05 / 24 kHz). Emits mono or plain stereo; joint-stereo,
-CRC-16, and free-format are not produced. Bitrate comes from
-`params.bit_rate` and must land on the standard ladder for the chosen
-version — MPEG-1 32..=384 kbps (subject to Table 3-B.2 mode
-restrictions), MPEG-2 LSF 8..=160 kbps (all permitted in any mode).
-Input must be interleaved `SampleFormat::S16`.
+Layer II encoder covering MPEG-1 (32 / 44.1 / 48 kHz) and MPEG-2 LSF
+(16 / 22.05 / 24 kHz). Emits mono, plain stereo, or joint stereo
+(intensity); CRC-16 and free-format are not produced. Both **CBR**
+and **VBR** are supported via the [`oxideav_mp2::options`] schema
+(see below). Bitrate comes from `params.bit_rate` (CBR slot) or the
+`vbr_quality` knob; it must land on the standard ladder for the
+chosen version — MPEG-1 32..=384 kbps (subject to Table 3-B.2 mode
+restrictions in CBR mode), MPEG-2 LSF 8..=160 kbps (all permitted in
+any mode). Input must be interleaved `SampleFormat::S16`.
+
+### Encoder options
+
+Two switches are exposed via `CodecParameters::options`:
+
+- `vbr_quality` (`u32`, 0..=9): switch the encoder to **VBR**. Each
+  frame's bitrate slot is picked independently from the standard
+  ladder. The encoder also prepends a Xing/Info header frame on
+  flush, so downstream tools (ffmpeg, mediainfo) can show an accurate
+  average bitrate.
+- `joint_stereo` (`bool`): enable Layer II **intensity stereo** in
+  stereo inputs. The encoder picks the smallest header-encodable
+  bound (4 / 8 / 12 / 16) at which all upper subbands are L/R
+  correlated enough to share spectral coefficients.
+
+The two options compose freely (CBR + joint stereo, VBR + joint
+stereo, etc.).
 
 ```rust
 use oxideav_codec::CodecRegistry;
@@ -83,10 +102,14 @@ enc.flush()?;
 
 Bit allocation is a non-psychoacoustic greedy scheme: subbands are
 awarded quantiser upgrades in decreasing order of energy-per-extra-bit
-until the frame budget is exhausted. Scalefactors are extracted from
-per-part subband peaks, and SCFSI is picked so the transmitted triple
-exactly represents the three scalefactors when possible. Output
-bitstreams are raw elementary Layer II frames (no container, no CRC).
+until the frame budget is exhausted. In VBR mode the allocator stops
+when the energy/cost ratio of the next-best upgrade drops below a
+quality-derived threshold; the smallest standard ladder slot whose
+payload budget admits the chosen allocation is then written into the
+header. Scalefactors are extracted from per-part subband peaks, and
+SCFSI is picked so the transmitted triple exactly represents the
+three scalefactors when possible. Output bitstreams are raw
+elementary Layer II frames (no container, no CRC).
 
 ## Codec ID
 

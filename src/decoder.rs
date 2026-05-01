@@ -24,9 +24,7 @@
 //!   header parse time.
 
 use oxideav_core::Decoder;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 use crate::bitalloc::{read_layer2_side, validate_allocations};
 use crate::header::{parse_header, Mode, Version};

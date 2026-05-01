@@ -6,13 +6,18 @@
 //! scalefactor decode → 3-/5-/9-level grouped-sample ungrouping and
 //! per-sample requantisation → 32-band polyphase subband synthesis.
 //!
-//! The encoder targets CBR Layer II at any of the supported sampling
+//! The encoder targets Layer II at any of the supported sampling
 //! rates (32 / 44.1 / 48 kHz MPEG-1 or 16 / 22.05 / 24 kHz MPEG-2 LSF),
-//! mono or plain stereo, no CRC, no joint stereo.
+//! mono / plain stereo / **joint stereo** (intensity), no CRC. Both
+//! **CBR** and **VBR** rate-control modes are exposed via the
+//! [`options::Mp2EncoderOptions`] schema (`vbr_quality`, `joint_stereo`).
+//! In VBR mode the encoder also emits a Xing/Info header as the first
+//! frame of the stream so downstream players can show an accurate
+//! average bitrate.
 //!
 //! Supports MPEG-1 sample rates (32 / 44.1 / 48 kHz) and MPEG-2 LSF
 //! (16 / 22.05 / 24 kHz); every stereo mode (mono / stereo / joint-stereo
-//! / dual-channel) on decode, plain stereo / mono on encode.
+//! / dual-channel) on decode, mono / stereo / joint-stereo on encode.
 //!
 //! MPEG-2.5 is rejected with `Unsupported`.
 
@@ -29,6 +34,7 @@ pub mod bitalloc;
 pub mod decoder;
 pub mod encoder;
 pub mod header;
+pub mod options;
 pub mod requant;
 pub mod synth;
 pub mod tables;

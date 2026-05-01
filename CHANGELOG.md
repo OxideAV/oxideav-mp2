@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Joint-stereo (intensity stereo, ISO/IEC 11172-3 §2.4.2.6) emission
+  in the encoder. Bound is picked per frame from `{4, 8, 12, 16}` by
+  per-subband L/R correlation. Enable via the `joint_stereo` encoder
+  option.
+- VBR rate-control mode in the encoder. Per-frame bitrate slot is
+  picked from the standard ladder so the smallest fitting slot is
+  chosen, and a Xing/Info header is prepended on flush so the
+  downstream stream reports the right average bitrate. Enable via
+  the `vbr_quality` (0..=9) encoder option.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.5...v0.0.6) - 2026-04-25
 
 ### Other
