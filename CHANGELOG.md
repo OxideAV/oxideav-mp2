@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.6...v0.0.7) - 2026-05-02
+
+### Other
+
+- migrate to centralized OxideAV/.github reusable workflows
+- add joint-stereo (intensity) + VBR with Xing/Info header
+- adopt slim VideoFrame/AudioFrame shape
+- pin release-plz to patch-only bumps
+
 ### Added
 
 - Joint-stereo (intensity stereo, ISO/IEC 11172-3 §2.4.2.6) emission
