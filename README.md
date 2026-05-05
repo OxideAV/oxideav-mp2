@@ -27,14 +27,13 @@ Output frames are interleaved `SampleFormat::S16` at 1152 samples per
 channel.
 
 ```rust
-use oxideav_codec::CodecRegistry;
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, RuntimeContext, TimeBase};
 
-let mut codecs = CodecRegistry::new();
-oxideav_mp2::register(&mut codecs);
+let mut ctx = RuntimeContext::new();
+oxideav_mp2::register(&mut ctx);
 
 let params = CodecParameters::audio(CodecId::new("mp2"));
-let mut dec = codecs.make_decoder(&params)?;
+let mut dec = ctx.codecs.make_decoder(&params)?;
 
 // Slice one Layer II frame out of the elementary stream (use
 // `oxideav_mp2::header::parse_header` to get `frame_length()`).
@@ -79,18 +78,17 @@ The two options compose freely (CBR + joint stereo, VBR + joint
 stereo, etc.).
 
 ```rust
-use oxideav_codec::CodecRegistry;
-use oxideav_core::{CodecId, CodecParameters, Frame, SampleFormat};
+use oxideav_core::{CodecId, CodecParameters, Frame, RuntimeContext, SampleFormat};
 
-let mut codecs = CodecRegistry::new();
-oxideav_mp2::register(&mut codecs);
+let mut ctx = RuntimeContext::new();
+oxideav_mp2::register(&mut ctx);
 
 let mut params = CodecParameters::audio(CodecId::new("mp2"));
 params.channels = Some(2);
 params.sample_rate = Some(48_000);
 params.sample_format = Some(SampleFormat::S16);
 params.bit_rate = Some(192_000);
-let mut enc = codecs.make_encoder(&params)?;
+let mut enc = ctx.codecs.make_encoder(&params)?;
 
 enc.send_frame(&Frame::Audio(pcm_frame))?;
 while let Ok(pkt) = enc.receive_packet() {
