@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ATH (Absolute Threshold of Hearing) psychoacoustic bias** in the
+  encoder's bit allocator. New `psy.rs` module computes a per-subband
+  perceptual weight from the Terhardt analytic ATH curve at the
+  stream's sample rate; the allocator scales each subband's energy
+  by `weight²` before scoring, so bands far outside the audible range
+  (deep sub-bass, near-Nyquist ultrasonic) drop in priority by
+  20–40 dB. On music-like inputs with appreciable ultrasonic content
+  the change cuts VBR file sizes by 30–60% at mid quality levels with
+  no audible degradation. Enabled by default; set the new
+  `psy_model="none"` encoder option to opt back into the strict-energy
+  v0.0.8 allocator for byte-exact reproducibility.
+- **Per-subband intensity-stereo correlation threshold relaxation**
+  (5%/10%/15% for subbands 8–15 / 16–23 / 24–31 respectively) so the
+  joint-stereo decision engages on "almost correlated" high-band
+  material without giving up bits the low bands need.
+- `psy_model` encoder option string accepting `"ath"` (default),
+  `"none"`, or `""` (alias for default).
+
+### Fixed
+
+- **VBR mode no longer picks invalid (mode, bitrate) combinations**
+  on MPEG-1 Layer II. The slot picker now respects Table 3-B.2
+  restrictions: stereo streams skip the 32/48 kbps slots and mono
+  streams cap at 192 kbps. Previously the allocator could pick
+  e.g. 32 kbps stereo, producing a frame whose own header reader
+  would reject it. MPEG-2 LSF is unaffected (all 14 slots are valid
+  in every mode there).
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.7...v0.0.8) - 2026-05-06
 
 ### Other

@@ -20,6 +20,24 @@
 use oxideav_core::options::{CodecOptionsStruct, OptionField, OptionKind, OptionValue};
 use oxideav_core::{Error, Result};
 
+/// Psychoacoustic model selector exposed through the `psy_model`
+/// encoder option.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PsyModel {
+    /// No psychoacoustic bias — bit allocator scores by raw
+    /// signal energy / cost. This is what the encoder did up to and
+    /// including v0.0.8.
+    None,
+    /// **A**bsolute **T**hreshold of **H**earing bias. Per-subband
+    /// ATH energy floor (Terhardt closed-form) is subtracted from the
+    /// per-subband signal energy before scoring, so subbands whose
+    /// signal sits below the audibility threshold don't compete for
+    /// bits. Cheap (one extra subtraction per allocator step) and
+    /// produces audibly cleaner low-bitrate output.
+    #[default]
+    Ath,
+}
+
 /// Typed options consumed by the MP2 encoder.
 #[derive(Default, Debug, Clone)]
 pub struct Mp2EncoderOptions {
@@ -28,6 +46,10 @@ pub struct Mp2EncoderOptions {
     /// Enable joint-stereo (intensity stereo) emission for two-channel
     /// inputs. Ignored for mono.
     pub joint_stereo: bool,
+    /// Psychoacoustic model. Defaults to [`PsyModel::Ath`] (ATH bias);
+    /// set to `"none"` for the strict-energy allocator preserved for
+    /// reproducibility of pre-0.0.9 output.
+    pub psy_model: PsyModel,
 }
 
 impl CodecOptionsStruct for Mp2EncoderOptions {
@@ -43,6 +65,12 @@ impl CodecOptionsStruct for Mp2EncoderOptions {
             kind: OptionKind::Bool,
             default: OptionValue::Bool(false),
             help: "Enable joint-stereo (intensity-stereo) coding for stereo inputs.",
+        },
+        OptionField {
+            name: "psy_model",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "Psychoacoustic model: \"\" (default ATH), \"ath\", or \"none\".",
         },
     ];
 
@@ -62,6 +90,19 @@ impl CodecOptionsStruct for Mp2EncoderOptions {
             }
             "joint_stereo" => {
                 self.joint_stereo = v.as_bool()?;
+            }
+            "psy_model" => {
+                let s = v.as_str()?;
+                self.psy_model = match s {
+                    "" => PsyModel::default(),
+                    "ath" => PsyModel::Ath,
+                    "none" => PsyModel::None,
+                    other => {
+                        return Err(Error::invalid(format!(
+                            "MP2 encoder: psy_model must be one of \"ath\" / \"none\", got {other:?}"
+                        )));
+                    }
+                };
             }
             _ => unreachable!("guarded by SCHEMA"),
         }

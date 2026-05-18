@@ -62,7 +62,7 @@ any mode). Input must be interleaved `SampleFormat::S16`.
 
 ### Encoder options
 
-Two switches are exposed via `CodecParameters::options`:
+Three switches are exposed via `CodecParameters::options`:
 
 - `vbr_quality` (`u32`, 0..=9): switch the encoder to **VBR**. Each
   frame's bitrate slot is picked independently from the standard
@@ -72,10 +72,18 @@ Two switches are exposed via `CodecParameters::options`:
 - `joint_stereo` (`bool`): enable Layer II **intensity stereo** in
   stereo inputs. The encoder picks the smallest header-encodable
   bound (4 / 8 / 12 / 16) at which all upper subbands are L/R
-  correlated enough to share spectral coefficients.
+  correlated enough to share spectral coefficients (per-subband
+  correlation threshold relaxes 5–15% for the upper subbands where
+  spatial hearing is less acute).
+- `psy_model` (`string`, default `"ath"`): psychoacoustic bias for
+  the bit allocator. `"ath"` enables an Absolute-Threshold-of-Hearing
+  weighting (Terhardt analytic curve) that attenuates the score of
+  subbands sitting outside the audible range, redirecting bits to
+  audible mid-band content. `"none"` reproduces the strict-energy
+  allocator from v0.0.8 for byte-exact reproducibility.
 
-The two options compose freely (CBR + joint stereo, VBR + joint
-stereo, etc.).
+The options compose freely (CBR + joint stereo + ATH, VBR +
+joint stereo, etc.).
 
 ```rust
 use oxideav_core::{CodecId, CodecParameters, Frame, RuntimeContext, SampleFormat};
@@ -98,16 +106,22 @@ enc.flush()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Bit allocation is a non-psychoacoustic greedy scheme: subbands are
-awarded quantiser upgrades in decreasing order of energy-per-extra-bit
-until the frame budget is exhausted. In VBR mode the allocator stops
-when the energy/cost ratio of the next-best upgrade drops below a
-quality-derived threshold; the smallest standard ladder slot whose
-payload budget admits the chosen allocation is then written into the
-header. Scalefactors are extracted from per-part subband peaks, and
-SCFSI is picked so the transmitted triple exactly represents the
-three scalefactors when possible. Output bitstreams are raw
-elementary Layer II frames (no container, no CRC).
+Bit allocation is a greedy scheme: subbands are awarded quantiser
+upgrades in decreasing order of perceptually-weighted-energy-per-bit
+until the frame budget is exhausted. The default `psy_model="ath"`
+multiplies the raw subband energy by `weight²` where `weight ∈
+(0, 1]` follows the inverse Terhardt absolute-threshold curve — bands
+at the ear's most-sensitive frequencies (~3 kHz) score unattenuated,
+bands at deep sub-bass or near Nyquist drop by 20–40 dB. In VBR mode
+the allocator additionally stops when the energy/cost ratio of the
+next-best upgrade drops below a quality-derived threshold; the smallest
+standard ladder slot (filtered by the Table 3-B.2 mode restrictions
+on MPEG-1 — 32/48 kbps in stereo, 224+ kbps in mono are skipped)
+whose payload budget admits the chosen allocation is then written
+into the header. Scalefactors are extracted from per-part subband
+peaks, and SCFSI is picked so the transmitted triple exactly
+represents the three scalefactors when possible. Output bitstreams
+are raw elementary Layer II frames (no container, no CRC).
 
 ## Codec ID
 

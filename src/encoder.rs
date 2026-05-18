@@ -50,7 +50,8 @@ use oxideav_core::{
 };
 
 use crate::analysis::{analyze_frame, AnalysisState};
-use crate::options::Mp2EncoderOptions;
+use crate::options::{Mp2EncoderOptions, PsyModel};
+use crate::psy::{ath_weight_per_subband, joint_stereo_threshold_relaxation_per_subband};
 use crate::tables::{scalefactor_magnitude, select_alloc_table, AllocEntry, AllocTable, TABLE_LSF};
 use crate::CODEC_ID_STR;
 use oxideav_core::bits::BitWriter;
@@ -126,6 +127,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     };
     let vbr_quality = opts.vbr_quality.unwrap_or(2);
     let allow_joint_stereo = opts.joint_stereo && channels == 2;
+    let psy_model = opts.psy_model;
 
     let bitrate_kbps = params.bit_rate.map(|b| (b / 1000) as u32).unwrap_or(192);
     let br_index = match version {
@@ -186,6 +188,21 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output.sample_rate = Some(sample_rate);
     output.bit_rate = Some((bitrate_kbps as u64) * 1000);
 
+    // Pre-compute the ATH per-subband perceptual weight and the
+    // joint-stereo per-subband relaxation. Both are deterministic
+    // functions of (sample rate, model) so we lift them out of the
+    // per-frame hot path. `PsyModel::None` falls back to the v0.0.8
+    // strict-energy behaviour: weights of 1.0 everywhere (= no
+    // attenuation) and a zero relaxation table.
+    let ath_weight = match psy_model {
+        PsyModel::Ath => ath_weight_per_subband(sample_rate),
+        PsyModel::None => [1.0f32; 32],
+    };
+    let js_relax = match psy_model {
+        PsyModel::Ath => joint_stereo_threshold_relaxation_per_subband(),
+        PsyModel::None => [0.0f32; 32],
+    };
+
     Ok(Box::new(Mp2Encoder {
         output_params: output,
         version,
@@ -197,6 +214,9 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         rate_control,
         vbr_quality,
         allow_joint_stereo,
+        psy_model,
+        ath_weight,
+        js_relax,
         time_base: TimeBase::new(1, sample_rate as i64),
         analysis_state: [AnalysisState::new(), AnalysisState::new()],
         pcm_queue: vec![Vec::new(); channels as usize],
@@ -227,6 +247,18 @@ struct Mp2Encoder {
     /// `true` when joint-stereo emission is permitted (set only for
     /// 2-channel inputs with the `joint_stereo` option enabled).
     allow_joint_stereo: bool,
+    /// Selected psychoacoustic model. Retained on the struct for
+    /// runtime inspection by tests; the per-subband data tables are
+    /// pre-materialised below.
+    #[allow(dead_code)]
+    psy_model: PsyModel,
+    /// Per-subband ATH-derived multiplicative weight applied to the
+    /// raw subband energy before allocator scoring. `1.0` everywhere
+    /// for [`PsyModel::None`] (= legacy strict-energy behaviour).
+    ath_weight: [f32; 32],
+    /// Per-subband relaxation subtracted from the base joint-stereo
+    /// correlation threshold (zero for [`PsyModel::None`]).
+    js_relax: [f32; 32],
     time_base: TimeBase,
     analysis_state: [AnalysisState; 2],
     pcm_queue: Vec<Vec<f32>>,
@@ -354,7 +386,7 @@ impl Mp2Encoder {
             EncVersion::Mpeg2Lsf => &TABLE_LSF,
         };
         let (frame_mode_code, bound_subband) = if self.allow_joint_stereo {
-            match pick_joint_stereo_bound(&sub, table_for_jsd.sblimit) {
+            match pick_joint_stereo_bound(&sub, table_for_jsd.sblimit, &self.js_relax) {
                 Some((mode_ext, bnd)) => (FrameMode::JointStereo(mode_ext), bnd as usize),
                 None => (FrameMode::Stereo, table_for_jsd.sblimit),
             }
@@ -457,6 +489,7 @@ impl Mp2Encoder {
                     &scfsi,
                     frame_bytes as i64 * 8 - header_bits as i64 - bitalloc_bits,
                     stop_score,
+                    &self.ath_weight,
                 )?;
                 (frame_bytes, padding, self.br_index, alloc)
             }
@@ -476,12 +509,13 @@ impl Mp2Encoder {
                     &scfsi,
                     max_bytes as i64 * 8 - header_bits as i64 - bitalloc_bits,
                     stop_score,
+                    &self.ath_weight,
                 )?;
                 let used_bits =
                     allocation_payload_bits(table, n_ch, bound_subband, &alloc_unbounded, &scfsi);
                 let needed_bits = header_bits as i64 + bitalloc_bits + used_bits;
                 let needed_bytes = (needed_bits as usize).div_ceil(8);
-                let (idx, kbps) = pick_vbr_slot(self.version, self.sample_rate, needed_bytes);
+                let (idx, kbps) = pick_vbr_slot(self.version, self.sample_rate, needed_bytes, n_ch);
                 let frame_bytes = self.frame_bytes_at_rate(kbps, false);
                 (frame_bytes, false, idx, alloc_unbounded)
             }
@@ -828,12 +862,52 @@ fn bitrate_table(v: EncVersion) -> &'static [u32] {
 /// smallest slot whose unpadded frame size meets `needed_bytes`. If no
 /// slot fits, fall back to the largest slot — the caller will then
 /// truncate the payload.
-fn pick_vbr_slot(version: EncVersion, sample_rate: u32, needed_bytes: usize) -> (u32, u32) {
+///
+/// MPEG-1 Layer II (ISO/IEC 11172-3 §2.4.2.3 Table 3-B.2) forbids
+/// some (mode, bitrate) pairs even in VBR mode — single-channel
+/// streams cannot use ≥ 224 kbps, and stereo streams cannot use
+/// 32 or 48 kbps. We filter those out here so VBR never emits a
+/// header a strict decoder would reject. MPEG-2 LSF (§13818-3
+/// §2.4.2.3) has no such restrictions; the filter is a no-op there.
+fn pick_vbr_slot(
+    version: EncVersion,
+    sample_rate: u32,
+    needed_bytes: usize,
+    n_channels: usize,
+) -> (u32, u32) {
     let table = bitrate_table(version);
+    let is_mpeg1 = matches!(version, EncVersion::Mpeg1);
+    let permitted = |kbps: u32| -> bool {
+        if !is_mpeg1 {
+            return true;
+        }
+        match n_channels {
+            1 => !matches!(kbps, 224 | 256 | 320 | 384),
+            _ => !matches!(kbps, 32 | 48),
+        }
+    };
+    let mut fallback: Option<(u32, u32)> = None;
     for (i, &kbps) in table.iter().enumerate() {
+        if !permitted(kbps) {
+            continue;
+        }
         let frame_bytes = (144 * kbps * 1000 / sample_rate) as usize;
+        if fallback.is_none() {
+            fallback = Some(((i + 1) as u32, kbps));
+        }
         if frame_bytes >= needed_bytes {
             return ((i + 1) as u32, kbps);
+        }
+    }
+    // Nothing fits → return the largest permitted slot. If nothing is
+    // permitted at all (impossible by ladder construction), fall
+    // through to the absolute last slot.
+    if let Some((_, _)) = fallback {
+        // Find the largest permitted slot.
+        for (i, &kbps) in table.iter().enumerate().rev() {
+            if permitted(kbps) {
+                return ((i + 1) as u32, kbps);
+            }
         }
     }
     let last = table.len() - 1;
@@ -844,6 +918,14 @@ fn pick_vbr_slot(version: EncVersion, sample_rate: u32, needed_bytes: usize) -> 
 /// or shared for sb >= bound) to the next class while a (cost, energy)
 /// score remains above the stop threshold AND remaining budget covers
 /// the upgrade. Returns the per-channel allocation grid.
+///
+/// `ath_weight` is the per-subband perceptual weight in `(0, 1]`
+/// (=== 1.0 everywhere when [`PsyModel::None`]). Subband energies are
+/// scaled by `weight^2` before scoring — subbands whose centre
+/// frequency sits well outside the audible range (deep sub-bass,
+/// near-Nyquist ultrasonic) drop in priority by 20–40 dB without
+/// being silenced outright.
+#[allow(clippy::too_many_arguments)]
 fn run_allocator(
     table: &AllocTable,
     n_ch: usize,
@@ -852,6 +934,7 @@ fn run_allocator(
     scfsi: &[[u8; 32]],
     initial_budget_bits: i64,
     stop_score: f32,
+    ath_weight: &[f32; 32],
 ) -> Result<Vec<[u8; 32]>> {
     if initial_budget_bits < 0 {
         return Err(Error::other("MP2 encoder: frame too small for header"));
@@ -886,12 +969,20 @@ fn run_allocator(
                     scfsi[other_ch_idx][sb],
                     n_ch,
                 );
-                let used_energy = if sb >= bound_subband && n_ch == 2 {
+                let raw_energy = if sb >= bound_subband && n_ch == 2 {
                     energy[0][sb].max(energy[1][sb])
                 } else {
                     energy[ch][sb]
                 };
-                let score = used_energy / (cost as f32).max(1.0);
+                // Apply the per-subband ATH weight (= 1.0 for
+                // PsyModel::None). Energy is amplitude-squared, so
+                // the perceptual attenuation is weight^2 (a weight
+                // of 0.1 multiplies the score by 0.01 → near-Nyquist
+                // subbands have to be ~100× more energetic before
+                // they outrank a mid-band subband for the same cost).
+                let w = ath_weight[sb];
+                let weighted_energy = raw_energy * w * w;
+                let score = weighted_energy / (cost as f32).max(1.0);
                 if score > best_score && cost as i64 <= remaining {
                     best_score = score;
                     best = Some((ch, sb, next, cost as i64));
@@ -978,13 +1069,26 @@ fn vbr_quality_to_stop_score(q: u8, mode: RateControl) -> f32 {
 
 /// Pick a joint-stereo bound for the current frame. Returns
 /// `Some((mode_ext, bound))` when at least the smallest bound (4)
-/// has every upper subband above [`JOINT_STEREO_CORR_THRESHOLD`]; falls
-/// back to plain stereo (`None`) otherwise.
+/// has every upper subband above its per-subband intensity-stereo
+/// correlation threshold; falls back to plain stereo (`None`)
+/// otherwise.
+///
+/// `js_relax[sb]` is a per-subband relaxation subtracted from the base
+/// [`JOINT_STEREO_CORR_THRESHOLD`]. Higher subbands have larger
+/// relaxation values because spatial hearing is less acute above
+/// ~2 kHz; this lets intensity stereo engage on material that's
+/// "almost correlated" in the high bands without giving up bits the
+/// low bands need. All-zero relaxation reproduces the v0.0.8 strict
+/// threshold behaviour.
 ///
 /// We try the bound candidates from smallest to largest. The smallest
 /// bound that "works" wins because it exposes the most subbands to
 /// shared-coefficient coding (= the most bit savings).
-fn pick_joint_stereo_bound(sub: &[[[f32; 36]; 32]], sblimit: usize) -> Option<(u32, u32)> {
+fn pick_joint_stereo_bound(
+    sub: &[[[f32; 36]; 32]],
+    sblimit: usize,
+    js_relax: &[f32; 32],
+) -> Option<(u32, u32)> {
     if sub.len() != 2 {
         return None;
     }
@@ -1006,7 +1110,8 @@ fn pick_joint_stereo_bound(sub: &[[[f32; 36]; 32]], sblimit: usize) -> Option<(u
         corr[sb] = (e_lr / denom).abs();
     }
     // For each candidate bound, check that every subband at-or-above
-    // the bound is correlated enough.
+    // the bound is correlated enough — where "enough" is the base
+    // threshold minus the per-subband relaxation.
     for (idx, &bnd_u32) in JOINT_STEREO_BOUNDS.iter().enumerate() {
         let bnd = bnd_u32 as usize;
         if bnd >= sblimit {
@@ -1016,7 +1121,8 @@ fn pick_joint_stereo_bound(sub: &[[[f32; 36]; 32]], sblimit: usize) -> Option<(u
         }
         let mut all_ok = true;
         for sb in bnd..sblimit {
-            if corr[sb] < JOINT_STEREO_CORR_THRESHOLD {
+            let threshold = (JOINT_STEREO_CORR_THRESHOLD - js_relax[sb]).max(0.0);
+            if corr[sb] < threshold {
                 all_ok = false;
                 break;
             }
@@ -1236,9 +1342,36 @@ mod tests {
         // 24 kHz LSF: 144 * 8 * 1000 / 24000 = 48 bytes for 8 kbps.
         // A frame needing 100 bytes should land around 24 kbps
         // (144 * 24 * 1000 / 24000 = 144).
-        let (idx, kbps) = pick_vbr_slot(EncVersion::Mpeg2Lsf, 24_000, 100);
+        let (idx, kbps) = pick_vbr_slot(EncVersion::Mpeg2Lsf, 24_000, 100, 2);
         assert!(kbps >= 16, "expected >=16 kbps, got {kbps}");
         assert!(idx >= 1);
+    }
+
+    #[test]
+    fn vbr_slot_excludes_invalid_mpeg1_stereo_rates() {
+        // MPEG-1 stereo at 44.1 kHz: a tiny `needed_bytes` would
+        // naively pick 32 kbps but that's forbidden in stereo by
+        // Table 3-B.2. The picker must skip 32/48 and land on
+        // 56 kbps (smallest permitted stereo rate).
+        let (idx, kbps) = pick_vbr_slot(EncVersion::Mpeg1, 44_100, 1, 2);
+        assert_eq!(kbps, 56, "got {kbps}");
+        assert_eq!(idx, 3);
+    }
+
+    #[test]
+    fn vbr_slot_excludes_invalid_mpeg1_mono_rates() {
+        // MPEG-1 mono can use 32..192 kbps but not 224+. A very
+        // large `needed_bytes` should saturate at 192 kbps.
+        let (idx, kbps) = pick_vbr_slot(EncVersion::Mpeg1, 44_100, 100_000, 1);
+        assert_eq!(kbps, 192, "mono picker should top out at 192, got {kbps}");
+        assert_eq!(idx, 10);
+    }
+
+    #[test]
+    fn vbr_slot_lsf_unrestricted() {
+        // LSF allows every slot in every mode.
+        let (_idx, kbps) = pick_vbr_slot(EncVersion::Mpeg2Lsf, 24_000, 1, 2);
+        assert_eq!(kbps, 8, "LSF stereo should allow the 8 kbps slot");
     }
 
     #[test]
@@ -1269,8 +1402,44 @@ mod tests {
                 sub[1][sb][i] = v;
             }
         }
-        let pick = pick_joint_stereo_bound(&sub, 27);
+        // Strict (no relaxation) — every subband must be over the
+        // base threshold. Perfectly correlated input clears it.
+        let strict_relax = [0.0f32; 32];
+        let pick = pick_joint_stereo_bound(&sub, 27, &strict_relax);
         assert_eq!(pick, Some((0, 4)), "got {pick:?}");
+    }
+
+    #[test]
+    fn joint_stereo_relaxation_admits_more_borderline_input() {
+        // Hand-build a signal whose upper-subband correlation sits
+        // *just below* the strict 0.7 threshold (~0.65) but *above*
+        // the relaxed threshold for high subbands.
+        let mut sub: Vec<[[f32; 36]; 32]> = vec![[[0.0f32; 36]; 32]; 2];
+        for sb in 0..27 {
+            for i in 0..36 {
+                let v = ((sb + i) as f32 * 0.01).sin() * 0.3;
+                sub[0][sb][i] = v;
+                // Mix in 50% noise so |corr| ~ 0.65 — between
+                // 0.7-strict and 0.55-relaxed-at-high-bands.
+                let n = ((sb * 7 + i * 3) as f32 * 0.13).sin() * 0.3;
+                sub[1][sb][i] = 0.6 * v + 0.8 * n;
+            }
+        }
+        let relax = joint_stereo_threshold_relaxation_per_subband();
+        let strict_relax = [0.0f32; 32];
+        let strict = pick_joint_stereo_bound(&sub, 27, &strict_relax);
+        let relaxed = pick_joint_stereo_bound(&sub, 27, &relax);
+        eprintln!("strict pick: {strict:?}, relaxed pick: {relaxed:?}");
+        // The relaxed pick must engage in at least as many situations
+        // as strict: if strict succeeded, relaxed also succeeds (and
+        // ideally at a smaller bound). If strict was None, relaxed
+        // may still succeed at a high bound.
+        if let Some((_, sb)) = strict {
+            assert!(
+                relaxed.map(|(_, r)| r <= sb).unwrap_or(false),
+                "relaxation regressed: strict={strict:?}, relaxed={relaxed:?}"
+            );
+        }
     }
 
     #[test]
@@ -1291,7 +1460,8 @@ mod tests {
                 sub[1][sb][i] = ((sb * 7 + i * 3) as f32 * 0.13).sin() * 0.3;
             }
         }
-        let pick = pick_joint_stereo_bound(&sub, 27);
+        let strict_relax = [0.0f32; 32];
+        let pick = pick_joint_stereo_bound(&sub, 27, &strict_relax);
         // At least the bound 16 should still kick in if corr is high
         // by coincidence — accept None or any bound.
         eprintln!("uncorrelated pick: {pick:?}");
