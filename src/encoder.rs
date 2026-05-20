@@ -775,8 +775,8 @@ impl Mp2Encoder {
 
         // The Xing tag offset within a Layer II frame (post header,
         // post placeholder bit-alloc indices). For Layer II the
-        // canonical Xing-frame layout — as written by LAME and
-        // libtwolame in their `--cbr` and `--vbr-info` paths — is to
+        // canonical Xing-frame layout — as observed in the output of
+        // typical Layer-II CBR/VBR encoders — is to
         // place the "Info"/"Xing" magic at byte offset 0x24 from the
         // start of the frame for stereo / 0x15 for mono on Layer III,
         // but for Layer II the tag is placed at a fixed offset of
