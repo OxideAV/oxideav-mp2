@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   material without giving up bits the low bands need.
 - `psy_model` encoder option string accepting `"ath"` (default),
   `"none"`, or `""` (alias for default).
+- **`dual_channel` encoder option** for emitting `mode = 0b10`
+  (dual_channel) on two-channel inputs. Per ISO/IEC 11172-3 §2.4.2.3
+  the dual_channel bitstream is byte-identical to plain stereo apart
+  from the 2-bit header `mode` field — both channels independent,
+  no shared subbands — but the flag tells the decoder the two
+  channels are unrelated audio streams (e.g. bilingual broadcast).
+  Ignored for mono input; silently overridden by `joint_stereo = true`
+  (the two modes share the header `mode` bits). New
+  `tests/encoder_dual_channel.rs` covers header-mode emission, plain-
+  stereo bitstream parity past the mode field, the
+  joint_stereo-overrides-dual_channel precedence, and an unrelated-
+  per-channel round-trip.
 
 ### Fixed
 

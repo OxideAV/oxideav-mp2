@@ -26,6 +26,13 @@
 //!   measuring per-subband normalised L/R correlation and picking the
 //!   smallest bound at which all upper-band correlations exceed
 //!   [`JOINT_STEREO_CORR_THRESHOLD`].
+//! - Dual_channel emission (§2.4.2.3, `mode = 0b10`): the Layer II
+//!   bitstream layout is byte-identical to plain stereo (both
+//!   channels independent, no shared subbands); only the 2-bit
+//!   header `mode` field flips. The `dual_channel` encoder option
+//!   exposes the flag for use cases where the two channels carry
+//!   unrelated audio (bilingual broadcast, separate commentary
+//!   tracks, …). Joint stereo wins when both are requested.
 //!
 //! Pipeline (mirror of the decoder):
 //!   PCM → polyphase analysis → joint-stereo bound decision (stereo +
@@ -127,6 +134,11 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     };
     let vbr_quality = opts.vbr_quality.unwrap_or(2);
     let allow_joint_stereo = opts.joint_stereo && channels == 2;
+    // dual_channel is mutually exclusive with joint_stereo (the two
+    // values share the `mode` bit field). joint_stereo wins per the
+    // README contract — a caller that wants dual_channel must not also
+    // set joint_stereo. Both are silently ignored on mono input.
+    let emit_dual_channel = opts.dual_channel && channels == 2 && !allow_joint_stereo;
     let psy_model = opts.psy_model;
 
     let bitrate_kbps = params.bit_rate.map(|b| (b / 1000) as u32).unwrap_or(192);
@@ -214,6 +226,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         rate_control,
         vbr_quality,
         allow_joint_stereo,
+        emit_dual_channel,
         psy_model,
         ath_weight,
         js_relax,
@@ -247,6 +260,12 @@ struct Mp2Encoder {
     /// `true` when joint-stereo emission is permitted (set only for
     /// 2-channel inputs with the `joint_stereo` option enabled).
     allow_joint_stereo: bool,
+    /// `true` when the encoder emits `mode = 0b10` (dual_channel)
+    /// instead of `0b00` (stereo) for two-channel inputs. The
+    /// bitstream layout is identical to plain stereo; only the
+    /// header mode field differs. Set only for 2-channel inputs with
+    /// `dual_channel = true` and `joint_stereo = false`.
+    emit_dual_channel: bool,
     /// Selected psychoacoustic model. Retained on the struct for
     /// runtime inspection by tests; the per-subband data tables are
     /// pre-materialised below.
@@ -391,7 +410,14 @@ impl Mp2Encoder {
                 None => (FrameMode::Stereo, table_for_jsd.sblimit),
             }
         } else if n_ch == 2 {
-            (FrameMode::Stereo, table_for_jsd.sblimit)
+            // `dual_channel` shares the plain-stereo bitstream layout
+            // (every subband per-channel-independent); only the
+            // header mode bits flip.
+            if self.emit_dual_channel {
+                (FrameMode::DualChannel, table_for_jsd.sblimit)
+            } else {
+                (FrameMode::Stereo, table_for_jsd.sblimit)
+            }
         } else {
             (FrameMode::Mono, table_for_jsd.sblimit)
         };
@@ -565,6 +591,7 @@ impl Mp2Encoder {
             FrameMode::Mono => (0b11u32, 0u32),
             FrameMode::Stereo => (0b00, 0),
             FrameMode::JointStereo(ext) => (0b01, ext),
+            FrameMode::DualChannel => (0b10, 0),
         };
         w.write_u32(mode_bits, 2);
         w.write_u32(mode_ext_bits, 2);
@@ -734,7 +761,15 @@ impl Mp2Encoder {
         hdr |= br_index << 12;
         hdr |= (self.sr_index as u32) << 10;
         // padding=0, private=0
-        let mode_bits: u32 = if self.channels == 1 { 0b11 } else { 0b00 };
+        // Xing/Info frame mirrors the stream's nominal mode so a
+        // tool scanning the file sees a consistent channel layout.
+        let mode_bits: u32 = if self.channels == 1 {
+            0b11
+        } else if self.emit_dual_channel {
+            0b10
+        } else {
+            0b00
+        };
         hdr |= mode_bits << 6;
         bytes[0..4].copy_from_slice(&hdr.to_be_bytes());
 
@@ -831,6 +866,11 @@ enum FrameMode {
     /// Joint stereo with `mode_extension` selecting the bound from
     /// {00→4, 01→8, 10→12, 11→16}.
     JointStereo(u32),
+    /// Dual-channel — two unrelated mono signals carried on the L/R
+    /// channels (e.g. dual-language broadcast). Same Layer II
+    /// bitstream layout as plain [`FrameMode::Stereo`], only the
+    /// header `mode` field differs (`0b10` instead of `0b00`).
+    DualChannel,
 }
 
 /// Reverse-map a bitrate in kbps to its 4-bit header-field index (1..=14

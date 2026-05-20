@@ -1,6 +1,6 @@
 //! Encoder option schema for the MP2 encoder.
 //!
-//! Two switches are exposed via [`oxideav_core::options`]:
+//! The following switches are exposed via [`oxideav_core::options`]:
 //!
 //! - `vbr_quality` (`u32`, 0..=9): switch the encoder to **VBR**. The
 //!   value selects an SNR-per-bit allocation threshold (0 = best
@@ -14,8 +14,23 @@
 //!   which the upper-band L/R correlation is high enough that a
 //!   shared spectral coefficient + per-channel scalefactor is a good
 //!   approximation. Subbands below the bound stay independent.
+//! - `psy_model` (`string`): psychoacoustic model selector — `"ath"`
+//!   (default, Terhardt ATH bias), `"none"` (strict-energy allocator
+//!   preserved for byte-exact reproducibility of pre-0.0.9 output),
+//!   or `""` (alias for default).
+//! - `dual_channel` (`bool`): emit `mode = 0b10` (dual_channel) on
+//!   stereo inputs instead of the default `mode = 0b00` (stereo). Per
+//!   ISO/IEC 11172-3 §2.4.2.3 the two carry an identical Layer II
+//!   bitstream layout — both channels independent, no shared
+//!   subbands — but the header bit signals to the decoder that the
+//!   two channels are unrelated audio streams (e.g. dual-language
+//!   broadcast), as opposed to a stereo pair of one signal. Ignored
+//!   for mono inputs and silently overridden by `joint_stereo = true`
+//!   (joint stereo and dual channel are mutually exclusive header
+//!   modes).
 //!
-//! Both options can be combined.
+//! All options compose freely (CBR + joint stereo + ATH, VBR +
+//! dual_channel, etc.).
 
 use oxideav_core::options::{CodecOptionsStruct, OptionField, OptionKind, OptionValue};
 use oxideav_core::{Error, Result};
@@ -44,12 +59,20 @@ pub struct Mp2EncoderOptions {
     /// `Some(0..=9)` → switch to VBR with the given quality target.
     pub vbr_quality: Option<u8>,
     /// Enable joint-stereo (intensity stereo) emission for two-channel
-    /// inputs. Ignored for mono.
+    /// inputs. Ignored for mono. Mutually exclusive with `dual_channel`
+    /// — when both are set, `joint_stereo` wins.
     pub joint_stereo: bool,
     /// Psychoacoustic model. Defaults to [`PsyModel::Ath`] (ATH bias);
     /// set to `"none"` for the strict-energy allocator preserved for
     /// reproducibility of pre-0.0.9 output.
     pub psy_model: PsyModel,
+    /// Emit `mode = 0b10` (dual_channel) for two-channel inputs. Per
+    /// ISO/IEC 11172-3 §2.4.2.3 the dual_channel bitstream layout is
+    /// the same as plain stereo (both channels independent, no shared
+    /// subbands) — only the header mode bits differ to signal that
+    /// the two channels are unrelated audio streams. Ignored for
+    /// mono. Overridden by `joint_stereo = true`.
+    pub dual_channel: bool,
 }
 
 impl CodecOptionsStruct for Mp2EncoderOptions {
@@ -71,6 +94,12 @@ impl CodecOptionsStruct for Mp2EncoderOptions {
             kind: OptionKind::String,
             default: OptionValue::String(String::new()),
             help: "Psychoacoustic model: \"\" (default ATH), \"ath\", or \"none\".",
+        },
+        OptionField {
+            name: "dual_channel",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Emit dual_channel mode (0b10) for two-channel inputs instead of stereo (0b00).",
         },
     ];
 
@@ -103,6 +132,9 @@ impl CodecOptionsStruct for Mp2EncoderOptions {
                         )));
                     }
                 };
+            }
+            "dual_channel" => {
+                self.dual_channel = v.as_bool()?;
             }
             _ => unreachable!("guarded by SCHEMA"),
         }

@@ -51,18 +51,19 @@ rejected at sync-check time.
 ## Encoder
 
 Layer II encoder covering MPEG-1 (32 / 44.1 / 48 kHz) and MPEG-2 LSF
-(16 / 22.05 / 24 kHz). Emits mono, plain stereo, or joint stereo
-(intensity); CRC-16 and free-format are not produced. Both **CBR**
-and **VBR** are supported via the [`oxideav_mp2::options`] schema
-(see below). Bitrate comes from `params.bit_rate` (CBR slot) or the
-`vbr_quality` knob; it must land on the standard ladder for the
-chosen version — MPEG-1 32..=384 kbps (subject to Table 3-B.2 mode
-restrictions in CBR mode), MPEG-2 LSF 8..=160 kbps (all permitted in
-any mode). Input must be interleaved `SampleFormat::S16`.
+(16 / 22.05 / 24 kHz). Emits mono, plain stereo, joint stereo
+(intensity), or **dual_channel** (two unrelated channels — e.g.
+bilingual broadcast); CRC-16 and free-format are not produced. Both
+**CBR** and **VBR** are supported via the [`oxideav_mp2::options`]
+schema (see below). Bitrate comes from `params.bit_rate` (CBR slot)
+or the `vbr_quality` knob; it must land on the standard ladder for
+the chosen version — MPEG-1 32..=384 kbps (subject to Table 3-B.2
+mode restrictions in CBR mode), MPEG-2 LSF 8..=160 kbps (all
+permitted in any mode). Input must be interleaved `SampleFormat::S16`.
 
 ### Encoder options
 
-Three switches are exposed via `CodecParameters::options`:
+The following switches are exposed via `CodecParameters::options`:
 
 - `vbr_quality` (`u32`, 0..=9): switch the encoder to **VBR**. Each
   frame's bitrate slot is picked independently from the standard
@@ -81,9 +82,17 @@ Three switches are exposed via `CodecParameters::options`:
   subbands sitting outside the audible range, redirecting bits to
   audible mid-band content. `"none"` reproduces the strict-energy
   allocator from v0.0.8 for byte-exact reproducibility.
+- `dual_channel` (`bool`): emit `mode = 0b10` (dual_channel) in the
+  header instead of `0b00` (stereo) for two-channel inputs. The
+  Layer II bitstream layout is identical to plain stereo — both
+  channels independent, no shared subbands — but the header bit
+  signals to the decoder that the two channels are unrelated audio
+  streams (per ISO/IEC 11172-3 §2.4.2.3). Ignored for mono inputs;
+  silently overridden by `joint_stereo = true` (the mode field can
+  only carry one value at a time).
 
 The options compose freely (CBR + joint stereo + ATH, VBR +
-joint stereo, etc.).
+dual_channel, etc.).
 
 ```rust
 use oxideav_core::{CodecId, CodecParameters, Frame, RuntimeContext, SampleFormat};
