@@ -90,9 +90,24 @@ The following switches are exposed via `CodecParameters::options`:
   streams (per ISO/IEC 11172-3 §2.4.2.3). Ignored for mono inputs;
   silently overridden by `joint_stereo = true` (the mode field can
   only carry one value at a time).
+- `copyright` (`bool`, default `false`): set the header `copyright`
+  bit (§2.4.2.3) — `true` = copyright protected.
+- `original` (`bool`, default `false`): set the header `original/copy`
+  bit (§2.4.2.3) — `true` = original, `false` = copy.
+- `emphasis` (`string`, default `"none"`): set the 2-bit header
+  `emphasis` field (§2.4.2.3) — `"none"` (`00`), `"50/15"` (`01`,
+  50/15 µs), or `"ccitt"` (`11`, CCITT J.17). The reserved `10` code
+  is not selectable.
+- `private_bit` (`bool`, default `false`): set the header
+  `private_bit` (§2.4.2.3), one bit reserved for private use.
+
+These four are pure metadata: they flip header bits only and leave the
+audio payload byte-identical to the flags-clear emission. The decoder's
+parsed `Header` exposes all of them (`copyright`, `original`,
+`private_bit`, `emphasis`).
 
 The options compose freely (CBR + joint stereo + ATH, VBR +
-dual_channel, etc.).
+dual_channel, copyright + emphasis, etc.).
 
 ```rust
 use oxideav_core::{CodecId, CodecParameters, Frame, RuntimeContext, SampleFormat};

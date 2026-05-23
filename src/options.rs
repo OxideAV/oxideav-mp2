@@ -28,12 +28,51 @@
 //!   for mono inputs and silently overridden by `joint_stereo = true`
 //!   (joint stereo and dual channel are mutually exclusive header
 //!   modes).
+//! - `copyright` (`bool`): set the header `copyright` bit (ISO/IEC
+//!   11172-3 §2.4.2.3). `false` (default) → `0` = no copyright on the
+//!   bitstream; `true` → `1` = copyright protected.
+//! - `original` (`bool`): set the header `original/copy` bit
+//!   (§2.4.2.3). `false` (default) → `0` = the bitstream is a copy;
+//!   `true` → `1` = the bitstream is an original.
+//! - `emphasis` (`string`): set the header 2-bit `emphasis` field
+//!   (§2.4.2.3). `"none"` (default, `00`), `"50/15"` (`01`,
+//!   50/15 µs), or `"ccitt"` (`11`, CCITT J.17). The reserved value
+//!   `10` is not exposed.
+//! - `private_bit` (`bool`): set the header `private_bit` (§2.4.2.3),
+//!   a single bit reserved for private use that is never assigned by
+//!   ISO. `false` (default) → `0`.
 //!
 //! All options compose freely (CBR + joint stereo + ATH, VBR +
 //! dual_channel, etc.).
 
 use oxideav_core::options::{CodecOptionsStruct, OptionField, OptionKind, OptionValue};
 use oxideav_core::{Error, Result};
+
+/// De-emphasis selector exposed through the `emphasis` encoder option,
+/// matching the 2-bit header `emphasis` field (ISO/IEC 11172-3
+/// §2.4.2.3). The reserved code `0b10` is intentionally not
+/// representable.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emphasis {
+    /// `0b00` — no de-emphasis.
+    #[default]
+    None,
+    /// `0b01` — 50/15 microsecond de-emphasis.
+    FiftyFifteen,
+    /// `0b11` — CCITT J.17 de-emphasis.
+    CcittJ17,
+}
+
+impl Emphasis {
+    /// The 2-bit on-wire `emphasis` code for this selection.
+    pub fn code(self) -> u32 {
+        match self {
+            Emphasis::None => 0b00,
+            Emphasis::FiftyFifteen => 0b01,
+            Emphasis::CcittJ17 => 0b11,
+        }
+    }
+}
 
 /// Psychoacoustic model selector exposed through the `psy_model`
 /// encoder option.
@@ -73,6 +112,19 @@ pub struct Mp2EncoderOptions {
     /// the two channels are unrelated audio streams. Ignored for
     /// mono. Overridden by `joint_stereo = true`.
     pub dual_channel: bool,
+    /// Header `copyright` bit (ISO/IEC 11172-3 §2.4.2.3). `false`
+    /// (default) → `0` = no copyright; `true` → `1` = copyright
+    /// protected. Carries no effect on the audio payload.
+    pub copyright: bool,
+    /// Header `original/copy` bit (§2.4.2.3). `false` (default) →
+    /// `0` = copy; `true` → `1` = original.
+    pub original: bool,
+    /// Header 2-bit `emphasis` field (§2.4.2.3). Defaults to
+    /// [`Emphasis::None`].
+    pub emphasis: Emphasis,
+    /// Header `private_bit` (§2.4.2.3) — one bit reserved for private
+    /// use that ISO will never assign. `false` (default) → `0`.
+    pub private_bit: bool,
 }
 
 impl CodecOptionsStruct for Mp2EncoderOptions {
@@ -100,6 +152,30 @@ impl CodecOptionsStruct for Mp2EncoderOptions {
             kind: OptionKind::Bool,
             default: OptionValue::Bool(false),
             help: "Emit dual_channel mode (0b10) for two-channel inputs instead of stereo (0b00).",
+        },
+        OptionField {
+            name: "copyright",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Set the header copyright bit (1 = copyright protected).",
+        },
+        OptionField {
+            name: "original",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Set the header original/copy bit (1 = original, 0 = copy).",
+        },
+        OptionField {
+            name: "emphasis",
+            kind: OptionKind::String,
+            default: OptionValue::String(String::new()),
+            help: "De-emphasis: \"\"/\"none\" (00), \"50/15\" (01), or \"ccitt\" (11).",
+        },
+        OptionField {
+            name: "private_bit",
+            kind: OptionKind::Bool,
+            default: OptionValue::Bool(false),
+            help: "Set the header private_bit (reserved for private use).",
         },
     ];
 
@@ -135,6 +211,28 @@ impl CodecOptionsStruct for Mp2EncoderOptions {
             }
             "dual_channel" => {
                 self.dual_channel = v.as_bool()?;
+            }
+            "copyright" => {
+                self.copyright = v.as_bool()?;
+            }
+            "original" => {
+                self.original = v.as_bool()?;
+            }
+            "emphasis" => {
+                let s = v.as_str()?;
+                self.emphasis = match s {
+                    "" | "none" => Emphasis::None,
+                    "50/15" => Emphasis::FiftyFifteen,
+                    "ccitt" => Emphasis::CcittJ17,
+                    other => {
+                        return Err(Error::invalid(format!(
+                            "MP2 encoder: emphasis must be one of \"none\" / \"50/15\" / \"ccitt\", got {other:?}"
+                        )));
+                    }
+                };
+            }
+            "private_bit" => {
+                self.private_bit = v.as_bool()?;
             }
             _ => unreachable!("guarded by SCHEMA"),
         }

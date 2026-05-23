@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Header metadata-flag encoder options** — `copyright`, `original`,
+  `emphasis`, and `private_bit` — covering the trailing header fields of
+  ISO/IEC 11172-3 §2.4.2.3 that the encoder previously hardcoded to 0.
+  `copyright`/`original`/`private_bit` are booleans; `emphasis` is a
+  string accepting `"none"` (default, `00`), `"50/15"` (`01`,
+  50/15 µs), or `"ccitt"` (`11`, CCITT J.17) — the reserved `10` code
+  is not exposed. The flags are pure metadata: the audio payload is
+  byte-identical to the flags-clear emission. Both the data frames and
+  the VBR Xing/Info placeholder frame carry the chosen values so a
+  scanning tool sees a consistent header throughout the stream. The
+  decoder's `Header` now exposes the parsed `copyright`, `original`,
+  `private_bit`, and `emphasis` fields (with an `Emphasis` enum that
+  also flags the reserved `10` code). New `tests/encoder_header_flags.rs`
+  round-trips each flag through encode → re-parse and confirms the
+  audio body is unchanged; ffmpeg black-box-decodes the flagged stream
+  cleanly (verified out-of-tree).
 - **ATH (Absolute Threshold of Hearing) psychoacoustic bias** in the
   encoder's bit allocator. New `psy.rs` module computes a per-subband
   perceptual weight from the Terhardt analytic ATH curve at the

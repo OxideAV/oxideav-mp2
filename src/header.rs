@@ -58,6 +58,21 @@ pub enum Version {
     Mpeg2Lsf,
 }
 
+/// De-emphasis type carried by the 2-bit header `emphasis` field
+/// (ISO/IEC 11172-3 §2.4.2.3). The `0b10` code is reserved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Emphasis {
+    /// `0b00` — no de-emphasis.
+    None,
+    /// `0b01` — 50/15 microsecond de-emphasis.
+    FiftyFifteen,
+    /// `0b10` — reserved (treated as `None`, but flagged here so a
+    /// caller can detect a non-conforming stream).
+    Reserved,
+    /// `0b11` — CCITT J.17 de-emphasis.
+    CcittJ17,
+}
+
 /// Parsed Layer II frame header (MPEG-1 or MPEG-2 LSF).
 #[derive(Clone, Copy, Debug)]
 pub struct Header {
@@ -73,6 +88,14 @@ pub struct Header {
     pub mode: Mode,
     /// Index of the first intensity-stereo subband (joint stereo only).
     pub bound: u32,
+    /// `private_bit` (§2.4.2.3) — one bit reserved for private use.
+    pub private_bit: bool,
+    /// `copyright` bit (§2.4.2.3): `true` = copyright protected.
+    pub copyright: bool,
+    /// `original/copy` bit (§2.4.2.3): `true` = original, `false` = copy.
+    pub original: bool,
+    /// De-emphasis selection (§2.4.2.3).
+    pub emphasis: Emphasis,
 }
 
 impl Header {
@@ -148,8 +171,17 @@ pub fn parse_header(buf: &[u8]) -> Result<Header> {
     let bitrate_index = ((w >> 12) & 0xF) as usize;
     let sr_index = ((w >> 10) & 0x3) as usize;
     let padding = ((w >> 9) & 0x1) != 0;
+    let private_bit = ((w >> 8) & 0x1) != 0;
     let mode_code = (w >> 6) & 0x3;
     let mode_ext = (w >> 4) & 0x3;
+    let copyright = ((w >> 3) & 0x1) != 0;
+    let original = ((w >> 2) & 0x1) != 0;
+    let emphasis = match w & 0x3 {
+        0b00 => Emphasis::None,
+        0b01 => Emphasis::FiftyFifteen,
+        0b10 => Emphasis::Reserved,
+        _ => Emphasis::CcittJ17,
+    };
 
     if layer != 0b10 {
         return Err(Error::unsupported(format!(
@@ -219,7 +251,6 @@ pub fn parse_header(buf: &[u8]) -> Result<Header> {
         }
     }
 
-    let _ = protection_bit;
     Ok(Header {
         version,
         protection: protection_bit == 0,
@@ -228,6 +259,10 @@ pub fn parse_header(buf: &[u8]) -> Result<Header> {
         padding,
         mode,
         bound,
+        private_bit,
+        copyright,
+        original,
+        emphasis,
     })
 }
 
@@ -280,6 +315,41 @@ mod tests {
         assert_eq!(h.mode, Mode::Mono);
         // frame_length = 144 * 64000 / 24000 = 384 bytes.
         assert_eq!(h.frame_length(), 384);
+    }
+
+    #[test]
+    fn parse_metadata_flags() {
+        // sync=0xFFF, ID=1, layer=10, prot=1, bitrate=1010 (192), sr=01
+        // (48k), pad=0, private=1, mode=00 (stereo), modeext=0,
+        // copyright=1, original=1, emphasis=11 (CCITT J.17).
+        let w: u32 = 0xFFF_u32 << 20
+            | 1 << 19
+            | 0b10 << 17
+            | 1 << 16
+            | 0b1010 << 12
+            | 0b01 << 10
+            | 1 << 8 // private_bit
+            | 1 << 3 // copyright
+            | 1 << 2 // original
+            | 0b11; // emphasis
+        let bytes = w.to_be_bytes();
+        let h = parse_header(&bytes).unwrap();
+        assert!(h.private_bit);
+        assert!(h.copyright);
+        assert!(h.original);
+        assert_eq!(h.emphasis, Emphasis::CcittJ17);
+    }
+
+    #[test]
+    fn parse_metadata_flags_default_clear() {
+        // Same header but all flag bits 0, emphasis 00.
+        let w: u32 = 0xFFF_u32 << 20 | 1 << 19 | 0b10 << 17 | 1 << 16 | 0b1010 << 12 | 0b01 << 10;
+        let bytes = w.to_be_bytes();
+        let h = parse_header(&bytes).unwrap();
+        assert!(!h.private_bit);
+        assert!(!h.copyright);
+        assert!(!h.original);
+        assert_eq!(h.emphasis, Emphasis::None);
     }
 
     #[test]

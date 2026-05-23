@@ -57,7 +57,7 @@ use oxideav_core::{
 };
 
 use crate::analysis::{analyze_frame, AnalysisState};
-use crate::options::{Mp2EncoderOptions, PsyModel};
+use crate::options::{Emphasis, Mp2EncoderOptions, PsyModel};
 use crate::psy::{ath_weight_per_subband, joint_stereo_threshold_relaxation_per_subband};
 use crate::tables::{scalefactor_magnitude, select_alloc_table, AllocEntry, AllocTable, TABLE_LSF};
 use crate::CODEC_ID_STR;
@@ -140,6 +140,10 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     // set joint_stereo. Both are silently ignored on mono input.
     let emit_dual_channel = opts.dual_channel && channels == 2 && !allow_joint_stereo;
     let psy_model = opts.psy_model;
+    let copyright = opts.copyright;
+    let original = opts.original;
+    let emphasis = opts.emphasis;
+    let private_bit = opts.private_bit;
 
     let bitrate_kbps = params.bit_rate.map(|b| (b / 1000) as u32).unwrap_or(192);
     let br_index = match version {
@@ -227,6 +231,10 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         vbr_quality,
         allow_joint_stereo,
         emit_dual_channel,
+        copyright,
+        original,
+        emphasis,
+        private_bit,
         psy_model,
         ath_weight,
         js_relax,
@@ -266,6 +274,16 @@ struct Mp2Encoder {
     /// header mode field differs. Set only for 2-channel inputs with
     /// `dual_channel = true` and `joint_stereo = false`.
     emit_dual_channel: bool,
+    /// Header `copyright` bit (ISO/IEC 11172-3 §2.4.2.3): `1` =
+    /// copyright protected, `0` = none. Carries no payload effect.
+    copyright: bool,
+    /// Header `original/copy` bit (§2.4.2.3): `1` = original, `0` =
+    /// copy.
+    original: bool,
+    /// Header 2-bit `emphasis` field (§2.4.2.3).
+    emphasis: Emphasis,
+    /// Header `private_bit` (§2.4.2.3), reserved for private use.
+    private_bit: bool,
     /// Selected psychoacoustic model. Retained on the struct for
     /// runtime inspection by tests; the per-subband data tables are
     /// pre-materialised below.
@@ -586,7 +604,7 @@ impl Mp2Encoder {
         w.write_u32(frame_br_index, 4);
         w.write_u32(self.sr_index as u32, 2);
         w.write_u32(if padding { 1 } else { 0 }, 1);
-        w.write_u32(0, 1); // private
+        w.write_u32(self.private_bit as u32, 1); // private_bit
         let (mode_bits, mode_ext_bits) = match frame_mode_code {
             FrameMode::Mono => (0b11u32, 0u32),
             FrameMode::Stereo => (0b00, 0),
@@ -595,9 +613,9 @@ impl Mp2Encoder {
         };
         w.write_u32(mode_bits, 2);
         w.write_u32(mode_ext_bits, 2);
-        w.write_u32(0, 1); // copyright
-        w.write_u32(0, 1); // original
-        w.write_u32(0, 2); // emphasis
+        w.write_u32(self.copyright as u32, 1); // copyright
+        w.write_u32(self.original as u32, 1); // original/copy
+        w.write_u32(self.emphasis.code(), 2); // emphasis
 
         // --- 7a. Bit allocation ---
         // Below the bound: per-channel. At/above the bound: single
@@ -760,9 +778,10 @@ impl Mp2Encoder {
         hdr |= 1u32 << 16; // protection bit = 1 (no CRC)
         hdr |= br_index << 12;
         hdr |= (self.sr_index as u32) << 10;
-        // padding=0, private=0
-        // Xing/Info frame mirrors the stream's nominal mode so a
-        // tool scanning the file sees a consistent channel layout.
+        // padding=0
+        hdr |= (self.private_bit as u32) << 8; // private_bit
+                                               // Xing/Info frame mirrors the stream's nominal mode so a
+                                               // tool scanning the file sees a consistent channel layout.
         let mode_bits: u32 = if self.channels == 1 {
             0b11
         } else if self.emit_dual_channel {
@@ -771,6 +790,11 @@ impl Mp2Encoder {
             0b00
         };
         hdr |= mode_bits << 6;
+        // Mirror the metadata flags so the placeholder frame's header
+        // matches the data frames a tool will see right after it.
+        hdr |= (self.copyright as u32) << 3; // copyright
+        hdr |= (self.original as u32) << 2; // original/copy
+        hdr |= self.emphasis.code(); // emphasis (2 bits)
         bytes[0..4].copy_from_slice(&hdr.to_be_bytes());
 
         // The Xing tag offset within a Layer II frame (post header,
