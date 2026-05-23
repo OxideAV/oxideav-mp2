@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.8...v0.0.9) - 2026-05-23
+
+### Other
+
+- add Xing/Info VBR seek TOC; decoder: recognise & skip VBR-header frames
+- add copyright/original/emphasis/private_bit header options
+- rewrite library-citation comments to remove external-library references
+- add dual_channel mode emission option
+- ATH psychoacoustic bias + per-subband JS relaxation + VBR slot validation
+
 ### Added
 
 - **Xing/Info VBR seek TOC (table of contents)**. The VBR header frame
