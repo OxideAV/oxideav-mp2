@@ -750,7 +750,19 @@ impl Mp2Encoder {
     /// frame is itself a valid Layer II frame (4-byte sync + zero
     /// sample payload), with the Xing tag block planted in what would
     /// otherwise be sample bits.
-    fn build_xing_frame(&self, num_frames: u32, total_bytes: u32) -> Vec<u8> {
+    ///
+    /// `toc` is the optional 100-byte seek table (Xing flag `0x4`,
+    /// trace-doc §7.2): `toc[i]` is `floor(256 · byte_offset / total)`
+    /// for the stream position reached at `i/100` of the total
+    /// duration, so a player seeking to percentage `p` jumps to
+    /// `(toc[p] / 256) · total_bytes`. When `None` the TOC flag is
+    /// cleared and only the frames/bytes fields are written.
+    fn build_xing_frame(
+        &self,
+        num_frames: u32,
+        total_bytes: u32,
+        toc: Option<&[u8; 100]>,
+    ) -> Vec<u8> {
         // Pick a header bitrate slot whose frame size comfortably
         // holds the Xing block (~120 bytes including TOC). Use the
         // canonical CBR slot of the encoder (or 128 kbps on MPEG-1 /
@@ -810,13 +822,27 @@ impl Mp2Encoder {
         // We place it at offset 4 (immediately after the header) for
         // simplicity — the rest of the frame is zeroed.
         let tag_off = 4usize;
+        // A TOC is only written when it fits entirely in the placeholder
+        // frame after the 16-byte magic/flags/frames/bytes block; a TOC
+        // that would overrun the frame is silently dropped (the flag is
+        // cleared) rather than truncated.
+        let want_toc = toc.is_some() && tag_off + 16 + 100 <= bytes.len();
         if tag_off + 16 <= bytes.len() {
-            bytes[tag_off..tag_off + 4].copy_from_slice(b"Info");
-            // Flags: bit 0 = Frames, bit 1 = Bytes (no TOC, no quality).
-            let flags: u32 = 0x0000_0003;
+            // VBR streams use the "Xing" magic; "Info" is the CBR spelling.
+            // Both are recognised by ffmpeg/mediainfo, but signalling
+            // "Xing" lets a scanner know the per-frame bitrate varies.
+            bytes[tag_off..tag_off + 4].copy_from_slice(b"Xing");
+            // Flags: bit 0 = Frames, bit 1 = Bytes, bit 2 = TOC (only
+            // when one was supplied and fits).
+            let flags: u32 = if want_toc { 0x0000_0007 } else { 0x0000_0003 };
             bytes[tag_off + 4..tag_off + 8].copy_from_slice(&flags.to_be_bytes());
             bytes[tag_off + 8..tag_off + 12].copy_from_slice(&num_frames.to_be_bytes());
             bytes[tag_off + 12..tag_off + 16].copy_from_slice(&total_bytes.to_be_bytes());
+            if want_toc {
+                // SAFETY: `want_toc` implies `toc.is_some()`.
+                let toc = toc.unwrap();
+                bytes[tag_off + 16..tag_off + 16 + 100].copy_from_slice(toc);
+            }
         }
         bytes
     }
@@ -861,9 +887,23 @@ impl Encoder for Mp2Encoder {
             // length. Second pass: rewrite with the correct
             // total-file-size value (LAME convention: the Xing "Bytes"
             // field counts the Xing frame too).
-            let placeholder = self.build_xing_frame(n_frames + 1, total_payload);
-            let xing_len = placeholder.len() as u32;
-            let xing_bytes = self.build_xing_frame(n_frames + 1, total_payload + xing_len);
+            //
+            // `Frames`/`Bytes` count the whole VBR stream including the
+            // Xing frame itself, so the TOC's `total_bytes` denominator
+            // and frame-position walk must also start from the Xing
+            // frame at byte 0 (index 0 in `frame_sizes`).
+            let placeholder = self.build_xing_frame(n_frames + 1, total_payload, None);
+            let xing_len = placeholder.len();
+            let total_bytes = total_payload + xing_len as u32;
+            let mut frame_sizes: Vec<u32> = Vec::with_capacity(self.vbr_buffered_packets.len() + 1);
+            frame_sizes.push(xing_len as u32);
+            frame_sizes.extend(
+                self.vbr_buffered_packets
+                    .iter()
+                    .map(|p| p.data.len() as u32),
+            );
+            let toc = build_xing_toc(&frame_sizes, total_bytes);
+            let xing_bytes = self.build_xing_frame(n_frames + 1, total_bytes, Some(&toc));
             let mut xing_pkt = Packet::new(0, self.time_base, xing_bytes);
             xing_pkt.pts = Some(0);
             xing_pkt.dts = Some(0);
@@ -920,6 +960,47 @@ fn bitrate_table(v: EncVersion) -> &'static [u32] {
         EncVersion::Mpeg1 => &BITRATES_MPEG1,
         EncVersion::Mpeg2Lsf => &BITRATES_MPEG2_LSF,
     }
+}
+
+/// Build the 100-entry Xing/Info seek table (de-facto Xing header
+/// flag `0x4`; trace-doc §7.2 "interpolation table for seeking").
+///
+/// `frame_sizes` is the byte length of every frame in playback order,
+/// *including* the leading Xing/Info frame at index 0 (so cumulative
+/// offsets start at byte 0 of the emitted stream). `total_bytes` is the
+/// sum of all frame sizes; it is the denominator a player divides into.
+///
+/// Each entry `toc[i]` records the stream position reached at `i/100`
+/// of the total duration as a fraction of `total_bytes` scaled to a
+/// byte: `toc[i] = round(256 · offset_at(i/100) / total_bytes)`,
+/// clamped to `255`. All frames are 1152 samples, so playback time is
+/// proportional to frame index and the time fraction `i/100` maps to
+/// frame `round(i/100 · num_frames)`. A player seeking to percentage
+/// `p` then jumps to byte `(toc[p] / 256) · total_bytes`. The
+/// classic-Xing convention puts `toc[0] = 0` (start of stream).
+fn build_xing_toc(frame_sizes: &[u32], total_bytes: u32) -> [u8; 100] {
+    let mut toc = [0u8; 100];
+    let num_frames = frame_sizes.len();
+    if num_frames == 0 || total_bytes == 0 {
+        return toc;
+    }
+    // Prefix sums of byte offsets: cum[k] = bytes before frame k.
+    let mut cum = vec![0u64; num_frames + 1];
+    for (k, &sz) in frame_sizes.iter().enumerate() {
+        cum[k + 1] = cum[k] + sz as u64;
+    }
+    let total = total_bytes as u64;
+    for (i, slot) in toc.iter_mut().enumerate() {
+        // Frame whose start is closest to i/100 of the total duration.
+        // round(i * num_frames / 100), clamped so we never index past
+        // the last frame's start offset.
+        let frame_idx = ((i as u64 * num_frames as u64 + 50) / 100).min(num_frames as u64 - 1);
+        let offset = cum[frame_idx as usize];
+        // round(256 * offset / total), clamped to a single byte.
+        let val = (256 * offset + total / 2) / total;
+        *slot = val.min(255) as u8;
+    }
+    toc
 }
 
 /// Walk the version's bitrate ladder (smallest first) and pick the
@@ -1436,6 +1517,60 @@ mod tests {
         // LSF allows every slot in every mode.
         let (_idx, kbps) = pick_vbr_slot(EncVersion::Mpeg2Lsf, 24_000, 1, 2);
         assert_eq!(kbps, 8, "LSF stereo should allow the 8 kbps slot");
+    }
+
+    #[test]
+    fn xing_toc_endpoints_and_monotonic() {
+        // 100 equal-size frames, total 1000 bytes (10 each). The TOC
+        // walks frame round(i*100/100)=i, so offset_at(i)=10*i bytes,
+        // toc[i]=round(256*10*i/1000)=round(2.56*i).
+        let sizes = vec![10u32; 100];
+        let total: u32 = sizes.iter().sum();
+        let toc = build_xing_toc(&sizes, total);
+        // Start of stream.
+        assert_eq!(toc[0], 0, "toc[0] must be 0 (start of stream)");
+        // Non-decreasing.
+        for w in toc.windows(2) {
+            assert!(w[1] >= w[0], "TOC must be non-decreasing: {w:?}");
+        }
+        // toc[50] ~ 50% → round(2.56*50)=128.
+        assert_eq!(toc[50], 128, "toc[50]={}", toc[50]);
+        // toc[99] ~ 99% → round(2.56*99)=253. Every entry is a `u8`, so
+        // the spec's 0..=255 single-byte range is satisfied by the type.
+        assert_eq!(toc[99], 253, "toc[99]={}", toc[99]);
+    }
+
+    #[test]
+    fn xing_toc_variable_sizes_track_byte_offsets() {
+        // Front-loaded stream: first frame is huge, rest are tiny. The
+        // TOC should climb steeply near the start and flatten later,
+        // because most bytes are spent at the front.
+        let mut sizes = vec![1000u32];
+        sizes.extend(std::iter::repeat_n(10u32, 99));
+        let total: u32 = sizes.iter().sum(); // 1000 + 990 = 1990
+        let toc = build_xing_toc(&sizes, total);
+        assert_eq!(toc[0], 0);
+        // By 1% of duration (frame 1) we've already passed the 1000-byte
+        // first frame: round(256*1000/1990)=129. The first step is the
+        // biggest jump in the table.
+        assert_eq!(toc[1], 129, "toc[1]={}", toc[1]);
+        // Subsequent steps are small (each later frame is only 10 bytes).
+        let big_step = toc[1] - toc[0];
+        let small_step = toc[50] - toc[49];
+        assert!(
+            big_step > small_step,
+            "front-loaded stream: first step {big_step} should exceed mid step {small_step}"
+        );
+    }
+
+    #[test]
+    fn xing_toc_degenerate_inputs() {
+        // Empty / zero-total inputs return an all-zero table rather than
+        // dividing by zero.
+        assert_eq!(build_xing_toc(&[], 0), [0u8; 100]);
+        assert_eq!(build_xing_toc(&[100], 0), [0u8; 100]);
+        // Single frame: every fraction maps to frame 0 (offset 0).
+        assert_eq!(build_xing_toc(&[417], 417), [0u8; 100]);
     }
 
     #[test]

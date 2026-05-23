@@ -156,6 +156,107 @@ fn vbr_emits_xing_header_with_accurate_metadata() {
     );
 }
 
+/// Parse the full Xing block, returning `(flags, frames, bytes, toc)`.
+/// `toc` is `Some([..100])` only when the TOC flag (`0x4`) is set.
+fn parse_xing_full(frame_bytes: &[u8]) -> Option<(u32, u32, u32, Option<[u8; 100]>)> {
+    let limit = frame_bytes.len().min(220);
+    for off in 4..limit.saturating_sub(16) {
+        let tag = &frame_bytes[off..off + 4];
+        if tag != b"Info" && tag != b"Xing" {
+            continue;
+        }
+        let rd = |p: usize| -> u32 {
+            u32::from_be_bytes([
+                frame_bytes[p],
+                frame_bytes[p + 1],
+                frame_bytes[p + 2],
+                frame_bytes[p + 3],
+            ])
+        };
+        let flags = rd(off + 4);
+        let nf = rd(off + 8);
+        let nb = rd(off + 12);
+        // Field order in the de-facto Xing layout: frames, bytes, TOC,
+        // quality — each present only when its flag bit is set.
+        let mut cursor = off + 16;
+        let toc = if flags & 0x4 != 0 {
+            if cursor + 100 > frame_bytes.len() {
+                return None;
+            }
+            let mut t = [0u8; 100];
+            t.copy_from_slice(&frame_bytes[cursor..cursor + 100]);
+            cursor += 100;
+            Some(t)
+        } else {
+            None
+        };
+        let _ = cursor;
+        return Some((flags, nf, nb, toc));
+    }
+    None
+}
+
+#[test]
+fn vbr_xing_carries_monotonic_seek_toc() {
+    // The VBR Xing header must advertise a 100-byte seek table (flag
+    // 0x4) so percentage seeks work. Verify the flag is set, the table
+    // is non-decreasing, starts at 0 (start of stream), and that each
+    // entry's implied byte offset lands inside the actual stream and
+    // resolves to a valid frame sync.
+    let sr = 44_100u32;
+    let pcm = make_music(2.0, sr);
+    let bytes = encode_vbr(&pcm, sr, 1, 5);
+    let frames = split_frames(&bytes);
+    assert!(
+        frames.len() > 10,
+        "need a multi-frame stream to test the TOC"
+    );
+
+    let (flags, nf, nb, toc) = parse_xing_full(frames[0]).expect("Xing header");
+    assert_eq!(flags & 0x7, 0x7, "Frames+Bytes+TOC flags must all be set");
+    assert_eq!(nf as usize, frames.len(), "frame count");
+    assert_eq!(nb as usize, bytes.len(), "byte count");
+    let toc = toc.expect("TOC must be present when flag 0x4 is set");
+
+    assert_eq!(toc[0], 0, "toc[0] must be 0 (start of stream)");
+    for w in toc.windows(2) {
+        assert!(w[1] >= w[0], "TOC must be non-decreasing: {w:?}");
+    }
+
+    // Build the set of valid frame-start byte offsets.
+    let mut starts = std::collections::BTreeSet::new();
+    let mut acc = 0usize;
+    for f in &frames {
+        starts.insert(acc);
+        acc += f.len();
+    }
+
+    // Every TOC entry maps to a byte offset (toc[i]/256 * total). The
+    // offset must be inside the stream and at-or-after a real frame
+    // boundary. A player snaps to the nearest preceding frame start.
+    for (i, &t) in toc.iter().enumerate() {
+        let off = (t as u64 * nb as u64 / 256) as usize;
+        assert!(off < bytes.len(), "toc[{i}]={t} → offset {off} past EOF");
+        // There is always a frame start at-or-before this offset.
+        let preceding = starts.range(..=off).next_back();
+        assert!(
+            preceding.is_some(),
+            "toc[{i}] offset {off} has no preceding frame start"
+        );
+    }
+
+    // The last TOC entry should point near the end of the stream
+    // (within the last few frames), confirming the table spans the
+    // whole file rather than collapsing to the front.
+    let last_off = (toc[99] as u64 * nb as u64 / 256) as usize;
+    let last_frame_start = *starts.iter().next_back().unwrap();
+    let third_last = starts.iter().rev().nth(2).copied().unwrap_or(0);
+    assert!(
+        last_off >= third_last,
+        "toc[99] offset {last_off} should be near EOF (last frame start {last_frame_start})"
+    );
+}
+
 #[test]
 fn vbr_xing_average_bitrate_matches_actual() {
     // For a frame at 44.1 kHz: each frame = 1152 samples = 1152/44100
@@ -284,9 +385,12 @@ fn vbr_ffmpeg_cross_decode() {
 
 #[test]
 fn vbr_first_frame_decodes_as_silence() {
-    // The Xing header frame is a valid MP2 frame with zero sample
-    // payload. The decoder should accept it without erroring and
-    // produce silence (or near-silence).
+    // The leading Xing/Info VBR-header frame is not ISO audio — its
+    // sample region holds the tag block (now including a 100-byte TOC,
+    // which is non-zero). The decoder must recognise the magic and skip
+    // the frame, emitting a true-silent 1152-sample placeholder rather
+    // than attempting to decode the TOC bytes as bit-allocation data
+    // (which would error with an out-of-range codeword).
     let sr = 44_100u32;
     let pcm = make_music(0.5, sr);
     let bytes = encode_vbr(&pcm, sr, 1, 3);
@@ -302,17 +406,10 @@ fn vbr_first_frame_decodes_as_silence() {
         Ok(_) => panic!("expected audio frame from Xing"),
         Err(e) => panic!("Xing frame decode error: {e:?}"),
     };
-    let energy: f64 = af.data[0]
-        .chunks_exact(2)
-        .map(|c| {
-            let s = i16::from_le_bytes([c[0], c[1]]) as f64 / 32768.0;
-            s * s
-        })
-        .sum::<f64>()
-        / (af.data[0].len() / 2) as f64;
-    eprintln!("Xing frame decoded energy: {energy:.6}");
-    // Don't enforce zero energy — the polyphase filter has memory so
-    // a Xing frame at the very start can produce non-zero PCM. Just
-    // require that we got *some* output of the right sample count.
     assert_eq!(af.samples, 1152);
+    // The skipped header frame is exact silence — every sample zero.
+    assert!(
+        af.data[0].iter().all(|&b| b == 0),
+        "recognised Xing frame must decode to exact silence"
+    );
 }

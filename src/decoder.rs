@@ -42,6 +42,7 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
         pending: None,
         synth: [SynthesisState::new(), SynthesisState::new()],
         eof: false,
+        seen_audio_frame: false,
     }))
 }
 
@@ -54,6 +55,13 @@ struct Mp2Decoder {
     pending: Option<(Packet, usize)>,
     synth: [SynthesisState; 2],
     eof: bool,
+    /// `false` until the first real audio frame is emitted. The de-facto
+    /// Xing / Info / VBRI VBR-header frame, when present, is always the
+    /// very first frame of the stream; restricting the tag scan to the
+    /// leading frame avoids mistaking dense bit-allocation bytes in a
+    /// genuine audio frame for the magic. Reset on `reset()` so a
+    /// post-seek stream that starts on a header frame is still handled.
+    seen_audio_frame: bool,
 }
 
 impl Decoder for Mp2Decoder {
@@ -134,6 +142,7 @@ impl Decoder for Mp2Decoder {
         self.synth = [SynthesisState::new(), SynthesisState::new()];
         self.pending = None;
         self.eof = false;
+        self.seen_audio_frame = false;
         Ok(())
     }
 }
@@ -164,6 +173,23 @@ impl Mp2Decoder {
             }
             // CRC not verified.
             offset += 2;
+        }
+
+        // Side-info / VBR-header frames (Xing / Info / VBRI) are *not*
+        // ISO Layer II audio: they carry a tag block (frame/byte counts,
+        // a 100-byte seek TOC, …) in what would be the sample region, so
+        // decoding their body as audio yields garbage / out-of-range
+        // codewords. These markers are de-facto (trace-doc §7) and always
+        // occupy the very first frame of the stream; a conforming decoder
+        // recognises and skips that frame, emitting a silent placeholder
+        // so PTS accounting stays aligned. We scan the leading frame's
+        // body for the magic the way ffmpeg / mediainfo do, then
+        // short-circuit to silence.
+        if !self.seen_audio_frame && is_vbr_tag_frame(&data[offset..frame_len]) {
+            return Ok((
+                silence_frame(channels, &hdr, pkt, start, frame_len),
+                frame_len,
+            ));
         }
 
         // MPEG-1 picks one of four tables from (sample_rate, mode, bitrate);
@@ -239,6 +265,10 @@ impl Mp2Decoder {
             .map(|p| p + (start as i64 / frame_len as i64) * 1152);
         let _ = full_data;
 
+        // A real audio frame was decoded: any later "Xing"/"Info"/"VBRI"
+        // byte pattern is genuine bit-allocation data, not a VBR header.
+        self.seen_audio_frame = true;
+
         Ok((
             Frame::Audio(AudioFrame {
                 samples: total_samples,
@@ -248,6 +278,46 @@ impl Mp2Decoder {
             frame_len,
         ))
     }
+}
+
+/// `true` if the frame body carries a de-facto VBR-header tag
+/// (`"Xing"`, `"Info"`, or `"VBRI"`) rather than ISO Layer II audio.
+///
+/// These tags (trace-doc §7) live in the sample region of a synthetic
+/// first frame; their bytes are not valid bit-allocation / sample data,
+/// so a decoder that tried to render them would emit garbage. ffmpeg /
+/// mediainfo locate the tag by scanning the frame, so an offset-tolerant
+/// search matches the on-wire reality. We only scan the first ~40 bytes
+/// of the body: the Xing/Info magic sits just past the (zero) side-info
+/// region and VBRI is at a fixed offset 32 from the frame start.
+fn is_vbr_tag_frame(body: &[u8]) -> bool {
+    let limit = body.len().saturating_sub(4).min(40);
+    (0..=limit).any(|i| {
+        let tag = &body[i..i + 4];
+        tag == b"Xing" || tag == b"Info" || tag == b"VBRI"
+    })
+}
+
+/// Build a 1152-sample-per-channel silent frame for a recognised
+/// VBR-header frame, with PTS mirroring the normal decode path so the
+/// downstream timeline stays continuous.
+fn silence_frame(
+    channels: usize,
+    _hdr: &crate::header::Header,
+    pkt: &Packet,
+    start: usize,
+    frame_len: usize,
+) -> Frame {
+    let total_samples = 1152u32;
+    let data = vec![0u8; total_samples as usize * channels * 2];
+    let frame_pts = pkt
+        .pts
+        .map(|p| p + (start as i64 / frame_len as i64) * 1152);
+    Frame::Audio(AudioFrame {
+        samples: total_samples,
+        pts: frame_pts,
+        data: vec![data],
+    })
 }
 
 /// Reverse-map a bitrate in kbps to its header-field index (1..=14 for
@@ -272,5 +342,34 @@ mod tests {
         assert_eq!(bitrate_to_index(32), Some(1));
         assert_eq!(bitrate_to_index(384), Some(14));
         assert_eq!(bitrate_to_index(999), None);
+    }
+
+    #[test]
+    fn detects_vbr_tag_magics() {
+        // Magic right after the (zero) side-info region.
+        let mut body = vec![0u8; 64];
+        body[0..4].copy_from_slice(b"Xing");
+        assert!(is_vbr_tag_frame(&body));
+
+        let mut info = vec![0u8; 64];
+        info[0..4].copy_from_slice(b"Info");
+        assert!(is_vbr_tag_frame(&info));
+
+        // VBRI sits at frame offset 32 → body offset 28 (no CRC header).
+        let mut vbri = vec![0u8; 64];
+        vbri[28..32].copy_from_slice(b"VBRI");
+        assert!(is_vbr_tag_frame(&vbri));
+    }
+
+    #[test]
+    fn ignores_magic_deep_in_body() {
+        // A coincidental "Info" past the 40-byte scan window is *not*
+        // treated as a VBR tag — real audio bit-allocation bytes can
+        // hit any 4-byte pattern further in.
+        let mut body = vec![0u8; 120];
+        body[100..104].copy_from_slice(b"Info");
+        assert!(!is_vbr_tag_frame(&body));
+        // All-zero (a genuine silent audio frame body) is not a tag.
+        assert!(!is_vbr_tag_frame(&[0u8; 64]));
     }
 }

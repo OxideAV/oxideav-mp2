@@ -23,8 +23,11 @@ Accepts all Layer II combinations permitted by the spec: MPEG-1 at
 mode (mono / stereo / joint-stereo / dual-channel), every bitrate on
 each version's ladder. Frames carrying a CRC-16 are accepted (the two
 bytes after the header are consumed but the CRC is not verified).
-Output frames are interleaved `SampleFormat::S16` at 1152 samples per
-channel.
+A leading VBR-header frame (`Xing` / `Info` / `VBRI`) is recognised by
+its magic and skipped — it decodes to exact silence rather than being
+mis-read as audio — so streams produced by this encoder or by other
+tools play cleanly from the first sample. Output frames are interleaved
+`SampleFormat::S16` at 1152 samples per channel.
 
 ```rust
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, RuntimeContext, TimeBase};
@@ -67,9 +70,12 @@ The following switches are exposed via `CodecParameters::options`:
 
 - `vbr_quality` (`u32`, 0..=9): switch the encoder to **VBR**. Each
   frame's bitrate slot is picked independently from the standard
-  ladder. The encoder also prepends a Xing/Info header frame on
-  flush, so downstream tools (ffmpeg, mediainfo) can show an accurate
-  average bitrate.
+  ladder. The encoder also prepends a Xing header frame on flush
+  carrying the total frame/byte counts **and a 100-byte seek table of
+  contents** (Xing flag `0x4`), so downstream tools (ffmpeg, mediainfo)
+  can show an accurate average bitrate and seek to any percentage of
+  the stream. A player seeking to percentage `p` jumps to byte
+  `(toc[p] / 256) · total_bytes`.
 - `joint_stereo` (`bool`): enable Layer II **intensity stereo** in
   stereo inputs. The encoder picks the smallest header-encodable
   bound (4 / 8 / 12 / 16) at which all upper subbands are L/R

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Xing/Info VBR seek TOC (table of contents)**. The VBR header frame
+  now carries the de-facto 100-byte seek table (Xing flag `0x4`), built
+  from the per-frame byte sizes so a player seeking to percentage `p`
+  jumps to byte `(toc[p] / 256) · total_bytes`. The header magic was
+  switched to `"Xing"` (the variable-bitrate spelling) and the flags
+  word to `0x7` (Frames + Bytes + TOC). The TOC walk starts from the
+  Xing frame at byte 0 so it agrees with the `Frames`/`Bytes` totals
+  (which count the header frame per the LAME convention). ffprobe reads
+  the resulting stream's duration and the table is monotonic from `0`
+  (start of stream) to the last frame start, verified out-of-tree.
+- **Decoder Xing/Info/VBRI frame recognition**. The leading VBR-header
+  frame is not ISO Layer II audio — its sample region holds the tag
+  block (frame/byte counts, the new 100-byte TOC, …), so decoding it as
+  audio yields out-of-range codewords. The decoder now scans the leading
+  frame's body for the `"Xing"`/`"Info"`/`"VBRI"` magic (trace-doc §7)
+  the way ffmpeg/mediainfo do and emits an exact-silence 1152-sample
+  placeholder for it, keeping PTS accounting aligned. The scan is
+  restricted to the first frame (and re-armed on `reset()`) so dense
+  bit-allocation bytes in a genuine audio frame are never mistaken for a
+  tag. New unit tests cover magic detection (`Xing`/`Info`/`VBRI` at the
+  canonical offsets, no false positive deep in the body) and the TOC
+  builder (endpoints, monotonicity, byte-offset tracking on variable
+  frame sizes, degenerate inputs); the VBR integration suite gains a
+  monotonic-seek-TOC round-trip and the first-frame test now asserts
+  exact silence.
 - **Header metadata-flag encoder options** — `copyright`, `original`,
   `emphasis`, and `private_bit` — covering the trailing header fields of
   ISO/IEC 11172-3 §2.4.2.3 that the encoder previously hardcoded to 0.
