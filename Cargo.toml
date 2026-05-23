@@ -1,0 +1,17 @@
+[package]
+name = "oxideav-mp2"
+version = "0.0.8"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-mp2"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust MPEG-1 / MPEG-2 LSF Audio Layer II (MP2) encoder and decoder"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-mp2"
+keywords = ["multimedia", "audio", "mpeg", "mp2", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = "0.1"
