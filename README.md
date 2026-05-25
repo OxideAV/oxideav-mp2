@@ -5,7 +5,7 @@ A pure-Rust **MPEG-1 Audio Layer II** (MP2 / MUSICAM) codec for the
 
 ## Status
 
-**Clean-room rebuild in progress (round 126, 2026-05-25).** The prior
+**Clean-room rebuild in progress (round 129, 2026-05-25).** The prior
 implementation was retired under the workspace
 [clean-room policy](https://github.com/OxideAV/oxideav-workspace/blob/master/docs/IMPLEMENTOR_ROUND.md):
 the provenance of its bit-allocation and synthesis-window data tables
@@ -51,32 +51,60 @@ solely from the ISO/IEC 11172-3 PDF:
   multipliers used by §2.4.3.3.3 to rescale requantized samples are
   tabulated in `tables::SCALEFACTORS` and self-checked against the
   closed-form `scalefactor[i] = 2^((3 − i) / 3)`.
+- **Annex B Tables 3-B.2a..d** "Possible quantization per subband" and
+  **Table 3-B.4** "Layer II classes of quantization"
+  (`bitalloc` module): the four B.2 sub-tables are transcribed from
+  PDF pages 46-49 with their `sblimit` (27 / 30 / 8 / 12), per-subband
+  `nbal` widths (4 / 3 / 2 bits), and per-subband index→`nb_steps`
+  mappings. `select_table` picks the active sub-table from the
+  §2.4.2.3 `(sample_rate, per-channel bitrate)` rule. Table 3-B.4
+  rows are exposed as `QuantClass` (the `C` / `D` requantization
+  constants plus `grouping`, `samples_per_codeword`, and
+  `bits_per_codeword` columns); `is_grouped` materialises the
+  §2.4.2.3 "value is 3, 5, or 9" grouping check.
+- **§2.4.1.6 audio-data side info** (`audio_data` module): the
+  bit-allocation loop (with per-subband `nbal` widths and the
+  joint-stereo "intensity-stereo subbands share one allocation"
+  branch above `bound`), the §2.4.3.3.2 scfsi loop (only over
+  allocation-non-zero (ch, sb) pairs; 2-bit field decoded into the
+  `Scfsi` enum), and the §2.4.3.3.3 scalefactor loop (1, 2, or 3
+  on-wire 6-bit indices expanded across the three granules per the
+  §2.4.2.3 scfsi schedule) are parsed end-to-end into a typed
+  `AudioData` struct using `oxideav_core::bits::BitReader`.
 
-21 unit tests cover the bitrate / sampling-frequency ladders end-to-end,
-sync detection (positive + negative paths), the §2.4.2.3 disallowed
-bitrate/mode combinations (rejection + the matching allow paths), every
-emphasis value (including the reserved-`'10'` rejection), every mode
-and mode-extension code, the LSF-rejection path, short-buffer rejection,
-the reserved-`'00'` layer rejection, frame-size calculation at three
-canonical (bitrate, sample-rate) points (with padding on / off), and
-the Table 3-B.1 scalefactor closed-form / endpoint / monotonicity /
-exact-power-of-two cross-checks.
+46 unit tests cover the bitrate / sampling-frequency ladders
+end-to-end, sync detection (positive + negative paths), the §2.4.2.3
+disallowed bitrate/mode combinations (rejection + the matching allow
+paths), every emphasis value (including the reserved-`'10'`
+rejection), every mode and mode-extension code, the LSF-rejection
+path, short-buffer rejection, the reserved-`'00'` layer rejection,
+frame-size calculation at three canonical (bitrate, sample-rate)
+points (with padding on / off), the Table 3-B.1 scalefactor
+closed-form / endpoint / monotonicity / exact-power-of-two
+cross-checks, the per-`sblimit` / per-`nbal` layout of every B.2
+sub-table (with sum-of-nbal cross-checks against the PDF footer
+totals: 88, 94, 26), per-row index→`nb_steps` round-trips against
+the literal PDF rows, the four `(sample_rate, bitrate)`
+table-selection branches, Table 3-B.4 spot lookups against PDF
+page 50, every B.2 cell resolving to a known B.4 class, the four
+scfsi expansion schedules (`'00'/'01'/'10'/'11'` → `[a,b,c]`,
+`[a,a,c]`, `[a,a,a]`, `[a,c,c]`), joint-stereo allocation sharing
+above `bound`, the zero-allocation skip path, the reserved
+scalefactor-index-63 rejection, and the bit-budget identity
+(allocation bits = `2 × Σ nbal` for stereo).
 
 ## What does not work yet
 
-`register()` is a no-op until the §2.4.1.6 / §2.4.3.3 audio-data decode
-path lands: bit-allocation tables 3-B.2a..d "Possible quantization per
-subband" (§2.4.3.3.1), per-subband `scfsi` decoding (§2.4.3.3.2),
-1..3 scalefactor indices per subband per `scfsi` schedule (§2.4.3.3.3),
-sample requantization per Table 3-B.4 "Layer II classes of quantization"
-(§2.4.3.3.4) including the `samplecode` triplet de-grouping path, and
-the §2.4.3.2 polyphase synthesis filterbank driven by Table 3-B.3
-"Coefficients D[i] of the synthesis window" (rendered as PNG pages
-56-58 under `docs/audio/mp3/annex-b-renders/`). The §2.4.1.4 / §2.4.3.1
-CRC-16 over the Table 3-B.5 protected fields (header bits 16…31 + bit
-allocation + scfsi, per `docs/audio/mp3/mp1-crc-iso-extracts.md`) is
-likewise a followup. Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF Layer
-II ladder (16 / 22.05 / 24 kHz) are subsequent followups.
+`register()` is a no-op until the §2.4.3.3.4 sample requantization
+(which consumes the `QuantClass` constants — the `samplecode` triplet
+de-grouping path plus the linear requantizer) and the §2.4.3.2
+polyphase synthesis filterbank driven by Table 3-B.3 "Coefficients
+D[i] of the synthesis window" (rendered as PNG pages 56-58 under
+`docs/audio/mp3/annex-b-renders/`) land. The §2.4.1.4 / §2.4.3.1
+CRC-16 over the Table 3-B.5 protected fields (header bits 16…31 +
+bit allocation + scfsi, per `docs/audio/mp3/mp1-crc-iso-extracts.md`)
+is likewise a followup. Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF
+Layer II ladder (16 / 22.05 / 24 kHz) are subsequent followups.
 
 ## Spec note recorded
 

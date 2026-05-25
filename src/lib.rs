@@ -38,38 +38,57 @@
 //! * **Annex B Table 3-B.1** "Layer I, II scalefactors": the 63
 //!   multipliers used by §2.4.3.3.3 to rescale requantized samples
 //!   are tabulated in [`tables::SCALEFACTORS`] and self-checked
-//!   against the closed-form `scalefactor[i] = 2^((1 − i) / 3)`.
+//!   against the closed-form `scalefactor[i] = 2^((3 − i) / 3)`.
+//!
+//! * **§2.4.1.6 / §2.4.3.3.1..3 audio-data side info**
+//!   ([`audio_data`] module): the per-frame bit-allocation +
+//!   scalefactor-selection-information + scalefactor loops are parsed
+//!   into a typed [`audio_data::AudioData`] struct. Bit allocation
+//!   indexes into Tables 3-B.2a..d via the
+//!   [`bitalloc::BitAllocTable`] selected by the
+//!   `(sample_rate, per-channel bitrate)` rule from §2.4.2.3; scfsi
+//!   schedules are typed by [`audio_data::Scfsi`]; on-wire scalefactor
+//!   indices (1, 2, or 3 per subband per channel depending on scfsi)
+//!   are expanded across the three granules per the §2.4.2.3 schedule.
 //!
 //! ## What does not work yet
 //!
-//! [`register`] is a no-op until the §2.4.1.6 / §2.4.3.3 audio-data
-//! decode path lands (bit-allocation tables B.2a..d, scfsi, scalefactor
-//! triples, requantization per Table B.4, and the §2.4.3.2 polyphase
-//! synthesis filter driven by Table B.3). The Annex B Table B.3 page
-//! renders (`docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`)
-//! and the Layer II Tables B.2 / B.4 (§2.4.3.3.1 / §2.4.3.3.4) are
-//! staged in the PDF; the rebuild lands these in subsequent rounds
-//! alongside the corresponding decode step.
+//! [`register`] is a no-op until the §2.4.3.3.4 requantization step
+//! (which consumes the Table 3-B.4 classes already tabulated in
+//! [`bitalloc`]) and the §2.4.3.2 polyphase synthesis filter (which
+//! consumes Table 3-B.3 — the synthesis-window coefficients staged as
+//! `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`)
+//! are wired up.
 
 #![warn(missing_debug_implementations)]
 
 use oxideav_core::RuntimeContext;
 
+pub mod audio_data;
+pub mod bitalloc;
 pub mod header;
 pub mod tables;
 
+pub use audio_data::{parse_audio_data, AudioData, AudioDataError, Scfsi, MAX_CHANNELS};
+pub use bitalloc::{
+    bitrate_per_channel_kbps, class_of_quantization, is_grouped, select_table, BitAllocTable,
+    QuantClass, NUM_SUBBANDS,
+};
 pub use header::{
     decode_bitrate, decode_sampling_frequency, find_sync, is_layer2_bitrate_mode_allowed, Emphasis,
     FrameHeader, HeaderError, Mode, ModeExtension, SYNCWORD,
 };
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
 
-/// Crate-local error type. Decode paths beyond the frame header are
-/// not yet wired up; [`Error::NotImplemented`] continues to gate them.
+/// Crate-local error type. Decode paths beyond the frame header +
+/// audio-data side info are not yet wired up; [`Error::NotImplemented`]
+/// continues to gate them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// A 4-byte Layer II header could not be parsed from the input.
     Header(HeaderError),
+    /// The §2.4.1.6 / §2.4.3.3 audio-data side info could not be parsed.
+    AudioData(AudioDataError),
     /// A reachable Layer II decode/encode path that is not yet wired up.
     NotImplemented,
 }
@@ -80,10 +99,17 @@ impl From<HeaderError> for Error {
     }
 }
 
+impl From<AudioDataError> for Error {
+    fn from(value: AudioDataError) -> Self {
+        Error::AudioData(value)
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::Header(err) => write!(f, "oxideav-mp2 header error: {err}"),
+            Error::AudioData(err) => write!(f, "oxideav-mp2 audio-data error: {err}"),
             Error::NotImplemented => {
                 write!(
                     f,
@@ -98,6 +124,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Header(err) => Some(err),
+            Error::AudioData(err) => Some(err),
             Error::NotImplemented => None,
         }
     }

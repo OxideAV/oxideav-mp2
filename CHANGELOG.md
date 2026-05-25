@@ -6,6 +6,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 129 — clean-room rebuild, step 2)
+
+- **§2.4.1.6 audio-data side info** (`audio_data` module): the
+  bit-allocation loop (§2.4.3.3.1), scalefactor-selection-information
+  loop (§2.4.3.3.2), and scalefactor decode loop (§2.4.3.3.3) are
+  parsed end-to-end into a typed `AudioData` struct
+  (`parse_audio_data(&FrameHeader, &mut BitReader) ->
+  Result<AudioData, AudioDataError>`). The joint-stereo
+  `[bound, sblimit)` "intensity-stereo subbands share one allocation
+  across both channels" branch is honoured; the four §2.4.2.3 scfsi
+  schedules (`'00'/'01'/'10'/'11'`) are typed by `Scfsi` and expand
+  the 1, 2, or 3 on-wire 6-bit `scalefactor[ch][sb][part]` indices
+  across the three granules per the spec. Reserved scalefactor index
+  63 is rejected with a distinct `AudioDataError::ReservedScalefactorIndex`
+  variant.
+- **Annex B Tables 3-B.2a..d + 3-B.4** (`bitalloc` module):
+  the four B.2 sub-tables ("Possible quantization per subband",
+  PDF pages 46-49) are transcribed verbatim with their `sblimit`
+  (27 / 30 / 8 / 12), per-subband `nbal` widths, and per-subband
+  index-to-`nb_steps` rows. `BitAllocTable::nb_steps(sb, index)`
+  performs the lookup; `select_table(header)` picks the active
+  sub-table per the §2.4.2.3 `(sample_rate, per-channel bitrate)`
+  rule. Table 3-B.4 (PDF page 50) is exposed via
+  `class_of_quantization(nb_steps) -> Option<QuantClass>` carrying
+  the `C` / `D` requantization constants, the `grouping` flag (with
+  the §2.4.2.3 "value is 3, 5, or 9" rule cross-checked against
+  `is_grouped`), and the codeword shape (`samples_per_codeword`,
+  `bits_per_codeword`).
+- **25 new unit tests** (46 total) cover the per-`sblimit` /
+  per-`nbal` layout of every B.2 sub-table (cross-checked against
+  the PDF footer sum-of-nbal totals: 88 / 94 / 26), per-row
+  index→`nb_steps` round-trips against the literal PDF rows, the
+  four `(sample_rate, bitrate)` table-selection branches, Table
+  3-B.4 spot lookups against PDF page 50, every B.2 cell resolving
+  to a known B.4 class, the four scfsi expansion schedules, joint-
+  stereo allocation sharing above `bound`, the zero-allocation skip
+  path, reserved scalefactor index 63 rejection, and the bit-budget
+  identity `allocation_bits == 2 * Σ nbal` for stereo.
+- **`oxideav_core::bits::BitReader`** is now a dependency surface
+  (re-used as the §2.4.1.6 reader).
+
+### Fixed
+
+- The lib.rs doc-comment for `tables::SCALEFACTORS` listed the
+  closed-form as `2^((1 − i) / 3)`; it is `2^((3 − i) / 3)` (the
+  table itself was correct — only the docstring was off).
+
 ### Added (round 126 — clean-room rebuild, step 1)
 
 - **MPEG-1 Layer II frame header** (`header` module): the §2.4.1.3
