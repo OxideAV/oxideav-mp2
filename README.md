@@ -5,7 +5,7 @@ A pure-Rust **MPEG-1 Audio Layer II** (MP2 / MUSICAM) codec for the
 
 ## Status
 
-**Clean-room rebuild in progress (round 129, 2026-05-25).** The prior
+**Clean-room rebuild in progress (round 133, 2026-05-25).** The prior
 implementation was retired under the workspace
 [clean-room policy](https://github.com/OxideAV/oxideav-workspace/blob/master/docs/IMPLEMENTOR_ROUND.md):
 the provenance of its bit-allocation and synthesis-window data tables
@@ -71,8 +71,19 @@ solely from the ISO/IEC 11172-3 PDF:
   on-wire 6-bit indices expanded across the three granules per the
   §2.4.2.3 scfsi schedule) are parsed end-to-end into a typed
   `AudioData` struct using `oxideav_core::bits::BitReader`.
+- **§2.4.3.3.4 sample requantization** (`requant` module): a bitstream
+  sample code is turned into a normalized fractional value `s''`.
+  `requantize_code` inverts the first (MSB) bit, reads the result as an
+  `n`-bit two's complement fractional number (MSB weight −1), and
+  applies `s'' = C * (s''' + D)` with the Table 3-B.4 constants;
+  `degroup` runs the radix-`nlevels` splitting for the grouped classes
+  (`nb_steps ∈ {3, 5, 9}`); `read_triplet` reads one (subband, granule)
+  triplet (one combined codeword when grouped, three separable codes
+  otherwise); and `requantize_scaled` layers the §2.4.3.3.3 Table 3-B.1
+  rescaling (`s' = factor * s''`) on top. `QuantClass::bits_per_sample`
+  exposes the single-sample width `ceil(log2(nb_steps))`.
 
-46 unit tests cover the bitrate / sampling-frequency ladders
+59 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -90,15 +101,19 @@ page 50, every B.2 cell resolving to a known B.4 class, the four
 scfsi expansion schedules (`'00'/'01'/'10'/'11'` → `[a,b,c]`,
 `[a,a,c]`, `[a,a,a]`, `[a,c,c]`), joint-stereo allocation sharing
 above `bound`, the zero-allocation skip path, the reserved
-scalefactor-index-63 rejection, and the bit-budget identity
-(allocation bits = `2 × Σ nbal` for stereo).
+scalefactor-index-63 rejection, the bit-budget identity
+(allocation bits = `2 × Σ nbal` for stereo), the 3-level symmetric
+requantizer levels, a from-prose reference requantizer cross-checked
+against `requantize_code` for every Table 3-B.4 class, the radix-
+`nlevels` degrouping (exhaustive for `nb_steps` 3 and 5), the
+grouped-vs-separable `read_triplet` bit counts, and the Table 3-B.1
+unity / doubling rescaling.
 
 ## What does not work yet
 
-`register()` is a no-op until the §2.4.3.3.4 sample requantization
-(which consumes the `QuantClass` constants — the `samplecode` triplet
-de-grouping path plus the linear requantizer) and the §2.4.3.2
-polyphase synthesis filterbank driven by Table 3-B.3 "Coefficients
+`register()` is a no-op until the §2.4.1.6 sample loop drives
+`requant::read_triplet` across all subbands / granules and feeds the
+§2.4.3.2 polyphase synthesis filterbank driven by Table 3-B.3 "Coefficients
 D[i] of the synthesis window" (rendered as PNG pages 56-58 under
 `docs/audio/mp3/annex-b-renders/`) land. The §2.4.1.4 / §2.4.3.1
 CRC-16 over the Table 3-B.5 protected fields (header bits 16…31 +

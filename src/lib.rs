@@ -51,14 +51,24 @@
 //!   indices (1, 2, or 3 per subband per channel depending on scfsi)
 //!   are expanded across the three granules per the §2.4.2.3 schedule.
 //!
+//! * **§2.4.3.3.4 sample requantization** ([`requant`] module): turns a
+//!   bitstream sample code into a normalized fractional value `s''`.
+//!   [`requant::degroup`] runs the §2.4.3.3.4 radix-`nlevels`
+//!   degrouping for grouped classes (`nb_steps ∈ {3, 5, 9}`);
+//!   [`requant::requantize_code`] performs the MSB inversion + two's
+//!   complement fractional interpretation + the `s'' = C * (s''' + D)`
+//!   linear formula with the Table 3-B.4 `C` / `D` constants;
+//!   [`requant::read_triplet`] reads one (subband, granule) triplet
+//!   from the bitstream; [`requant::requantize_scaled`] layers the
+//!   §2.4.3.3.3 Table 3-B.1 rescaling (`s' = factor * s''`) on top.
+//!
 //! ## What does not work yet
 //!
-//! [`register`] is a no-op until the §2.4.3.3.4 requantization step
-//! (which consumes the Table 3-B.4 classes already tabulated in
-//! [`bitalloc`]) and the §2.4.3.2 polyphase synthesis filter (which
-//! consumes Table 3-B.3 — the synthesis-window coefficients staged as
-//! `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`)
-//! are wired up.
+//! [`register`] is a no-op until the §2.4.1.6 sample loop is driven by
+//! [`requant::read_triplet`] across all subbands/granules and fed into
+//! the §2.4.3.2 polyphase synthesis filter (which consumes Table 3-B.3
+//! — the synthesis-window coefficients staged as
+//! `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`).
 
 #![warn(missing_debug_implementations)]
 
@@ -67,6 +77,7 @@ use oxideav_core::RuntimeContext;
 pub mod audio_data;
 pub mod bitalloc;
 pub mod header;
+pub mod requant;
 pub mod tables;
 
 pub use audio_data::{parse_audio_data, AudioData, AudioDataError, Scfsi, MAX_CHANNELS};
@@ -78,6 +89,7 @@ pub use header::{
     decode_bitrate, decode_sampling_frequency, find_sync, is_layer2_bitrate_mode_allowed, Emphasis,
     FrameHeader, HeaderError, Mode, ModeExtension, SYNCWORD,
 };
+pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
 
 /// Crate-local error type. Decode paths beyond the frame header +

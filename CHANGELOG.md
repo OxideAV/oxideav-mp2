@@ -6,6 +6,40 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 133 — clean-room rebuild, step 3)
+
+- **§2.4.3.3.4 sample requantizer** (`requant` module): turns a Layer II
+  bitstream sample code into a normalized fractional value `s''`.
+  - `requantize_code(&QuantClass, code) -> f64` performs the §2.4.3.3.4
+    steps for one sample: invert the first (MSB) bit, read the result as
+    an `n`-bit two's complement fractional number (MSB weight −1), then
+    apply the linear formula `s'' = C * (s''' + D)` with the Table 3-B.4
+    `C` / `D` constants. `n = QuantClass::bits_per_sample()`.
+  - `degroup(&QuantClass, combined) -> [u32; 3]` runs the §2.4.3.3.4
+    radix-`nlevels` degrouping (`s[i] = c % nlevels; c = c DIV nlevels;`)
+    for the grouped classes (`nb_steps ∈ {3, 5, 9}`).
+  - `read_triplet(&QuantClass, &mut BitReader) -> [f64; 3]` reads one
+    (subband, granule) triplet — one combined codeword for a grouped
+    class, three separable codes otherwise — and requantizes all three.
+  - `requantize_scaled(&QuantClass, scalefactor_index, &mut BitReader)`
+    layers the §2.4.3.3.3 Table 3-B.1 rescaling (`s' = factor * s''`)
+    on top; reserved scalefactor index 63 is rejected via the new
+    `RequantError::ReservedScalefactorIndex`.
+- **`QuantClass::bits_per_sample()`**: `ceil(log2(nb_steps))` — the
+  width of a single degrouped sample code (equals `bits_per_codeword`
+  for ungrouped classes; strictly narrower for the three grouped ones).
+- **13 new unit tests** (59 total): the 3-level class produces the
+  expected symmetric `{−C/2, 0, +C/2}` levels; a from-prose reference
+  requantizer cross-checks `requantize_code` for every Table 3-B.4
+  class (exhaustive for the narrow classes, sampled for the wide ones);
+  requantized magnitudes stay within `C*(1+D)`; degrouping matches the
+  radix-`nlevels` decomposition (exhaustive for `nb_steps` 3 and 5);
+  `read_triplet` reads the right bit count for grouped vs separable
+  classes and round-trips through `requantize_code`; `requantize_scaled`
+  applies the Table 3-B.1 unity / doubling multipliers and rejects index
+  63; the `UnexpectedEnd` short-buffer path; and the `C` / `D` constants
+  are pinned independently of the `bitalloc` table test.
+
 ### Added (round 129 — clean-room rebuild, step 2)
 
 - **§2.4.1.6 audio-data side info** (`audio_data` module): the

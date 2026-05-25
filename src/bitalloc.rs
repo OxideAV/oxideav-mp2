@@ -216,6 +216,34 @@ pub fn is_grouped(nb_steps: u32) -> bool {
     matches!(nb_steps, 3 | 5 | 9)
 }
 
+impl QuantClass {
+    /// Number of bits each *individual* requantized sample occupies once
+    /// any §2.4.3.3.4 grouping has been undone.
+    ///
+    /// For an ungrouped class this is exactly [`Self::bits_per_codeword`]
+    /// (one codeword == one sample). For a grouped class the codeword
+    /// packs three samples, each carrying one of `nb_steps` levels, so a
+    /// single sample spans `ceil(log2(nb_steps))` bits. The relation
+    /// `bits_per_codeword == ceil(log2(nb_steps))` already holds for
+    /// every ungrouped row, so this single closed form is correct for
+    /// all 17 Table 3-B.4 classes:
+    ///
+    /// | nb_steps | grouping | bits/codeword | bits/sample |
+    /// |---------:|:--------:|--------------:|------------:|
+    /// | 3        | yes      | 5             | 2           |
+    /// | 5        | yes      | 7             | 3           |
+    /// | 9        | yes      | 10            | 4           |
+    /// | 7        | no       | 3             | 3           |
+    /// | 15       | no       | 4             | 4           |
+    /// | 65535    | no       | 16            | 16          |
+    pub fn bits_per_sample(self) -> u32 {
+        // ceil(log2(nb_steps)) — the width needed to hold one degrouped
+        // code in `0 ..= nb_steps - 1`.
+        debug_assert!(self.nb_steps >= 2);
+        32 - (self.nb_steps - 1).leading_zeros()
+    }
+}
+
 /// Table 3-B.4 class of quantization for a given `nb_steps` value.
 ///
 /// Returns `None` for the §2.4.2.3 sentinel `nb_steps == 0` ("no bits
@@ -876,6 +904,30 @@ mod tests {
         assert!(class_of_quantization(0).is_none());
         assert!(class_of_quantization(2).is_none());
         assert!(class_of_quantization(64).is_none());
+    }
+
+    #[test]
+    fn bits_per_sample_is_ceil_log2_nb_steps() {
+        // Grouped classes: codeword packs 3 samples, so the per-sample
+        // width is strictly less than the codeword width.
+        let g = [(3u32, 5u32, 2u32), (5, 7, 3), (9, 10, 4)];
+        for (nb, cw, bps) in g {
+            let c = class_of_quantization(nb).unwrap();
+            assert_eq!(c.bits_per_codeword, cw, "nb_steps={nb} codeword width");
+            assert_eq!(c.bits_per_sample(), bps, "nb_steps={nb} sample width");
+        }
+        // Ungrouped classes: one codeword == one sample.
+        for nb in [7u32, 15, 31, 63, 127, 255, 511, 1023, 65535] {
+            let c = class_of_quantization(nb).unwrap();
+            assert_eq!(
+                c.bits_per_sample(),
+                c.bits_per_codeword,
+                "ungrouped nb_steps={nb}"
+            );
+            // ceil(log2(nb_steps)) cross-check.
+            let want = (nb as f64).log2().ceil() as u32;
+            assert_eq!(c.bits_per_sample(), want, "nb_steps={nb} ceil(log2)");
+        }
     }
 
     #[test]
