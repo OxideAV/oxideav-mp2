@@ -142,8 +142,9 @@ pub use frame::{
     FrameError, PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME,
 };
 pub use header::{
-    decode_bitrate, decode_sampling_frequency, find_sync, is_layer2_bitrate_mode_allowed, Emphasis,
-    FrameHeader, HeaderError, Mode, ModeExtension, SYNCWORD,
+    decode_bitrate, decode_sampling_frequency, encode_bitrate, encode_sampling_frequency,
+    find_sync, is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, HeaderError, Mode,
+    ModeExtension, SYNCWORD,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};

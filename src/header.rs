@@ -92,6 +92,13 @@ pub enum HeaderError {
     /// not all combinations of total bitrate and mode are allowed"
     /// matrix.
     DisallowedBitrateModeCombination { bit_rate: u32, mode: Mode },
+    /// Encoder-side: `bit_rate` is not one of the 14 §2.4.2.3 Layer II
+    /// ladder values (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224,
+    /// 256, 320, 384 kbit/s). Free-format encoding is out of scope.
+    UnsupportedBitrate(u32),
+    /// Encoder-side: `sample_rate` is not one of the three §2.4.2.3
+    /// sampling-frequency table values (32_000, 44_100, 48_000 Hz).
+    UnsupportedSamplingFrequency(u32),
 }
 
 impl fmt::Display for HeaderError {
@@ -127,6 +134,16 @@ impl fmt::Display for HeaderError {
                 "bitrate {} kbit/s is not permitted with mode {:?} per §2.4.2.3",
                 bit_rate / 1000,
                 mode
+            ),
+            HeaderError::UnsupportedBitrate(rate) => write!(
+                f,
+                "bit_rate {} bit/s is not in the §2.4.2.3 Layer II ladder",
+                rate
+            ),
+            HeaderError::UnsupportedSamplingFrequency(rate) => write!(
+                f,
+                "sample_rate {} Hz is not in the §2.4.2.3 sampling-frequency table",
+                rate
             ),
         }
     }
@@ -340,6 +357,89 @@ impl FrameHeader {
     pub fn channels(&self) -> usize {
         self.mode.channels()
     }
+
+    /// Emit this header as the 4-byte big-endian §2.4.1.3 word.
+    ///
+    /// This is the symmetric inverse of [`FrameHeader::parse`]. The same
+    /// §2.4.2.3 validation is re-applied on the encoder side so a
+    /// malformed encoder construction cannot escape the type system:
+    ///
+    /// - `bit_rate` must be one of the 14 Layer II ladder values
+    ///   (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ///   384 kbit/s); otherwise [`HeaderError::UnsupportedBitrate`].
+    /// - `sample_rate` must be one of 32_000 / 44_100 / 48_000 Hz;
+    ///   otherwise [`HeaderError::UnsupportedSamplingFrequency`].
+    /// - The (`bit_rate`, `mode`) pair must satisfy the §2.4.2.3
+    ///   "For Layer II, not all combinations of total bitrate and mode
+    ///   are allowed" matrix; otherwise
+    ///   [`HeaderError::DisallowedBitrateModeCombination`].
+    ///
+    /// The §2.4.2.3 reserved `emphasis = '10'` and reserved
+    /// `sampling_frequency = '11'` cannot be produced by this method
+    /// because they have no [`Emphasis`] / valid `sample_rate`
+    /// counterpart — the type system already excludes them.
+    ///
+    /// The output is bit-exact identical to what `parse` would have
+    /// read: bits 31..20 = `0xFFF` syncword, bit 19 = `'1'` (MPEG-1
+    /// ID), bits 18..17 = `'10'` (Layer II), bit 16 = `protection_bit`
+    /// (the spec convention: `'1'` = no CRC; `'0'` = CRC follows the
+    /// header per §2.4.1.4), then the rest of the §2.4.1.3 layout.
+    pub fn emit_bytes(&self) -> Result<[u8; 4], HeaderError> {
+        // Resolve the §2.4.2.3 ladder codes FIRST so an off-ladder
+        // `bit_rate` (e.g. 200 kbit/s) is reported as
+        // `UnsupportedBitrate` rather than getting swept into the
+        // §2.4.2.3 "disallowed (bitrate, mode)" matrix (which only
+        // covers the ladder rows themselves).
+        let bitrate_index = encode_bitrate(self.bit_rate)? as u32;
+        let sf_index = encode_sampling_frequency(self.sample_rate)? as u32;
+
+        // Now the (bit_rate, mode) pair sits inside the §2.4.2.3
+        // matrix on PDF page 21; enforce the "not all combinations are
+        // allowed" rule.
+        if !is_layer2_bitrate_mode_allowed(self.bit_rate, self.mode) {
+            return Err(HeaderError::DisallowedBitrateModeCombination {
+                bit_rate: self.bit_rate,
+                mode: self.mode,
+            });
+        }
+
+        let mode_bits: u32 = match self.mode {
+            Mode::Stereo => 0b00,
+            Mode::JointStereo => 0b01,
+            Mode::DualChannel => 0b10,
+            Mode::SingleChannel => 0b11,
+        };
+        let mode_ext_bits: u32 = match self.mode_extension {
+            ModeExtension::Bound4 => 0b00,
+            ModeExtension::Bound8 => 0b01,
+            ModeExtension::Bound12 => 0b10,
+            ModeExtension::Bound16 => 0b11,
+        };
+        let emphasis_bits: u32 = match self.emphasis {
+            Emphasis::None => 0b00,
+            Emphasis::FiftyFifteen => 0b01,
+            Emphasis::CcittJ17 => 0b11,
+        };
+
+        // §2.4.1.3 packed layout, transmitted MSB-first:
+        //   sync(12) | ID(1)=1 | layer(2)='10' | protection(1) |
+        //   bitrate(4) | sf(2) | pad(1) | priv(1) | mode(2) |
+        //   mode_ext(2) | copyright(1) | original(1) | emph(2)
+        let word: u32 = ((SYNCWORD as u32) << 20)
+            | (1 << 19) // ID = '1' (MPEG-1, §2.4.2.3)
+            | (0b10 << 17) // layer = '10' (Layer II, §2.4.2.3)
+            | ((self.protection_bit as u32) << 16)
+            | (bitrate_index << 12)
+            | (sf_index << 10)
+            | ((self.padding as u32) << 9)
+            | ((self.private_bit as u32) << 8)
+            | (mode_bits << 6)
+            | (mode_ext_bits << 4)
+            | ((self.copyright as u32) << 3)
+            | ((self.original as u32) << 2)
+            | emphasis_bits;
+        Ok(word.to_be_bytes())
+    }
 }
 
 /// Decode the §2.4.2.3 Layer II `bitrate_index` ladder.
@@ -378,6 +478,54 @@ pub fn decode_sampling_frequency(index: u8) -> Result<u32, HeaderError> {
         0b10 => Ok(32_000),
         0b11 => Err(HeaderError::ReservedSamplingFrequency),
         _ => unreachable!("sampling_frequency is a 2-bit field"),
+    }
+}
+
+/// Encode a §2.4.2.3 Layer II bitrate to its 4-bit `bitrate_index`.
+///
+/// This is the inverse of [`decode_bitrate`]. `bit_rate` is the bitrate
+/// in bit/s (i.e. `kbit/s × 1000`). Free format (`'0000'`) and the
+/// forbidden code (`'1111'`) are intentionally not producible — both
+/// are rejected as [`HeaderError::UnsupportedBitrate`] since this
+/// crate's encoder only emits the §2.4.2.3 ladder.
+pub fn encode_bitrate(bit_rate: u32) -> Result<u8, HeaderError> {
+    if bit_rate == 0 || bit_rate % 1000 != 0 {
+        return Err(HeaderError::UnsupportedBitrate(bit_rate));
+    }
+    let kbps = bit_rate / 1000;
+    let index = match kbps {
+        32 => 0b0001,
+        48 => 0b0010,
+        56 => 0b0011,
+        64 => 0b0100,
+        80 => 0b0101,
+        96 => 0b0110,
+        112 => 0b0111,
+        128 => 0b1000,
+        160 => 0b1001,
+        192 => 0b1010,
+        224 => 0b1011,
+        256 => 0b1100,
+        320 => 0b1101,
+        384 => 0b1110,
+        _ => return Err(HeaderError::UnsupportedBitrate(bit_rate)),
+    };
+    Ok(index)
+}
+
+/// Encode a §2.4.2.3 sampling frequency to its 2-bit
+/// `sampling_frequency` code (PDF page 21).
+///
+/// This is the inverse of [`decode_sampling_frequency`]. The §2.4.2.3
+/// reserved code (`'11'`) is not producible because there is no
+/// matching `sample_rate` value; arbitrary other values are rejected
+/// as [`HeaderError::UnsupportedSamplingFrequency`].
+pub fn encode_sampling_frequency(sample_rate: u32) -> Result<u8, HeaderError> {
+    match sample_rate {
+        44_100 => Ok(0b00),
+        48_000 => Ok(0b01),
+        32_000 => Ok(0b10),
+        _ => Err(HeaderError::UnsupportedSamplingFrequency(sample_rate)),
     }
 }
 
@@ -691,5 +839,314 @@ mod tests {
         let bytes = build_header(0b1010, 0b00, 0, 0, 0b00, 0, 0, 1, 0b00, 0);
         let h = FrameHeader::parse(&bytes).unwrap();
         assert!(!h.protection_bit);
+    }
+
+    // ---------- §2.4.1.3 / §2.4.2.3 encoder-side (header writer) ----------
+
+    #[test]
+    fn encode_bitrate_inverts_decode_bitrate() {
+        // The 14 valid Layer II ladder codes must round-trip exactly.
+        for code in 1u8..=14 {
+            let rate = decode_bitrate(code).unwrap();
+            assert_eq!(
+                encode_bitrate(rate).unwrap(),
+                code,
+                "round-trip code {code}"
+            );
+        }
+        // The two §2.4.2.3 reject paths (free format / forbidden) have
+        // no matching `bit_rate` value, so they cannot round-trip in
+        // either direction; that is the point.
+        assert!(matches!(
+            encode_bitrate(0),
+            Err(HeaderError::UnsupportedBitrate(0))
+        ));
+        assert!(matches!(
+            encode_bitrate(200_000), // 200 kbit/s is not in the ladder
+            Err(HeaderError::UnsupportedBitrate(200_000))
+        ));
+        // A kbit/s value that happens to land mid-ladder if rounded
+        // (e.g. 199 999 bit/s) must still be rejected: the encoder
+        // does not silently snap.
+        assert!(matches!(
+            encode_bitrate(199_999),
+            Err(HeaderError::UnsupportedBitrate(199_999))
+        ));
+    }
+
+    #[test]
+    fn encode_sampling_frequency_inverts_decode() {
+        // The three §2.4.2.3 sampling-frequency codes round-trip.
+        for code in 0u8..=2 {
+            let rate = decode_sampling_frequency(code).unwrap();
+            assert_eq!(encode_sampling_frequency(rate).unwrap(), code);
+        }
+        // The reserved `'11'` code has no `sample_rate` counterpart.
+        assert!(matches!(
+            encode_sampling_frequency(11_025),
+            Err(HeaderError::UnsupportedSamplingFrequency(11_025))
+        ));
+        // LSF sampling rates (16/22.05/24 kHz) are not in the table
+        // either — encoder rejects rather than silently emitting an
+        // ID = '0' header.
+        for lsf in [16_000u32, 22_050, 24_000] {
+            assert!(matches!(
+                encode_sampling_frequency(lsf),
+                Err(HeaderError::UnsupportedSamplingFrequency(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn emit_bytes_round_trips_a_canonical_header() {
+        // The fixture we already exercise on the decoder side.
+        let bytes = build_header(0b1010, 0b00, 0, 0, 0b00, 0b00, 0, 1, 0b00, 1);
+        let h = FrameHeader::parse(&bytes).unwrap();
+        let out = h.emit_bytes().unwrap();
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn emit_bytes_round_trips_every_bitrate_sample_rate_mode_combo() {
+        // Walk the entire §2.4.2.3 matrix (mode × bitrate × sf), with
+        // all flag bits ON, and confirm both `parse(emit(h)) == h` and
+        // byte equality with `build_header`.
+        let bitrate_codes: [(u8, u32); 14] = [
+            (0b0001, 32_000),
+            (0b0010, 48_000),
+            (0b0011, 56_000),
+            (0b0100, 64_000),
+            (0b0101, 80_000),
+            (0b0110, 96_000),
+            (0b0111, 112_000),
+            (0b1000, 128_000),
+            (0b1001, 160_000),
+            (0b1010, 192_000),
+            (0b1011, 224_000),
+            (0b1100, 256_000),
+            (0b1101, 320_000),
+            (0b1110, 384_000),
+        ];
+        let sf_codes: [(u8, u32); 3] = [(0b00, 44_100), (0b01, 48_000), (0b10, 32_000)];
+        let mode_codes: [(u8, Mode); 4] = [
+            (0b00, Mode::Stereo),
+            (0b01, Mode::JointStereo),
+            (0b10, Mode::DualChannel),
+            (0b11, Mode::SingleChannel),
+        ];
+
+        let mut covered = 0usize;
+        for &(br_code, bit_rate) in &bitrate_codes {
+            for &(sf_code, sample_rate) in &sf_codes {
+                for &(mode_code, mode) in &mode_codes {
+                    if !is_layer2_bitrate_mode_allowed(bit_rate, mode) {
+                        // Encoder must reject the same matrix the
+                        // decoder rejects.
+                        let h = FrameHeader {
+                            bit_rate,
+                            sample_rate,
+                            padding: false,
+                            private_bit: false,
+                            mode,
+                            mode_extension: ModeExtension::Bound4,
+                            copyright: false,
+                            original: false,
+                            emphasis: Emphasis::None,
+                            protection_bit: true,
+                        };
+                        match h.emit_bytes() {
+                            Err(HeaderError::DisallowedBitrateModeCombination {
+                                bit_rate: br,
+                                mode: m,
+                            }) => {
+                                assert_eq!(br, bit_rate);
+                                assert_eq!(m, mode);
+                            }
+                            other => panic!(
+                                "expected disallowed (bit_rate, mode) rejection, got {other:?}"
+                            ),
+                        }
+                        continue;
+                    }
+                    // Allowed: round-trip through build_header().
+                    let original = build_header(
+                        br_code as u32,
+                        sf_code as u32,
+                        1, // padding
+                        1, // private_bit
+                        mode_code as u32,
+                        0b01, // mode_extension = Bound8
+                        1,    // copyright
+                        0,    // original = false
+                        0b01, // emphasis = FiftyFifteen
+                        0,    // protection_bit = 0 (CRC follows)
+                    );
+                    let h = FrameHeader::parse(&original).unwrap();
+                    let emitted = h.emit_bytes().unwrap();
+                    assert_eq!(emitted, original, "round-trip bytes mismatch");
+                    let h2 = FrameHeader::parse(&emitted).unwrap();
+                    assert_eq!(h, h2, "round-trip struct mismatch");
+                    covered += 1;
+                }
+            }
+        }
+        // 14 bitrates × 3 sample-rates × 4 modes = 168 cells. The
+        // §2.4.2.3 matrix forbids 4 × 3 × 3 = 36 cells at
+        // {32, 48, 56, 80} kbit/s × non-single_channel modes, and
+        // another 4 × 3 × 1 = 12 cells at {224, 256, 320, 384} kbit/s
+        // × single_channel — 48 rejected, 120 covered.
+        assert_eq!(covered, 120);
+    }
+
+    #[test]
+    fn emit_bytes_walks_all_mode_extensions_and_emphases() {
+        // mode_extension is parsed verbatim regardless of mode (§2.4.2.3
+        // makes it meaningful only for joint stereo, but the bits are
+        // present in every header). The emitter must round-trip all four
+        // codes when paired with Stereo.
+        for ext in [
+            ModeExtension::Bound4,
+            ModeExtension::Bound8,
+            ModeExtension::Bound12,
+            ModeExtension::Bound16,
+        ] {
+            let h = FrameHeader {
+                bit_rate: 128_000,
+                sample_rate: 44_100,
+                padding: false,
+                private_bit: false,
+                mode: Mode::JointStereo,
+                mode_extension: ext,
+                copyright: false,
+                original: true,
+                emphasis: Emphasis::None,
+                protection_bit: true,
+            };
+            let h2 = FrameHeader::parse(&h.emit_bytes().unwrap()).unwrap();
+            assert_eq!(h.mode_extension, h2.mode_extension);
+        }
+        // All three valid emphasis values must round-trip.
+        for emph in [Emphasis::None, Emphasis::FiftyFifteen, Emphasis::CcittJ17] {
+            let h = FrameHeader {
+                bit_rate: 128_000,
+                sample_rate: 44_100,
+                padding: false,
+                private_bit: false,
+                mode: Mode::Stereo,
+                mode_extension: ModeExtension::Bound4,
+                copyright: false,
+                original: true,
+                emphasis: emph,
+                protection_bit: true,
+            };
+            let h2 = FrameHeader::parse(&h.emit_bytes().unwrap()).unwrap();
+            assert_eq!(h.emphasis, h2.emphasis);
+        }
+    }
+
+    #[test]
+    fn emit_bytes_rejects_unsupported_bitrate_and_sample_rate() {
+        let mut h = FrameHeader {
+            bit_rate: 192_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::Stereo,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+            protection_bit: true,
+        };
+        // Baseline emits cleanly.
+        assert!(h.emit_bytes().is_ok());
+        // 200 kbit/s is not in the §2.4.2.3 ladder.
+        h.bit_rate = 200_000;
+        assert!(matches!(
+            h.emit_bytes(),
+            Err(HeaderError::UnsupportedBitrate(200_000))
+        ));
+        // Restore + tweak sample_rate.
+        h.bit_rate = 192_000;
+        h.sample_rate = 22_050; // LSF rate, not in the MPEG-1 table.
+        assert!(matches!(
+            h.emit_bytes(),
+            Err(HeaderError::UnsupportedSamplingFrequency(22_050))
+        ));
+    }
+
+    #[test]
+    fn emit_bytes_rejects_disallowed_bitrate_mode_pair() {
+        // 32 kbit/s + Stereo is forbidden by §2.4.2.3.
+        let h = FrameHeader {
+            bit_rate: 32_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::Stereo,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+            protection_bit: true,
+        };
+        match h.emit_bytes() {
+            Err(HeaderError::DisallowedBitrateModeCombination { bit_rate, mode }) => {
+                assert_eq!(bit_rate, 32_000);
+                assert_eq!(mode, Mode::Stereo);
+            }
+            other => panic!("expected DisallowedBitrateModeCombination, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_bytes_sets_syncword_id_and_layer_bits_correctly() {
+        let h = FrameHeader {
+            bit_rate: 192_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::Stereo,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+            protection_bit: true,
+        };
+        let bytes = h.emit_bytes().unwrap();
+        let word = u32::from_be_bytes(bytes);
+        // Bits 31..20: syncword = 0xFFF.
+        assert_eq!((word >> 20) & 0xFFF, 0xFFF);
+        // Bit 19: ID = '1' (MPEG-1, §2.4.2.3).
+        assert_eq!((word >> 19) & 0x1, 1);
+        // Bits 18..17: layer = '10' (Layer II, §2.4.2.3).
+        assert_eq!((word >> 17) & 0x3, 0b10);
+    }
+
+    #[test]
+    fn emit_bytes_padding_and_protection_bit_flip_correctly() {
+        for padding in [false, true] {
+            for protection_bit in [false, true] {
+                let h = FrameHeader {
+                    bit_rate: 192_000,
+                    sample_rate: 44_100,
+                    padding,
+                    private_bit: false,
+                    mode: Mode::Stereo,
+                    mode_extension: ModeExtension::Bound4,
+                    copyright: false,
+                    original: true,
+                    emphasis: Emphasis::None,
+                    protection_bit,
+                };
+                let word = u32::from_be_bytes(h.emit_bytes().unwrap());
+                assert_eq!(((word >> 9) & 0x1) == 1, padding);
+                assert_eq!(((word >> 16) & 0x1) == 1, protection_bit);
+                // Frame-size delta: padding bumps the byte count by 1.
+                let n_base = 144u64 * 192_000 / 44_100;
+                let want = n_base as usize + if padding { 1 } else { 0 };
+                assert_eq!(h.frame_size_bytes(), want);
+            }
+        }
     }
 }

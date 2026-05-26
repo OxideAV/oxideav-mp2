@@ -47,6 +47,25 @@ solely from the ISO/IEC 11172-3 PDF:
   uses one byte per slot, so the slot count equals the byte count).
 - **Sync search** (§2.4.3.1): `find_sync` locates the byte-aligned
   12-bit syncword in a buffer for cold synchronisation.
+- **§2.4.1.3 / §2.4.2.3 header writer** (encoder side): the inverse
+  of `FrameHeader::parse` is `FrameHeader::emit_bytes(&self) ->
+  Result<[u8; 4], HeaderError>`. The 4-byte big-endian word it
+  produces is bit-exact identical to what `parse` would read back —
+  syncword (bits 31..20 = `0xFFF`), `ID = '1'` (MPEG-1), `layer =
+  '10'` (Layer II), `protection_bit`, the §2.4.2.3 ladder code from
+  `encode_bitrate`, the §2.4.2.3 table code from
+  `encode_sampling_frequency`, then padding / private / mode /
+  mode_extension / copyright / original / emphasis. Encoder-side
+  validation mirrors the decoder: `bit_rate` outside the 14-row Layer
+  II ladder is rejected as `HeaderError::UnsupportedBitrate(rate)`,
+  `sample_rate ∉ {32000, 44100, 48000}` Hz as
+  `HeaderError::UnsupportedSamplingFrequency(rate)`, and the
+  §2.4.2.3 disallowed (bitrate, mode) matrix as
+  `HeaderError::DisallowedBitrateModeCombination`. Lookup order
+  reports the most-specific error first (off-ladder bitrate is
+  flagged before the matrix). The two §2.4.2.3 reserved codes —
+  `sampling_frequency = '11'` and `emphasis = '10'` — cannot be
+  produced because the type system has no corresponding values.
 - **Annex B Table 3-B.1** "Layer I, II scalefactors": the 63
   multipliers used by §2.4.3.3.3 to rescale requantized samples are
   tabulated in `tables::SCALEFACTORS` and self-checked against the
@@ -132,7 +151,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-98 unit tests cover the bitrate / sampling-frequency ladders
+107 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -179,7 +198,19 @@ across at least one full V cycle (16 frames of 64), is correctly
 re-zeroed by `reset()`, propagates a single-subband impulse for at
 most 16 frames then drops exactly to zero, stays finite + bounded
 under a realistic single-subband excitation, and two independent
-instances given different inputs produce different outputs.
+instances given different inputs produce different outputs; plus
+encoder-side: `encode_bitrate` round-trips every Layer II ladder
+code 1..14 against `decode_bitrate` (and rejects off-ladder /
+non-kbps inputs), `encode_sampling_frequency` round-trips all three
+sf codes (and rejects LSF 16/22.05/24 kHz and reserved
+sample-rates), `FrameHeader::emit_bytes` round-trips the canonical
+192 kbit/s / 44.1 kHz / Stereo header byte-for-byte, walks every
+allowed cell of the (14 bitrate × 3 sf × 4 mode) §2.4.2.3 matrix
+(120 allowed / 48 rejected per the matrix), exercises all four
+`mode_extension` codes and all three `emphasis` values, rejects
+unsupported bitrate / sample-rate / disallowed (bitrate, mode), and
+emits the spec-mandated syncword `0xFFF` + ID `'1'` + layer `'10'`
+with the padding and protection bits in the correct positions.
 
 ## What does not work yet
 
@@ -193,9 +224,18 @@ Bit-exact PCM-against-reference validation (PSNR / SNR vs the
 `expected.wav` next to the staged fixture, or against ffmpeg /
 mpg123 black-box validator output) is pending an Auditor round.
 
-Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder (16 /
-22.05 / 24 kHz) are subsequent followups (the latter is gated on
-docs gap #1076).
+Encoder is partially staged: the §2.4.1.4 / §2.4.3.1 CRC-16 write
+primitives (`crc16_layer2` + streaming `crc16_update_*`) and the
+§2.4.1.3 / §2.4.2.3 header writer (`FrameHeader::emit_bytes` +
+`encode_bitrate` + `encode_sampling_frequency`) are in place. The
+remaining encoder pieces are the Annex C polyphase analysis
+filterbank (`forward_polyphase_analysis`, symmetric to the
+existing synthesis path), §2.4.3.3.3 scalefactor extraction +
+Table A.2 SCFSI selection, the iterative §C.1.5.2.7 bit-allocator,
+and the §2.4.1.6 audio-data writer that ties everything together.
+
+The ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder (16 / 22.05 /
+24 kHz) is a subsequent followup (gated on docs gap #1076).
 
 ## Spec note recorded
 

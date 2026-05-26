@@ -6,6 +6,55 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 157 — encoder, step 1: §2.4.2.3 frame-header writer)
+
+- **§2.4.1.3 / §2.4.2.3 frame-header writer** (encoder side, `header`
+  module): the inverse of `FrameHeader::parse` is
+  `FrameHeader::emit_bytes(&self) -> Result<[u8; 4], HeaderError>`,
+  which packs the 32-bit big-endian §2.4.1.3 word — syncword
+  (`0xFFF`) + `ID = '1'` (MPEG-1) + `layer = '10'` (Layer II) +
+  `protection_bit` + bitrate code + sampling-frequency code +
+  padding + private + mode + mode_extension + copyright + original
+  + emphasis — directly from the typed `FrameHeader` struct. The
+  output is bit-exact identical to what `parse` would have read.
+  Two new helper functions `encode_bitrate(bit_rate) -> Result<u8,
+  HeaderError>` and `encode_sampling_frequency(sample_rate) ->
+  Result<u8, HeaderError>` invert `decode_bitrate` /
+  `decode_sampling_frequency`. Encoder-side validation mirrors the
+  decoder's §2.4.2.3 contract: off-ladder `bit_rate` is rejected as
+  the new `HeaderError::UnsupportedBitrate(u32)`, `sample_rate`
+  outside `{32000, 44100, 48000}` Hz as
+  `HeaderError::UnsupportedSamplingFrequency(u32)`, and the
+  §2.4.2.3 disallowed-(bitrate, mode) matrix as
+  `HeaderError::DisallowedBitrateModeCombination`. Lookup ordering
+  reports the most-specific error first — off-ladder bitrate /
+  sample-rate are flagged before the matrix check, so the caller
+  always learns the true cause of rejection. The two §2.4.2.3
+  reserved codes (`sampling_frequency = '11'`, `emphasis = '10'`)
+  cannot be produced because the type system has no corresponding
+  values.
+- Nine new tests under `header::tests`:
+  `encode_bitrate_inverts_decode_bitrate` (round-trips all 14
+  ladder codes + rejects 0 / off-ladder / non-kbps inputs),
+  `encode_sampling_frequency_inverts_decode` (round-trips all 3
+  sf codes + rejects 11_025 / LSF 16/22.05/24 kHz),
+  `emit_bytes_round_trips_a_canonical_header` (192 kbit/s /
+  44.1 kHz / Stereo / no-CRC byte-for-byte),
+  `emit_bytes_round_trips_every_bitrate_sample_rate_mode_combo`
+  (walks the full 14 × 3 × 4 matrix: 120 allowed cells round-trip
+  byte-for-byte; 48 disallowed cells reject with the expected
+  variant), `emit_bytes_walks_all_mode_extensions_and_emphases`
+  (all four `mode_extension` codes + all three `emphasis` values),
+  `emit_bytes_rejects_unsupported_bitrate_and_sample_rate`
+  (200 kbit/s + 22 050 Hz LSF),
+  `emit_bytes_rejects_disallowed_bitrate_mode_pair`
+  (32 kbit/s + Stereo),
+  `emit_bytes_sets_syncword_id_and_layer_bits_correctly` (the three
+  fixed §2.4.2.3 bits in their right positions), and
+  `emit_bytes_padding_and_protection_bit_flip_correctly` (per-bit
+  + frame-size delta when padding flips). Test count moves from 98
+  to 107 (+9, all green).
+
 ### Added (round 150 — clean-room rebuild, step 6)
 
 - **§2.4.1.6 / §2.4.3.1 / §2.4.3.2 frame-level decode loop**
