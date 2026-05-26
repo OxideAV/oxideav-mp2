@@ -5,7 +5,7 @@ A pure-Rust **MPEG-1 Audio Layer II** (MP2 / MUSICAM) codec for the
 
 ## Status
 
-**Clean-room rebuild in progress (round 147, 2026-05-26).** The prior
+**Clean-room rebuild in progress (round 150, 2026-05-26).** The prior
 implementation was retired under the workspace
 [clean-room policy](https://github.com/OxideAV/oxideav-workspace/blob/master/docs/IMPLEMENTOR_ROUND.md):
 the provenance of its bit-allocation and synthesis-window data tables
@@ -111,8 +111,28 @@ solely from the ISO/IEC 11172-3 PDF:
   unit tests. `SynthesisFilterbank::push_subbands(&[f64; 32], &mut
   [f64; 32])` is the per-channel decode primitive; `reset()` re-seeds
   V with zeros for cold restarts per Figure A.2 footnote 1.
+- **§2.4.1.6 / §2.4.3.1 / §2.4.3.2 frame-level decode loop**
+  (`frame` module): `decode_frame(buf) -> DecodedFrame` parses one
+  Layer II frame end-to-end. The §2.4.3.1 CRC slot is verified via
+  `crc16_layer2` when `protection_bit == 0` (mismatch raises
+  `FrameError::CrcMismatch`). The §2.4.1.6 `for (gr=0..12, sb=0..sblimit,
+  ch=0..nch)` triplet loop drives `requant::read_triplet`, applies the
+  §2.4.3.3.3 rescaling with the scfsi-expanded scalefactor selected by
+  `scalefactor_granule = sample_granule / 4` (§2.4.2.3 "scalefactors
+  are transmitted for groups of 12 subband samples"), buffers
+  `12 × 3 × 32 = 1152` subband samples per channel, and pushes 36
+  successive 32-vectors through a per-channel `SynthesisFilterbank`
+  to produce 1152 PCM samples per channel (§2.4.2.1 "1 152 for Layer
+  II"). A per-stream `FrameDecodeState` threads the polyphase
+  filterbank's V ring buffer across successive frames per Annex A
+  Figure A.2 footnote 1; `decode_all_frames(buf)` chains frames
+  until the buffer is exhausted. The staged 31-frame stereo fixture
+  `docs/audio/mp3/fixtures/layer2-stereo-44100-192kbps/input.mp3`
+  (192 kbit/s, 44.1 kHz, B.2a) decodes cleanly end-to-end —
+  `2 × 31 × 1152 = 71 424` finite PCM samples in
+  `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-88 unit tests cover the bitrate / sampling-frequency ladders
+98 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -163,18 +183,19 @@ instances given different inputs produce different outputs.
 
 ## What does not work yet
 
-`register()` is a no-op until the §2.4.1.6 sample loop drives
-`requant::read_triplet` across all subbands / channels / granules
-and feeds them — channel-by-channel — into a `SynthesisFilterbank`
-per channel. The §2.4.3.1 frame loop also needs to consume the
-on-wire 16-bit CRC slot and invoke `verify_layer2_crc` when
-`protection_bit == 0`. With the §2.4.1.6 side-info parser
-(`audio_data`), the §2.4.3.3.4 requantizer (`requant`), the
-§2.4.3.2 / §2.4.3.3.5 polyphase synthesis filterbank (`synthesis`)
-and the §2.4.3.1 CRC verifier (`crc`) all in place, the remaining
-work is purely wiring — no §2.4.3 primitive is missing. Encoder +
-the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder (16 / 22.05 /
-24 kHz) are subsequent followups.
+`register()` remains a no-op until the codec is wired through
+`oxideav_core`'s `Decoder` trait surface (registry-level integration
+contract). The bottom-up decoder primitive `decode_frame(buf)` is
+already callable; the remaining wiring is the framework's
+`Decoder for Mp2Decoder` adapter plus a tag declaration.
+
+Bit-exact PCM-against-reference validation (PSNR / SNR vs the
+`expected.wav` next to the staged fixture, or against ffmpeg /
+mpg123 black-box validator output) is pending an Auditor round.
+
+Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder (16 /
+22.05 / 24 kHz) are subsequent followups (the latter is gated on
+docs gap #1076).
 
 ## Spec note recorded
 

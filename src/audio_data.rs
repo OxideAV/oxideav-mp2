@@ -208,11 +208,24 @@ impl AudioData {
 /// The reader is advanced past the parsed fields; it stops at the
 /// boundary where the §2.4.1.6 `samplecode[]` / `sample[]` loop would
 /// begin. That sample loop is consumed by the §2.4.3.3.4 requantizer
-/// in a follow-up step.
+/// (see [`crate::requant::read_triplet`]).
 pub fn parse_audio_data(
     header: &FrameHeader,
     reader: &mut BitReader<'_>,
 ) -> Result<AudioData, AudioDataError> {
+    parse_audio_data_with_section_bits(header, reader).map(|(data, _, _)| data)
+}
+
+/// Like [`parse_audio_data`] but also returns the bit-lengths of the
+/// §2.4.1.6 bit-allocation section and the §2.4.1.6 scfsi section.
+///
+/// Those two sections are exactly the §2.4.3.1 Layer II protected-CRC
+/// payload (Annex B Table B.5), so the frame-level decode loop uses
+/// the two bit counts to feed the CRC-16 helper.
+pub fn parse_audio_data_with_section_bits(
+    header: &FrameHeader,
+    reader: &mut BitReader<'_>,
+) -> Result<(AudioData, usize, usize), AudioDataError> {
     let table = select_table(header).ok_or(AudioDataError::NoBitallocTable)?;
     let channels = header.channels();
 
@@ -229,11 +242,16 @@ pub fn parse_audio_data(
 
     let mut data = AudioData::new(table, bound, channels);
 
+    let pos_alloc_start = reader.bit_position();
     parse_allocation(&mut data, reader)?;
+    let pos_scfsi_start = reader.bit_position();
     parse_scfsi(&mut data, reader)?;
+    let pos_scfsi_end = reader.bit_position();
     parse_scalefactors(&mut data, reader)?;
 
-    Ok(data)
+    let alloc_bits = (pos_scfsi_start - pos_alloc_start) as usize;
+    let scfsi_bits = (pos_scfsi_end - pos_scfsi_start) as usize;
+    Ok((data, alloc_bits, scfsi_bits))
 }
 
 fn read_bits(reader: &mut BitReader<'_>, n: u32) -> Result<u32, AudioDataError> {

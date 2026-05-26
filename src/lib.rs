@@ -87,17 +87,29 @@
 //!   [`tables_synthesis::D`]. Caller-side resets are exposed via
 //!   [`SynthesisFilterbank::reset`].
 //!
+//! * **§2.4.1.6 / §2.4.3.1 / §2.4.3.2 frame-level decode loop**
+//!   ([`frame`] module): [`frame::decode_frame`] consumes one
+//!   complete Layer II frame from a buffer, drives the
+//!   `for (gr, sb, ch)` triplet loop through
+//!   [`requant::read_triplet`], applies the §2.4.3.3.3 scalefactor
+//!   rescaling per the
+//!   `scalefactor_granule = sample_granule / 4` partition (§2.4.2.3),
+//!   pushes the 36 successive 32-vectors of subband samples per
+//!   channel through a [`SynthesisFilterbank`], and emits 1152 PCM
+//!   samples per channel ([`frame::PCM_SAMPLES_PER_CHANNEL`]). When
+//!   `protection_bit == 0` the §2.4.3.1 CRC-16 over the protected
+//!   region (Annex B Table B.5) is verified via [`crc16_layer2`];
+//!   mismatches raise [`frame::FrameError::CrcMismatch`]. A
+//!   per-stream [`frame::FrameDecodeState`] threads the polyphase
+//!   filterbank's V ring buffer across successive frames per Annex A
+//!   Figure A.2 footnote 1. [`frame::decode_all_frames`] chains
+//!   successive frames until the input buffer is exhausted.
+//!
 //! ## What does not work yet
 //!
-//! [`register`] is a no-op until the §2.4.1.6 sample loop drives the
-//! [`requant::read_triplet`] outputs across all subbands / channels /
-//! granules and feeds them — channel-by-channel — into a
-//! [`SynthesisFilterbank`] per channel; the §2.4.3.1 frame loop also
-//! has to consume the on-wire 16-bit slot and invoke
-//! [`verify_layer2_crc`] when `protection_bit == 0`. With both
-//! primitives ([`requant`] and [`synthesis`]) and the protected-field
-//! CRC ([`crc`]) in place, the remaining work is purely the
-//! wiring — no further §2.4.3 primitive is missing.
+//! [`register`] remains a no-op until the codec is wired through
+//! `oxideav_core`'s `Decoder` trait surface; the
+//! [`frame::decode_frame`] primitive is already callable directly.
 
 #![warn(missing_debug_implementations)]
 
@@ -106,13 +118,17 @@ use oxideav_core::RuntimeContext;
 pub mod audio_data;
 pub mod bitalloc;
 pub mod crc;
+pub mod frame;
 pub mod header;
 pub mod requant;
 pub mod synthesis;
 pub mod tables;
 pub mod tables_synthesis;
 
-pub use audio_data::{parse_audio_data, AudioData, AudioDataError, Scfsi, MAX_CHANNELS};
+pub use audio_data::{
+    parse_audio_data, parse_audio_data_with_section_bits, AudioData, AudioDataError, Scfsi,
+    MAX_CHANNELS,
+};
 pub use bitalloc::{
     bitrate_per_channel_kbps, class_of_quantization, is_grouped, select_table, BitAllocTable,
     QuantClass, NUM_SUBBANDS,
@@ -120,6 +136,10 @@ pub use bitalloc::{
 pub use crc::{
     crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
     INIT_STATE as CRC_INIT_STATE,
+};
+pub use frame::{
+    decode_all_frames, decode_frame, decode_frame_with, layer2_crc, DecodedFrame, FrameDecodeState,
+    FrameError, PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME,
 };
 pub use header::{
     decode_bitrate, decode_sampling_frequency, find_sync, is_layer2_bitrate_mode_allowed, Emphasis,
@@ -130,16 +150,19 @@ pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_B
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
 pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 
-/// Crate-local error type. Decode paths beyond the frame header +
-/// audio-data side info are not yet wired up; [`Error::NotImplemented`]
-/// continues to gate them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Crate-local error type. The frame-level decode path is wired up via
+/// [`frame::decode_frame`]; [`Error::NotImplemented`] is reserved for
+/// the §2.4.1.4 encoder path that has not yet been built.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// A 4-byte Layer II header could not be parsed from the input.
     Header(HeaderError),
     /// The §2.4.1.6 / §2.4.3.3 audio-data side info could not be parsed.
     AudioData(AudioDataError),
-    /// A reachable Layer II decode/encode path that is not yet wired up.
+    /// The §2.4.1.6 / §2.4.3.2 frame-level decode loop failed.
+    Frame(FrameError),
+    /// A reachable Layer II decode/encode path that is not yet wired up
+    /// (currently: encoder).
     NotImplemented,
 }
 
@@ -155,15 +178,22 @@ impl From<AudioDataError> for Error {
     }
 }
 
+impl From<FrameError> for Error {
+    fn from(value: FrameError) -> Self {
+        Error::Frame(value)
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::Header(err) => write!(f, "oxideav-mp2 header error: {err}"),
             Error::AudioData(err) => write!(f, "oxideav-mp2 audio-data error: {err}"),
+            Error::Frame(err) => write!(f, "oxideav-mp2 frame error: {err}"),
             Error::NotImplemented => {
                 write!(
                     f,
-                    "oxideav-mp2: codec path not yet wired up (clean-room rebuild in progress)"
+                    "oxideav-mp2: codec path not yet wired up (encoder pending)"
                 )
             }
         }
@@ -175,6 +205,7 @@ impl std::error::Error for Error {
         match self {
             Error::Header(err) => Some(err),
             Error::AudioData(err) => Some(err),
+            Error::Frame(err) => Some(err),
             Error::NotImplemented => None,
         }
     }

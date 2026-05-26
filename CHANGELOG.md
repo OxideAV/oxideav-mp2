@@ -6,6 +6,56 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 150 — clean-room rebuild, step 6)
+
+- **§2.4.1.6 / §2.4.3.1 / §2.4.3.2 frame-level decode loop**
+  (`frame` module): `decode_frame(buf) -> DecodedFrame` parses one
+  complete Layer II frame from the front of a buffer, drives the
+  §2.4.1.6 `for (gr=0..12, sb=0..sblimit, ch=0..nch)` triplet loop
+  through `requant::read_triplet`, applies the §2.4.3.3.3 rescaling
+  with the §2.4.2.3 `scalefactor_granule = sample_granule / 4`
+  partition (3 scalefactor-granules of 4 sample-granules each), and
+  pushes the resulting 36 successive 32-vectors of subband samples
+  per channel through a per-channel `SynthesisFilterbank` to emit
+  `12 × 3 × 32 = 1152` PCM samples per channel (§2.4.2.1 "1 152 for
+  Layer II"). When `protection_bit == 0` the §2.4.3.1 CRC-16 over
+  Annex B Table B.5's protected region (header bits 16…31 + alloc +
+  scfsi) is verified via `crc16_layer2`; mismatches raise
+  `FrameError::CrcMismatch`. A per-stream `FrameDecodeState` threads
+  the polyphase filterbank's V ring buffer across successive frames
+  per Annex A Figure A.2 footnote 1 (`FrameDecodeState::reset()`
+  re-zeroes V for seek / discontinuity). The convenience
+  `decode_all_frames(buf)` chains frames until the buffer is
+  exhausted. The staged 31-frame stereo fixture at
+  `docs/audio/mp3/fixtures/layer2-stereo-44100-192kbps/input.mp3`
+  (192 kbit/s, 44.1 kHz stereo, B.2a sub-table, mode_extension=0)
+  decodes cleanly end-to-end — every one of the
+  `2 × 31 × 1152 = 71 424` PCM samples is finite + bounded in
+  `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
+- **Supporting API** in `audio_data`:
+  `parse_audio_data_with_section_bits(header, reader)` returns
+  `(AudioData, alloc_bits, scfsi_bits)` so the frame-level decode
+  loop can compute the §2.4.3.1 CRC over exactly the bits the
+  §2.4.1.6 syntax just consumed without re-parsing.
+- **Crate `Error::Frame(FrameError)`** wrapper exposed at the top
+  level alongside the existing `Error::Header` / `Error::AudioData`
+  variants; the historical `Error::NotImplemented` is now reserved
+  for the encoder path.
+- **10 new unit tests** (98 total): first-frame decode of the
+  staged 192 kbit/s stereo fixture has the expected `(sample_rate,
+  bit_rate, mode, protection_bit)` and 2 × 1152 finite PCM samples;
+  second-frame chaining survives the padded-vs-unpadded `frame_size`
+  difference (626 vs 627 bytes); `decode_all_frames` produces
+  `31 × 1152` finite, non-trivially-loud samples per channel;
+  CRC-mismatch detection on a synthetic protected frame; truncated-
+  buffer rejection via `FrameError::Truncated`; `reset()` survives
+  a subsequent decode; channel filterbanks evolve independently
+  across successive `decode_frame_with` calls (same-state ≠
+  fresh-state); `PCM_SAMPLES_PER_CHANNEL = 12 × 3 × 32 = 1152`
+  identity; `compute_layer2_crc` byte-aligned-extraction helper
+  agrees with the public `crc16_layer2`; `layer2_crc` re-export
+  matches `crc::crc16_layer2`.
+
 ### Added (round 147 — clean-room rebuild, step 5)
 
 - **§2.4.3.2 / §2.4.3.3.5 polyphase synthesis subband filter**
