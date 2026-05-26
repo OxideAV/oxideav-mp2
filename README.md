@@ -82,8 +82,20 @@ solely from the ISO/IEC 11172-3 PDF:
   otherwise); and `requantize_scaled` layers the §2.4.3.3.3 Table 3-B.1
   rescaling (`s' = factor * s''`) on top. `QuantClass::bits_per_sample`
   exposes the single-sample width `ceil(log2(nb_steps))`.
+- **§2.4.1.4 / §2.4.3.1 CRC-16** (`crc` module): the
+  `G(X) = X^16 + X^15 + X^2 + 1` feedback shift register with the
+  §2.4.3.1 `'1111 1111 1111 1111'` (`0xFFFF`) initial state is
+  implemented as a primitive shared by encoder and decoder. The Annex B
+  Table B.5 Layer II protected-field set (header bits 16…31 + bit
+  allocation + scfsi, per `docs/audio/mp3/mp1-crc-iso-extracts.md`) is
+  wrapped by `crc16_layer2(header_high, header_low, allocation_and_scfsi,
+  bit_count) -> u16` and `verify_layer2_crc(expected, ..) -> bool`. The
+  per-bit / per-field / per-packed-buffer primitives `crc16_step`,
+  `crc16_update_bits`, and `crc16_update_packed` are exposed so the
+  encoder can stream the variable-length §2.4.1.6 allocation + scfsi
+  payload into the running CRC without a temporary materialised buffer.
 
-59 unit tests cover the bitrate / sampling-frequency ladders
+72 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -106,20 +118,29 @@ scalefactor-index-63 rejection, the bit-budget identity
 requantizer levels, a from-prose reference requantizer cross-checked
 against `requantize_code` for every Table 3-B.4 class, the radix-
 `nlevels` degrouping (exhaustive for `nb_steps` 3 and 5), the
-grouped-vs-separable `read_triplet` bit counts, and the Table 3-B.1
-unity / doubling rescaling.
+grouped-vs-separable `read_triplet` bit counts, the Table 3-B.1
+unity / doubling rescaling, the §2.4.3.1 CRC-16 polynomial pinned
+against an independently-derived long-form GF(2) reference (spread of
+register values × both input bits), the three CRC update APIs
+(per-bit / bit-width / packed-buffer) agreeing on the same input,
+mid-byte stream-splitting equivalence, the empty-payload
+header-only degenerate exercise, single-bit error detection across
+every bit of the §2.4.3.1 protected region, contiguous burst
+detection up to the polynomial degree (16 bits), and the
+verify-accepts-roundtrip / verify-rejects-mismatch property.
 
 ## What does not work yet
 
 `register()` is a no-op until the §2.4.1.6 sample loop drives
 `requant::read_triplet` across all subbands / granules and feeds the
-§2.4.3.2 polyphase synthesis filterbank driven by Table 3-B.3 "Coefficients
-D[i] of the synthesis window" (rendered as PNG pages 56-58 under
-`docs/audio/mp3/annex-b-renders/`) land. The §2.4.1.4 / §2.4.3.1
-CRC-16 over the Table 3-B.5 protected fields (header bits 16…31 +
-bit allocation + scfsi, per `docs/audio/mp3/mp1-crc-iso-extracts.md`)
-is likewise a followup. Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF
-Layer II ladder (16 / 22.05 / 24 kHz) are subsequent followups.
+§2.4.3.2 polyphase synthesis filterbank driven by Table 3-B.3
+"Coefficients D[i] of the synthesis window" (rendered as PNG pages
+56-58 under `docs/audio/mp3/annex-b-renders/`) land. The CRC-16
+primitive is in place; the decoder integration that reads the 16-bit
+slot following the header when `protection_bit == 0` and invokes
+`verify_layer2_crc` lives with the (not-yet-wired) frame-level decode
+loop. Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder
+(16 / 22.05 / 24 kHz) are subsequent followups.
 
 ## Spec note recorded
 

@@ -6,6 +6,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 142 — clean-room rebuild, step 4)
+
+- **§2.4.1.4 / §2.4.3.1 CRC-16** (`crc` module): the Layer II
+  protected-field CRC-16 from ISO/IEC 11172-3 (1993) §2.4.3.1 is
+  implemented as a primitive shared by encoder and decoder.
+  - `G(X) = X^16 + X^15 + X^2 + 1` (PDF page 36, rendered as
+    `docs/audio/mp3/mp1-crc-polynomial-iso11172-3-eq.png`) with the
+    §2.4.3.1 `'1111 1111 1111 1111'` (`0xFFFF`) initial shift-register
+    state. The tap mask is `0x8005` (the polynomial minus its X^16
+    term, with bits at positions 15, 2, 0).
+  - `crc16_step(reg, bit) -> u16` runs one feedback-shift step.
+  - `crc16_update_bits(reg, value, nbits) -> u16` feeds the low
+    `nbits` of `value` MSB-first — useful for variable-width fields
+    (one `allocation[ch][sb]` of width `nbal ∈ {2, 3, 4}` etc.).
+  - `crc16_update_packed(reg, &[u8], nbits) -> u16` consumes a
+    left-aligned packed bitstream of arbitrary bit length.
+  - `crc16_layer2(header_high, header_low, &allocation_and_scfsi,
+    bits) -> u16` is the Layer II entry point: it feeds the two
+    header bytes (bits 16…31, per Annex B Table B.5 transcribed in
+    `docs/audio/mp3/mp1-crc-iso-extracts.md`) followed by the
+    variable-length bit-allocation + scfsi payload.
+  - `verify_layer2_crc(expected, ..) -> bool` is the decoder-side
+    accept/reject helper.
+- **13 new unit tests** (72 total): the production step matches an
+  independently-derived long-form GF(2) reference across a spread of
+  register values × both input bits; the per-bit / bit-width /
+  packed-buffer APIs agree on the same single-byte input; partial-byte
+  feeds; mid-byte stream-splitting equivalence; the Layer II entry
+  point equals manual streaming; verify accepts the round-trip and
+  rejects every single-bit-flipped expected value; every single bit
+  in the protected region flips the CRC; every contiguous burst of
+  length 1..=16 (= the polynomial degree) is detected; the
+  empty-payload header-only degenerate case; the polynomial constants
+  (`INIT_STATE`, `TAPS`) are pinned per spec; zero-width updates are
+  no-ops; `crc16_update_packed` panics on a short buffer.
+
 ### Added (round 133 — clean-room rebuild, step 3)
 
 - **§2.4.3.3.4 sample requantizer** (`requant` module): turns a Layer II

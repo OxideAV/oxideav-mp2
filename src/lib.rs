@@ -62,6 +62,17 @@
 //!   from the bitstream; [`requant::requantize_scaled`] layers the
 //!   §2.4.3.3.3 Table 3-B.1 rescaling (`s' = factor * s''`) on top.
 //!
+//! * **§2.4.1.4 / §2.4.3.1 CRC-16** ([`crc`] module): the
+//!   `G(X) = X^16 + X^15 + X^2 + 1` shift register with initial state
+//!   `0xFFFF` is implemented as a primitive that both the decoder
+//!   (verify) and the encoder (emit) can drive. The Layer II
+//!   protected-field set per Annex B Table B.5 (header bits 16…31 +
+//!   bit allocation + scfsi) is wrapped by [`crc16_layer2`] and
+//!   [`verify_layer2_crc`]; the granular per-bit / per-field
+//!   primitives [`crc16_step`], [`crc16_update_bits`], and
+//!   [`crc16_update_packed`] are exposed for the encoder's streaming
+//!   accumulation.
+//!
 //! ## What does not work yet
 //!
 //! [`register`] is a no-op until the §2.4.1.6 sample loop is driven by
@@ -69,6 +80,9 @@
 //! the §2.4.3.2 polyphase synthesis filter (which consumes Table 3-B.3
 //! — the synthesis-window coefficients staged as
 //! `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`).
+//! The CRC primitive landed but the decoder frame-level loop that
+//! reads the on-wire 16-bit slot and calls [`verify_layer2_crc`] is a
+//! separate follow-up that lives with that loop.
 
 #![warn(missing_debug_implementations)]
 
@@ -76,6 +90,7 @@ use oxideav_core::RuntimeContext;
 
 pub mod audio_data;
 pub mod bitalloc;
+pub mod crc;
 pub mod header;
 pub mod requant;
 pub mod tables;
@@ -84,6 +99,10 @@ pub use audio_data::{parse_audio_data, AudioData, AudioDataError, Scfsi, MAX_CHA
 pub use bitalloc::{
     bitrate_per_channel_kbps, class_of_quantization, is_grouped, select_table, BitAllocTable,
     QuantClass, NUM_SUBBANDS,
+};
+pub use crc::{
+    crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
+    INIT_STATE as CRC_INIT_STATE,
 };
 pub use header::{
     decode_bitrate, decode_sampling_frequency, find_sync, is_layer2_bitrate_mode_allowed, Emphasis,
