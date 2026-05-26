@@ -73,16 +73,31 @@
 //!   [`crc16_update_packed`] are exposed for the encoder's streaming
 //!   accumulation.
 //!
+//! * **§2.4.3.2 / §2.4.3.3.5 polyphase synthesis filterbank**
+//!   ([`synthesis`] module): one Annex A Figure A.2 invocation
+//!   (`shift V` → `matrix V = N * S` → `build U` → `window W = U * D`
+//!   → `S_j = sum_{i = 0..16} W[j + 32 * i]`) consumes one
+//!   32-vector of subband samples and produces one 32-vector of
+//!   reconstructed PCM samples in the §2.4.3.4.7.1 nominal `[-1, +1]`
+//!   range. The N_ik matrix is precomputed at construction from the
+//!   §2.4.3.3.5 closed form
+//!   `N_ik = cos[(16 + i)(2k + 1) * pi / 64]`; the 512 D[i]
+//!   synthesis-window coefficients are read verbatim from Annex B
+//!   Table 3-B.3 (PDF pages 50-52) into
+//!   [`tables_synthesis::D`]. Caller-side resets are exposed via
+//!   [`SynthesisFilterbank::reset`].
+//!
 //! ## What does not work yet
 //!
-//! [`register`] is a no-op until the §2.4.1.6 sample loop is driven by
-//! [`requant::read_triplet`] across all subbands/granules and fed into
-//! the §2.4.3.2 polyphase synthesis filter (which consumes Table 3-B.3
-//! — the synthesis-window coefficients staged as
-//! `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`).
-//! The CRC primitive landed but the decoder frame-level loop that
-//! reads the on-wire 16-bit slot and calls [`verify_layer2_crc`] is a
-//! separate follow-up that lives with that loop.
+//! [`register`] is a no-op until the §2.4.1.6 sample loop drives the
+//! [`requant::read_triplet`] outputs across all subbands / channels /
+//! granules and feeds them — channel-by-channel — into a
+//! [`SynthesisFilterbank`] per channel; the §2.4.3.1 frame loop also
+//! has to consume the on-wire 16-bit slot and invoke
+//! [`verify_layer2_crc`] when `protection_bit == 0`. With both
+//! primitives ([`requant`] and [`synthesis`]) and the protected-field
+//! CRC ([`crc`]) in place, the remaining work is purely the
+//! wiring — no further §2.4.3 primitive is missing.
 
 #![warn(missing_debug_implementations)]
 
@@ -93,7 +108,9 @@ pub mod bitalloc;
 pub mod crc;
 pub mod header;
 pub mod requant;
+pub mod synthesis;
 pub mod tables;
+pub mod tables_synthesis;
 
 pub use audio_data::{parse_audio_data, AudioData, AudioDataError, Scfsi, MAX_CHANNELS};
 pub use bitalloc::{
@@ -109,7 +126,9 @@ pub use header::{
     FrameHeader, HeaderError, Mode, ModeExtension, SYNCWORD,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
+pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
+pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 
 /// Crate-local error type. Decode paths beyond the frame header +
 /// audio-data side info are not yet wired up; [`Error::NotImplemented`]

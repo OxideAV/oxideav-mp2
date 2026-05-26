@@ -5,7 +5,7 @@ A pure-Rust **MPEG-1 Audio Layer II** (MP2 / MUSICAM) codec for the
 
 ## Status
 
-**Clean-room rebuild in progress (round 133, 2026-05-25).** The prior
+**Clean-room rebuild in progress (round 147, 2026-05-26).** The prior
 implementation was retired under the workspace
 [clean-room policy](https://github.com/OxideAV/oxideav-workspace/blob/master/docs/IMPLEMENTOR_ROUND.md):
 the provenance of its bit-allocation and synthesis-window data tables
@@ -94,8 +94,25 @@ solely from the ISO/IEC 11172-3 PDF:
   `crc16_update_bits`, and `crc16_update_packed` are exposed so the
   encoder can stream the variable-length §2.4.1.6 allocation + scfsi
   payload into the running CRC without a temporary materialised buffer.
+- **§2.4.3.2 / §2.4.3.3.5 polyphase synthesis filterbank**
+  (`synthesis` + `tables_synthesis` modules): one Annex A Figure A.2
+  invocation consumes one 32-vector of subband samples (output of
+  `requant::read_triplet`) and produces 32 reconstructed PCM samples
+  in the §2.4.3.4.7.1 nominal `[-1, +1]` range, driving the 1024-entry
+  V ring buffer through the documented `shift V` → `matrix V` →
+  `build U` → `window W = U * D` → `S_j = Σ_{i=0..16} W[j + 32i]`
+  pipeline. The 64×32 `N_ik` matrix is precomputed at construction
+  from the §2.4.3.3.5 closed form `N_ik = cos[(16 + i)(2k + 1) π/64]`;
+  the 512 D[i] window coefficients are transcribed verbatim from
+  Annex B Table 3-B.3 (PDF pages 50-52, rendered as
+  `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`)
+  with the global peak `D[256] = 1.144989014` and the
+  anti-mirror identity `|D[256 + k]| = |D[256 - k]|` checked by
+  unit tests. `SynthesisFilterbank::push_subbands(&[f64; 32], &mut
+  [f64; 32])` is the per-channel decode primitive; `reset()` re-seeds
+  V with zeros for cold restarts per Figure A.2 footnote 1.
 
-72 unit tests cover the bitrate / sampling-frequency ladders
+88 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -127,20 +144,37 @@ mid-byte stream-splitting equivalence, the empty-payload
 header-only degenerate exercise, single-bit error detection across
 every bit of the §2.4.3.1 protected region, contiguous burst
 detection up to the polynomial degree (16 bits), and the
-verify-accepts-roundtrip / verify-rejects-mismatch property.
+verify-accepts-roundtrip / verify-rejects-mismatch property; plus the
+Annex B Table 3-B.3 `D` array size (512), the PDF-page-50/51/52
+endpoint readings (`D[0] = 0`, `D[69] = D[70] = 0.003479004`,
+`D[256] = 1.144989014`, `D[442] = D[443] = -0.003479004`), the
+peak-at-256 property, the magnitude anti-mirror identity around 256,
+and the seven §2.4.3.3.5 sign-block flip boundaries (64, 128, 192,
+256, 320, 384, 448); the precomputed `N_ik` matrix matches the
+`cos[(16 + i)(2k + 1) π/64]` closed form for every `(i, k) ∈
+[0, 64) × [0, 32)`, hits the algebraic landmarks `N[0, 0] = N[0, 4] =
+√2/2` and `N[16, 0] = 0`, and is bounded by 1 in magnitude; the
+filterbank's V buffer starts at zero, stays at zero under zero input
+across at least one full V cycle (16 frames of 64), is correctly
+re-zeroed by `reset()`, propagates a single-subband impulse for at
+most 16 frames then drops exactly to zero, stays finite + bounded
+under a realistic single-subband excitation, and two independent
+instances given different inputs produce different outputs.
 
 ## What does not work yet
 
 `register()` is a no-op until the §2.4.1.6 sample loop drives
-`requant::read_triplet` across all subbands / granules and feeds the
-§2.4.3.2 polyphase synthesis filterbank driven by Table 3-B.3
-"Coefficients D[i] of the synthesis window" (rendered as PNG pages
-56-58 under `docs/audio/mp3/annex-b-renders/`) land. The CRC-16
-primitive is in place; the decoder integration that reads the 16-bit
-slot following the header when `protection_bit == 0` and invokes
-`verify_layer2_crc` lives with the (not-yet-wired) frame-level decode
-loop. Encoder + the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder
-(16 / 22.05 / 24 kHz) are subsequent followups.
+`requant::read_triplet` across all subbands / channels / granules
+and feeds them — channel-by-channel — into a `SynthesisFilterbank`
+per channel. The §2.4.3.1 frame loop also needs to consume the
+on-wire 16-bit CRC slot and invoke `verify_layer2_crc` when
+`protection_bit == 0`. With the §2.4.1.6 side-info parser
+(`audio_data`), the §2.4.3.3.4 requantizer (`requant`), the
+§2.4.3.2 / §2.4.3.3.5 polyphase synthesis filterbank (`synthesis`)
+and the §2.4.3.1 CRC verifier (`crc`) all in place, the remaining
+work is purely wiring — no §2.4.3 primitive is missing. Encoder +
+the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder (16 / 22.05 /
+24 kHz) are subsequent followups.
 
 ## Spec note recorded
 

@@ -6,6 +6,58 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 147 — clean-room rebuild, step 5)
+
+- **§2.4.3.2 / §2.4.3.3.5 polyphase synthesis subband filter**
+  (`synthesis` module) — one Annex A Figure A.2 invocation consumes
+  one 32-vector of subband samples and produces 32 reconstructed PCM
+  samples in the §2.4.3.4.7.1 nominal `[-1, +1]` range, while the
+  1024-entry V ring buffer evolves through the `shift V` →
+  `matrix V` → `build U` → `window W = U * D` →
+  `S_j = Σ_{i = 0..16} W[j + 32 * i]` pipeline.
+  - `SynthesisFilterbank::new()` precomputes the 64 × 32 `N_ik`
+    matrix from the §2.4.3.3.5 closed form
+    `N_ik = cos[(16 + i)(2k + 1) π / 64]` and seeds V with zeros per
+    Annex A Figure A.2 footnote 1.
+  - `SynthesisFilterbank::push_subbands(&[f64; 32], &mut [f64; 32])`
+    is the per-channel decode primitive — one call per slot of 32
+    subband samples.
+  - `SynthesisFilterbank::reset()` re-zeroes V for cold restarts.
+- **Annex B Table 3-B.3 "Coefficients D[i] of the synthesis window"**
+  (`tables_synthesis::D`) — all 512 signed coefficients transcribed
+  verbatim from the staged PDF (full-PDF pages 50-52, rendered as
+  `docs/audio/mp3/annex-b-renders/Table-B.3-coefficients-Di-p56..58.png`).
+  Extraction used `pdftotext -layout` with residual OCR artefacts
+  resolved by direct visual cross-check against the PNG renders; the
+  table satisfies the documented anti-mirror magnitude identity
+  `|D[256 + k]| == |D[256 - k]|` (for `k != 0`) and exhibits the
+  seven §2.4.3.3.5 sign-block boundaries at indices 64, 128, 192,
+  256, 320, 384, 448 (asserted by unit tests).
+- **16 new unit tests** (88 total): the §2.4.3.3.5 N_ik matrix
+  matches the closed form for every `(i, k)`, hits the algebraic
+  landmarks `N[0, 0] = N[0, 4] = √2/2` and `N[16, 0] = 0`, is
+  bounded by 1 in magnitude; the V buffer starts at zero, stays at
+  zero across a full 16-frame cycle of zero input, is correctly
+  re-zeroed by `reset()`; a single-subband impulse propagates for at
+  most 16 frames and then drops exactly to zero (the
+  Annex A Figure A.2 V-buffer depth); the filterbank's output stays
+  finite + bounded under a realistic single-subband excitation; two
+  independent instances given different inputs produce different
+  outputs; the Annex B Table 3-B.3 `D` array has size 512, hits the
+  PDF-page-50/51/52 endpoint readings (`D[0] = 0`,
+  `D[69] = D[70] = 0.003479004`, `D[256] = 1.144989014`,
+  `D[442] = D[443] = -0.003479004`), peaks at index 256, has the
+  magnitude anti-mirror identity around 256, and shows the seven
+  documented sign-block boundaries.
+
+The `synthesis` module closes the last §2.4.3 primitive blocking a
+Layer II decode path. With `audio_data` (§2.4.1.6 side-info parser),
+`requant` (§2.4.3.3.4 sample requantizer), `synthesis` (§2.4.3.2 /
+§2.4.3.3.5 filterbank), and `crc` (§2.4.3.1 protected-field CRC-16)
+all in place, the next step is the §2.4.1.6 / §2.4.3.1 frame-level
+decode loop that wires the existing primitives into the registry
+contract.
+
 ### Added (round 142 — clean-room rebuild, step 4)
 
 - **§2.4.1.4 / §2.4.3.1 CRC-16** (`crc` module): the Layer II
