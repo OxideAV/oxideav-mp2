@@ -151,7 +151,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-107 unit tests cover the bitrate / sampling-frequency ladders
+121 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -211,6 +211,42 @@ allowed cell of the (14 bitrate × 3 sf × 4 mode) §2.4.2.3 matrix
 unsupported bitrate / sample-rate / disallowed (bitrate, mode), and
 emits the spec-mandated syncword `0xFFF` + ID `'1'` + layer `'10'`
 with the padding and protection bits in the correct positions.
+
+Round 162 added a `tests/malformed_input.rs` integration suite (+14
+tests, 107 → 121) that property-tests the §2.4.1.3 / §2.4.2.3 header
+parser and the §2.4.3.1 / §2.4.1.6 frame-decode loop against
+malformed inputs: every single-bit flip of the canonical 4-byte
+header (32 cases) must either round-trip to a structurally-valid
+`FrameHeader` (`channels ∈ {1, 2}`, `frame_size_bytes ≥ 4`) or
+return one of the documented `HeaderError` variants — the match arm
+in the test is wildcard-free, so any future variant must be wired
+through the test before it can compile; the syncword (bits 31..20),
+`ID` (bit 19), and `layer` (bits 18..17) flips are additionally
+pinned to the specific `BadSync` / `LsfNotSupported` /
+`UnsupportedLayer(_)` they must produce; the §2.4.2.3 reserved
+`emphasis = '10'` and `sampling_frequency = '11'` flips are pinned
+to `ReservedEmphasis` and `ReservedSamplingFrequency`; the
+high-order `bitrate_index` flip from `0b1010` (192 kbit/s) to
+`0b0010` (48 kbit/s) is pinned to the §2.4.2.3
+`DisallowedBitrateModeCombination { bit_rate: 48000, mode: Stereo }`
+matrix rejection; the semantic-only `private_bit` / `copyright` /
+`original` / `padding` / `mode_extension` flips are pinned to round-
+trip through `parse` with the affected field reflected (and the
+`padding` flip is additionally pinned to shift `frame_size_bytes`
+by exactly 1). `decode_frame` against every truncated prefix
+`0..626` of a synthesized 192k/44.1k/Stereo/no-CRC frame returns
+either `Header(BufferTooShort)` (prefix < 4) or
+`Truncated { have: prefix_len, need: 626 }` (4 ≤ prefix < 626) —
+the §2.4.3.1 frame-size check fires before the §2.4.1.6 bit reader,
+so a one-byte-short payload is surfaced as `Truncated` rather than
+`AudioData(UnexpectedEnd)`; a `protection_bit = 0` header with only
+5 bytes (one CRC slot byte missing) is pinned to `Truncated { have:
+5, need: 6 }`. `find_sync` is exercised exhaustively over the 256
+second-byte values whose top nibble differs from `0xF` (must
+report `None`) and over the 255 first-byte values different from
+`0xFF` (must also report `None`); `FrameHeader::parse` is
+exhaustively confirmed to report `BadSync` across the same 240
+non-`0xF_` second-byte values without panicking.
 
 ## What does not work yet
 

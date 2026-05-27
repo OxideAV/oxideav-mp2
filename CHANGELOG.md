@@ -6,6 +6,70 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 162 — malformed-input property tests)
+
+- **`tests/malformed_input.rs`** integration suite (+14 tests; total
+  107 → 121, all green) property-testing the §2.4.1.3 / §2.4.2.3
+  `FrameHeader::parse` parser and the §2.4.3.1 / §2.4.1.6
+  `decode_frame` loop against malformed inputs without any new
+  src/ surface change:
+  - **32-bit header bit-flip exhaustion**
+    (`header_bit_flips_never_panic_or_violate_postconditions`):
+    every single-bit flip of the canonical 192k/44.1k/Stereo/no-CRC
+    header must either succeed with `channels() ∈ {1, 2}` and
+    `frame_size_bytes() ≥ 4`, or return one of the 11 documented
+    `HeaderError` variants — the test's error match arm is
+    wildcard-free so a future `HeaderError` addition forces this
+    test to be updated. Three further tests pin §2.4.1.3 fixed-field
+    flips to specific errors: syncword bits 31..20 →
+    `BadSync` (×12), `ID` bit 19 → `LsfNotSupported`, layer bits
+    18..17 → `UnsupportedLayer(_)`. The `protection_bit` flip is
+    pinned to a successful parse with the field toggled.
+  - **Derived-field bit-flip oracles**
+    (`sampling_frequency_to_reserved_value_is_rejected`,
+    `emphasis_to_reserved_value_is_rejected`,
+    `bitrate_high_bit_flip_triggers_layer2_mode_matrix_rejection`,
+    `semantic_only_bit_flips_round_trip_through_parse`): five tests
+    pin specific bit-flip → error mappings derived from the
+    §2.4.2.3 ladders / matrix (e.g. flipping the high `bitrate_index`
+    bit takes the canonical 192k stereo header to 48k stereo, which
+    is in the disallowed matrix).
+  - **Prefix-truncation exhaustion**
+    (`decode_frame_truncation_is_exhaustive_and_never_panics`,
+    `header_parse_returns_buffer_too_short_for_every_short_prefix`,
+    `decode_frame_truncation_at_crc_slot_boundary`,
+    `payload_one_byte_short_is_truncated_not_audio_data_underflow`):
+    for every prefix length `0..626` of a synthesized
+    canonical 192k/44.1k frame, `decode_frame` returns either
+    `Header(BufferTooShort)` (prefix < 4) or
+    `Truncated { have, need }` (4 ≤ prefix < 626) with `have ==
+    prefix_len`, `need == 626`, never panicking; a CRC-protected
+    header with 5 bytes (one CRC slot byte missing) is pinned to
+    `Truncated { have: 5, need >= 6 }`; and a one-byte-short
+    payload is pinned to `Truncated` (NOT
+    `AudioData(UnexpectedEnd)`) so a future reorder that runs the
+    §2.4.1.6 bit reader before the §2.4.3.1 frame-size check is
+    caught immediately.
+  - **Sync-search robustness**
+    (`find_sync_is_none_when_no_syncword_present`,
+    `find_sync_reports_leftmost_match`,
+    `parse_reports_bad_sync_exhaustively_for_non_f_second_byte`):
+    `find_sync` is exhaustively confirmed to return `None` across
+    the 240 second-byte values with top nibble ≠ `0xF` paired with
+    `0xFF`, and across the 255 first-byte values ≠ `0xFF` paired
+    with `0xFF`; `find_sync` of a planted sync at offset 13 returns
+    `Some(13)` and a planted earlier sync wins over the later one;
+    `FrameHeader::parse` of every `[0xFF, b1, 0xA0, 0x04]` for
+    `b1 ∈ 0x00..=0xEF` returns `BadSync` without panicking.
+
+The new tests do not touch `src/` — they harden the existing
+public surface (`FrameHeader::parse`, `decode_frame`, `find_sync`,
+`HeaderError`, `FrameError`) against malformed inputs without
+adding behaviour. The §2.4.1.3 header byte/bit map and the
+§2.4.3.1 / §2.4.2.1 `floor(144·br/Fs)+padding` frame-size formula
+are the only specification material the tests rely on, and both
+are already documented at the top of `src/header.rs`.
+
 ### Added (round 157 — encoder, step 1: §2.4.2.3 frame-header writer)
 
 - **§2.4.1.3 / §2.4.2.3 frame-header writer** (encoder side, `header`
