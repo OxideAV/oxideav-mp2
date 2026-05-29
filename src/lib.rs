@@ -1,7 +1,9 @@
 //! # oxideav-mp2
 //!
-//! Pure-Rust **MPEG-1 Audio Layer II** (MP2 / MUSICAM) codec, clean-room
-//! rebuilt against ISO/IEC 11172-3 (1993) and ISO/IEC 13818-3 (1997).
+//! Pure-Rust **MPEG-1 / MPEG-2 LSF Audio Layer II** (MP2 / MUSICAM)
+//! codec, clean-room rebuilt against ISO/IEC 11172-3 (1993) and the
+//! §2.4 / Annex B / Annex C low-sampling-rate extension of ISO/IEC
+//! 13818-3 (1997).
 //!
 //! ## Status
 //!
@@ -146,7 +148,8 @@ pub use frame::{
     FrameError, PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME,
 };
 pub use header::{
-    decode_bitrate, decode_sampling_frequency, encode_bitrate, encode_sampling_frequency,
+    decode_bitrate, decode_bitrate_lsf, decode_sampling_frequency, decode_sampling_frequency_lsf,
+    encode_bitrate, encode_bitrate_lsf, encode_sampling_frequency, encode_sampling_frequency_lsf,
     find_sync, is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, HeaderError, Mode,
     ModeExtension, SYNCWORD,
 };

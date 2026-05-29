@@ -1,10 +1,14 @@
-//! MPEG-1 Audio Layer II frame header parsing — ISO/IEC 11172-3 (1993),
-//! §2.4.1.3 (header syntax) and §2.4.2.3 (header field semantics).
+//! MPEG-1 / MPEG-2 LSF Audio Layer II frame header parsing — ISO/IEC
+//! 11172-3 (1993), §2.4.1.3 (header syntax) and §2.4.2.3 (header field
+//! semantics), extended per ISO/IEC 13818-3 (1997), §2.4.2.3 (low-rate
+//! `ID == 0` bitrate ladder + 16/22.05/24 kHz sampling-frequency table).
 //!
 //! Clean-room: every numeric value in this module is derived from the
 //! staged `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` (157-page edition,
-//! SHA-256 `ef67bbc34eaab825e804bb87835c0cc0cd9ae6c7f77d3cec64d779726ffe322d`).
-//! No third-party MP2 implementation source was consulted.
+//! SHA-256 `ef67bbc34eaab825e804bb87835c0cc0cd9ae6c7f77d3cec64d779726ffe322d`)
+//! and the staged `docs/audio/mp3/ISO_IEC_13818-3-MPEG2-audio-1997.pdf`
+//! (PDF pages 20-21 for the §2.4.2.3 LSF bitrate / sampling-frequency
+//! tables). No third-party MP2 implementation source was consulted.
 //!
 //! ## Field layout (§2.4.1.3)
 //!
@@ -28,7 +32,8 @@
 //!
 //! ## Tables (§2.4.2.3, ISO 11172-3 PDF page 21)
 //!
-//! For Layer II the `bitrate_index` ladder is (kbit/s):
+//! For Layer II at `ID == 1` (MPEG-1) the `bitrate_index` ladder is
+//! (kbit/s):
 //!
 //! | code | rate | code | rate |
 //! |-----:|-----:|-----:|-----:|
@@ -41,13 +46,38 @@
 //! | 0110 | 96   | 1110 | 384 |
 //! | 0111 | 112  | 1111 | forbidden |
 //!
-//! The `sampling_frequency` table (PDF page 21) is:
+//! The MPEG-1 `sampling_frequency` table (PDF page 21) is:
 //!
 //! | code | rate (kHz) |
 //! |-----:|-----------:|
 //! | 00 | 44,1 |
 //! | 01 | 48 |
 //! | 10 | 32 |
+//! | 11 | reserved |
+//!
+//! ## LSF tables (§2.4.2.3, ISO 13818-3 PDF page 21)
+//!
+//! For Layer II at `ID == 0` (low-sampling-rate extension) the
+//! `bitrate_index` ladder is (kbit/s):
+//!
+//! | code | rate | code | rate |
+//! |-----:|-----:|-----:|-----:|
+//! | 0000 | free | 1000 | 64  |
+//! | 0001 | 8    | 1001 | 80  |
+//! | 0010 | 16   | 1010 | 96  |
+//! | 0011 | 24   | 1011 | 112 |
+//! | 0100 | 32   | 1100 | 128 |
+//! | 0101 | 40   | 1101 | 144 |
+//! | 0110 | 48   | 1110 | 160 |
+//! | 0111 | 56   | 1111 | forbidden |
+//!
+//! The LSF `sampling_frequency` table (PDF page 21) is:
+//!
+//! | code | rate (kHz) |
+//! |-----:|-----------:|
+//! | 00 | 22,05 |
+//! | 01 | 24    |
+//! | 10 | 16    |
 //! | 11 | reserved |
 //!
 //! Frame size in slots (§2.4.3.1):
@@ -71,10 +101,6 @@ pub enum HeaderError {
     BufferTooShort,
     /// Top 12 bits were not the §2.4.2.3 syncword (`0xFFF`).
     BadSync,
-    /// `ID` was `'0'`. The §2.4.2.3 prose marks `'0'` as reserved for
-    /// MPEG-1 audio; ISO/IEC 13818-3 later reuses it for LSF, but this
-    /// crate currently scopes to MPEG-1 Layer II.
-    LsfNotSupported,
     /// `layer` field decoded to a value other than `'10'` (Layer II).
     /// The crate is dedicated to Layer II; Layers I and III are
     /// dispatched by their own crates.
@@ -108,10 +134,6 @@ impl fmt::Display for HeaderError {
                 write!(f, "buffer is shorter than the 4-byte Layer II header")
             }
             HeaderError::BadSync => write!(f, "syncword is not 0xFFF"),
-            HeaderError::LsfNotSupported => write!(
-                f,
-                "ID == 0 (ISO/IEC 13818-3 LSF) not yet supported by this crate"
-            ),
             HeaderError::UnsupportedLayer(l) => write!(
                 f,
                 "layer field decoded to {} (only Layer II / code '10' supported)",
@@ -216,13 +238,30 @@ pub enum Emphasis {
     CcittJ17,
 }
 
-/// Parsed MPEG-1 Layer II frame header (§2.4.1.3 + §2.4.2.3).
+/// Parsed MPEG-1 / MPEG-2 LSF Layer II frame header
+/// (§2.4.1.3 + §2.4.2.3 of ISO/IEC 11172-3, extended by §2.4.2.3 of
+/// ISO/IEC 13818-3 for the low sampling-rate (`ID == 0`) variant).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
+    /// True when the on-wire `ID` bit decoded to `'0'` — the ISO/IEC
+    /// 13818-3 §2.4.2.3 low-sampling-rate (LSF) extension. False for
+    /// the ISO/IEC 11172-3 baseline (MPEG-1, `ID == '1'`).
+    ///
+    /// `lsf` selects the §2.4.2.3 bitrate ladder, the
+    /// `sampling_frequency` table, and (downstream of
+    /// [`FrameHeader::parse`]) the active Annex B bit-allocation table
+    /// per ISO/IEC 13818-3 §2.4.3.1 ("For Layer II, instead of tables
+    /// B.2 ..., table B.1 ... of this part of ISO/IEC 13818 should be
+    /// used.").
+    pub lsf: bool,
     /// Bitrate in bit/s (i.e. `kbit/s * 1000`), per the §2.4.2.3
-    /// `bitrate_index` ladder column "Layer II".
+    /// `bitrate_index` ladder column "Layer II" (ISO/IEC 11172-3 page
+    /// 21 for `lsf == false`, ISO/IEC 13818-3 page 21 for
+    /// `lsf == true`).
     pub bit_rate: u32,
-    /// Sampling frequency in Hz (44100, 48000 or 32000).
+    /// Sampling frequency in Hz. When `lsf` is false the value is one
+    /// of 32000 / 44100 / 48000; when `lsf` is true it is one of
+    /// 16000 / 22050 / 24000.
     pub sample_rate: u32,
     /// `padding_bit` — adds one extra slot (= one extra byte for
     /// Layer II) to the frame when set.
@@ -248,11 +287,15 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
-    /// Parse a 4-byte MPEG-1 Layer II header from the front of `buf`.
+    /// Parse a 4-byte MPEG-1 or MPEG-2 LSF Layer II header from the
+    /// front of `buf`.
     ///
     /// Performs the §2.4.2.3 validation up-front: rejects bad syncwords,
-    /// LSF (`ID == 0`), non-Layer-II frames, forbidden / reserved table
-    /// codes, and the §2.4.2.3 disallowed `(bitrate, mode)` combinations.
+    /// non-Layer-II frames, forbidden / reserved table codes, and the
+    /// (MPEG-1-only) §2.4.2.3 disallowed `(bitrate, mode)` combinations.
+    /// `ID == 0` is decoded as ISO/IEC 13818-3 §2.4.2.3 LSF; the
+    /// `lsf` flag on the returned [`FrameHeader`] selects the LSF
+    /// bitrate ladder and sampling-frequency table.
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
         if buf.len() < 4 {
             return Err(HeaderError::BufferTooShort);
@@ -265,9 +308,7 @@ impl FrameHeader {
         }
 
         let id = (word >> 19) & 0x1;
-        if id == 0 {
-            return Err(HeaderError::LsfNotSupported);
-        }
+        let lsf = id == 0;
 
         let layer_bits = ((word >> 17) & 0x3) as u8;
         // §2.4.2.3: '11' = Layer I, '10' = Layer II, '01' = Layer III,
@@ -279,10 +320,18 @@ impl FrameHeader {
         let protection_bit = ((word >> 16) & 0x1) == 1;
 
         let bitrate_index = ((word >> 12) & 0xF) as u8;
-        let bit_rate = decode_bitrate(bitrate_index)?;
+        let bit_rate = if lsf {
+            decode_bitrate_lsf(bitrate_index)?
+        } else {
+            decode_bitrate(bitrate_index)?
+        };
 
         let sf_index = ((word >> 10) & 0x3) as u8;
-        let sample_rate = decode_sampling_frequency(sf_index)?;
+        let sample_rate = if lsf {
+            decode_sampling_frequency_lsf(sf_index)?
+        } else {
+            decode_sampling_frequency(sf_index)?
+        };
 
         let padding = ((word >> 9) & 0x1) == 1;
         let private_bit = ((word >> 8) & 0x1) == 1;
@@ -315,12 +364,17 @@ impl FrameHeader {
         };
 
         // §2.4.2.3 "For Layer II, not all combinations of total bitrate
-        // and mode are allowed" — table on PDF page 21.
-        if !is_layer2_bitrate_mode_allowed(bit_rate, mode) {
+        // and mode are allowed" — table on ISO 11172-3 PDF page 21.
+        // The ISO/IEC 13818-3 §2.4.2.3 LSF extension does not restate
+        // this matrix (the LSF bitrate ladder spans 8..160 kbit/s in a
+        // single column for Layer II / Layer III); the LSF rates are
+        // accepted for every mode.
+        if !lsf && !is_layer2_bitrate_mode_allowed(bit_rate, mode) {
             return Err(HeaderError::DisallowedBitrateModeCombination { bit_rate, mode });
         }
 
         Ok(FrameHeader {
+            lsf,
             bit_rate,
             sample_rate,
             padding,
@@ -389,14 +443,24 @@ impl FrameHeader {
         // `bit_rate` (e.g. 200 kbit/s) is reported as
         // `UnsupportedBitrate` rather than getting swept into the
         // §2.4.2.3 "disallowed (bitrate, mode)" matrix (which only
-        // covers the ladder rows themselves).
-        let bitrate_index = encode_bitrate(self.bit_rate)? as u32;
-        let sf_index = encode_sampling_frequency(self.sample_rate)? as u32;
+        // covers the ladder rows themselves). The LSF flag selects
+        // between the ISO 11172-3 and ISO 13818-3 ladders.
+        let bitrate_index = if self.lsf {
+            encode_bitrate_lsf(self.bit_rate)? as u32
+        } else {
+            encode_bitrate(self.bit_rate)? as u32
+        };
+        let sf_index = if self.lsf {
+            encode_sampling_frequency_lsf(self.sample_rate)? as u32
+        } else {
+            encode_sampling_frequency(self.sample_rate)? as u32
+        };
 
         // Now the (bit_rate, mode) pair sits inside the §2.4.2.3
         // matrix on PDF page 21; enforce the "not all combinations are
-        // allowed" rule.
-        if !is_layer2_bitrate_mode_allowed(self.bit_rate, self.mode) {
+        // allowed" rule. The 13818-3 LSF extension does not restate
+        // this matrix and accepts every (LSF bitrate, mode) pair.
+        if !self.lsf && !is_layer2_bitrate_mode_allowed(self.bit_rate, self.mode) {
             return Err(HeaderError::DisallowedBitrateModeCombination {
                 bit_rate: self.bit_rate,
                 mode: self.mode,
@@ -422,11 +486,14 @@ impl FrameHeader {
         };
 
         // §2.4.1.3 packed layout, transmitted MSB-first:
-        //   sync(12) | ID(1)=1 | layer(2)='10' | protection(1) |
+        //   sync(12) | ID(1) | layer(2)='10' | protection(1) |
         //   bitrate(4) | sf(2) | pad(1) | priv(1) | mode(2) |
         //   mode_ext(2) | copyright(1) | original(1) | emph(2)
+        // ID = '1' for MPEG-1 (§2.4.2.3 of 11172-3); ID = '0' for the
+        // LSF extension (§2.4.2.3 of 13818-3).
+        let id_bit: u32 = if self.lsf { 0 } else { 1 };
         let word: u32 = ((SYNCWORD as u32) << 20)
-            | (1 << 19) // ID = '1' (MPEG-1, §2.4.2.3)
+            | (id_bit << 19)
             | (0b10 << 17) // layer = '10' (Layer II, §2.4.2.3)
             | ((self.protection_bit as u32) << 16)
             | (bitrate_index << 12)
@@ -547,6 +614,92 @@ pub fn is_layer2_bitrate_mode_allowed(bit_rate: u32, mode: Mode) -> bool {
     }
 }
 
+/// Decode the ISO/IEC 13818-3 §2.4.2.3 LSF Layer II `bitrate_index`
+/// ladder (PDF page 21, "Layer II, Layer III" column).
+///
+/// Returns `bit/s` (i.e. `kbit/s × 1000`). `0` (free format) and `0xF`
+/// (forbidden) are rejected. The LSF Layer II ladder spans
+/// 8..160 kbit/s in single-kbit/s steps from the §2.4.2.3 table.
+pub fn decode_bitrate_lsf(index: u8) -> Result<u32, HeaderError> {
+    let kbps = match index {
+        0b0000 => return Err(HeaderError::FreeFormat),
+        0b0001 => 8,
+        0b0010 => 16,
+        0b0011 => 24,
+        0b0100 => 32,
+        0b0101 => 40,
+        0b0110 => 48,
+        0b0111 => 56,
+        0b1000 => 64,
+        0b1001 => 80,
+        0b1010 => 96,
+        0b1011 => 112,
+        0b1100 => 128,
+        0b1101 => 144,
+        0b1110 => 160,
+        0b1111 => return Err(HeaderError::ForbiddenBitrate),
+        _ => unreachable!("bitrate_index is a 4-bit field"),
+    };
+    Ok(kbps * 1000)
+}
+
+/// Decode the ISO/IEC 13818-3 §2.4.2.3 LSF `sampling_frequency` table
+/// (PDF page 21): `'00'` → 22.05, `'01'` → 24, `'10'` → 16 kHz,
+/// `'11'` → reserved.
+pub fn decode_sampling_frequency_lsf(index: u8) -> Result<u32, HeaderError> {
+    match index {
+        0b00 => Ok(22_050),
+        0b01 => Ok(24_000),
+        0b10 => Ok(16_000),
+        0b11 => Err(HeaderError::ReservedSamplingFrequency),
+        _ => unreachable!("sampling_frequency is a 2-bit field"),
+    }
+}
+
+/// Encode a §2.4.2.3 LSF Layer II bitrate to its 4-bit `bitrate_index`.
+///
+/// Inverse of [`decode_bitrate_lsf`]. Free format (`'0000'`) and the
+/// forbidden code (`'1111'`) are not producible — both are rejected
+/// as [`HeaderError::UnsupportedBitrate`].
+pub fn encode_bitrate_lsf(bit_rate: u32) -> Result<u8, HeaderError> {
+    if bit_rate == 0 || bit_rate % 1000 != 0 {
+        return Err(HeaderError::UnsupportedBitrate(bit_rate));
+    }
+    let kbps = bit_rate / 1000;
+    let index = match kbps {
+        8 => 0b0001,
+        16 => 0b0010,
+        24 => 0b0011,
+        32 => 0b0100,
+        40 => 0b0101,
+        48 => 0b0110,
+        56 => 0b0111,
+        64 => 0b1000,
+        80 => 0b1001,
+        96 => 0b1010,
+        112 => 0b1011,
+        128 => 0b1100,
+        144 => 0b1101,
+        160 => 0b1110,
+        _ => return Err(HeaderError::UnsupportedBitrate(bit_rate)),
+    };
+    Ok(index)
+}
+
+/// Encode a §2.4.2.3 LSF sampling frequency to its 2-bit
+/// `sampling_frequency` code (PDF page 21 of ISO/IEC 13818-3).
+///
+/// Inverse of [`decode_sampling_frequency_lsf`]. The reserved code
+/// (`'11'`) is not producible.
+pub fn encode_sampling_frequency_lsf(sample_rate: u32) -> Result<u8, HeaderError> {
+    match sample_rate {
+        22_050 => Ok(0b00),
+        24_000 => Ok(0b01),
+        16_000 => Ok(0b10),
+        _ => Err(HeaderError::UnsupportedSamplingFrequency(sample_rate)),
+    }
+}
+
 /// Search `buf` for the §2.4.3.1 12-bit syncword on byte boundaries.
 /// Returns the byte offset of the first sync, or `None`.
 pub fn find_sync(buf: &[u8]) -> Option<usize> {
@@ -629,16 +782,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_lsf_id_bit() {
-        // ID = 0 by setting bit 19 = 0 (i.e. the byte after sync top is
-        // 0xF5 with ID bit cleared but layer '10' protection '1').
-        // Sync 0xFFF (12 bits), then ID=0, layer=10, protection=1 →
-        // byte 1 low nibble = 0b0101 = 0x5.
-        let bytes = [0xFF, 0xF5, 0xA0, 0x04];
-        assert_eq!(
-            FrameHeader::parse(&bytes),
-            Err(HeaderError::LsfNotSupported)
-        );
+    fn parses_an_lsf_header_with_id_bit_zero() {
+        // ID = 0 (ISO/IEC 13818-3 LSF), layer = '10' (Layer II),
+        // protection = '1' (no CRC).
+        // Byte 1 low nibble = ID(1)=0 | layer(2)=10 | prot(1)=1 = 0b0101 = 0x5.
+        // Then bitrate_index = '1000' = 64 kbit/s for LSF Layer II,
+        // sampling_frequency = '10' = 16 kHz, padding=0, private=0,
+        // mode='11'=single_channel, mode_ext='00', cr=0, orig=1, emph='00'.
+        // Byte 2 = 1000 1000 = 0x88; byte 3 = 1100 0100 = 0xC4.
+        let bytes = [0xFF, 0xF5, 0x88, 0xC4];
+        let h = FrameHeader::parse(&bytes).expect("LSF header should parse");
+        assert!(h.lsf);
+        assert_eq!(h.bit_rate, 64_000);
+        assert_eq!(h.sample_rate, 16_000);
+        assert_eq!(h.mode, Mode::SingleChannel);
+        assert!(!h.padding);
+        assert!(h.protection_bit);
     }
 
     #[test]
@@ -943,6 +1102,7 @@ mod tests {
                         // Encoder must reject the same matrix the
                         // decoder rejects.
                         let h = FrameHeader {
+                            lsf: false,
                             bit_rate,
                             sample_rate,
                             padding: false,
@@ -1011,6 +1171,7 @@ mod tests {
             ModeExtension::Bound16,
         ] {
             let h = FrameHeader {
+                lsf: false,
                 bit_rate: 128_000,
                 sample_rate: 44_100,
                 padding: false,
@@ -1028,6 +1189,7 @@ mod tests {
         // All three valid emphasis values must round-trip.
         for emph in [Emphasis::None, Emphasis::FiftyFifteen, Emphasis::CcittJ17] {
             let h = FrameHeader {
+                lsf: false,
                 bit_rate: 128_000,
                 sample_rate: 44_100,
                 padding: false,
@@ -1047,6 +1209,7 @@ mod tests {
     #[test]
     fn emit_bytes_rejects_unsupported_bitrate_and_sample_rate() {
         let mut h = FrameHeader {
+            lsf: false,
             bit_rate: 192_000,
             sample_rate: 44_100,
             padding: false,
@@ -1079,6 +1242,7 @@ mod tests {
     fn emit_bytes_rejects_disallowed_bitrate_mode_pair() {
         // 32 kbit/s + Stereo is forbidden by §2.4.2.3.
         let h = FrameHeader {
+            lsf: false,
             bit_rate: 32_000,
             sample_rate: 44_100,
             padding: false,
@@ -1102,6 +1266,7 @@ mod tests {
     #[test]
     fn emit_bytes_sets_syncword_id_and_layer_bits_correctly() {
         let h = FrameHeader {
+            lsf: false,
             bit_rate: 192_000,
             sample_rate: 44_100,
             padding: false,
@@ -1128,6 +1293,7 @@ mod tests {
         for padding in [false, true] {
             for protection_bit in [false, true] {
                 let h = FrameHeader {
+                    lsf: false,
                     bit_rate: 192_000,
                     sample_rate: 44_100,
                     padding,

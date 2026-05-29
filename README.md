@@ -1,6 +1,7 @@
 # oxideav-mp2
 
-A pure-Rust **MPEG-1 Audio Layer II** (MP2 / MUSICAM) codec for the
+A pure-Rust **MPEG-1 / MPEG-2 LSF Audio Layer II** (MP2 / MUSICAM)
+codec for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) framework.
 
 ## Status
@@ -19,8 +20,11 @@ The rebuild reads numeric tables **only** from ISO/IEC 11172-3 (1993),
 the staged 157-page edition with Annex B
 (`docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf`, SHA-256
 `ef67bbc34eaab825e804bb87835c0cc0cd9ae6c7f77d3cec64d779726ffe322d`),
-and the accompanying clean-room markdown extracts under
-`docs/audio/mp3/`.
+ISO/IEC 13818-3 (1997)
+(`docs/audio/mp3/ISO_IEC_13818-3-MPEG2-audio-1997.pdf`, for the
+§2.4.2.3 low-sampling-rate header tables and Annex B Table B.1
+bit-allocation table), and the accompanying clean-room markdown
+extracts under `docs/audio/mp3/`.
 
 ## What works today
 
@@ -159,12 +163,16 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-126 unit tests cover the bitrate / sampling-frequency ladders
-end-to-end, sync detection (positive + negative paths), the §2.4.2.3
-disallowed bitrate/mode combinations (rejection + the matching allow
-paths), every emphasis value (including the reserved-`'10'`
-rejection), every mode and mode-extension code, the LSF-rejection
-path, short-buffer rejection, the reserved-`'00'` layer rejection,
+139 lib tests + 6 LSF integration tests + 14 malformed-input
+property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
+ladders end-to-end (decoding and encoding inverses cross-checked
+across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
+round-trips), sync detection (positive + negative paths), the
+§2.4.2.3 MPEG-1 disallowed bitrate/mode combinations (rejection +
+the matching allow paths), every emphasis value (including the
+reserved-`'10'` rejection), every mode and mode-extension code,
+the LSF-acceptance path (`ID == 0` now parses successfully and
+routes to the §13818-3 §2.4.3.1 Table B.1 path), short-buffer rejection, the reserved-`'00'` layer rejection,
 frame-size calculation at three canonical (bitrate, sample-rate)
 points (with padding on / off), the Table 3-B.1 scalefactor
 closed-form / endpoint / monotonicity / exact-power-of-two
@@ -210,8 +218,11 @@ instances given different inputs produce different outputs; plus
 encoder-side: `encode_bitrate` round-trips every Layer II ladder
 code 1..14 against `decode_bitrate` (and rejects off-ladder /
 non-kbps inputs), `encode_sampling_frequency` round-trips all three
-sf codes (and rejects LSF 16/22.05/24 kHz and reserved
-sample-rates), `FrameHeader::emit_bytes` round-trips the canonical
+MPEG-1 sf codes (and rejects LSF 16/22.05/24 kHz at the MPEG-1
+encoder + reserved sample-rates); the symmetric
+`encode_bitrate_lsf` / `encode_sampling_frequency_lsf` pair
+covers the §13818-3 §2.4.2.3 LSF ladders (8..160 kbit/s and
+16/22.05/24 kHz), `FrameHeader::emit_bytes` round-trips the canonical
 192 kbit/s / 44.1 kHz / Stereo header byte-for-byte, walks every
 allowed cell of the (14 bitrate × 3 sf × 4 mode) §2.4.2.3 matrix
 (120 allowed / 48 rejected per the matrix), exercises all four
@@ -329,8 +340,24 @@ existing synthesis path), §2.4.3.3.3 scalefactor extraction +
 Table A.2 SCFSI selection, the iterative §C.1.5.2.7 bit-allocator,
 and the §2.4.1.6 audio-data writer that ties everything together.
 
-The ISO/IEC 13818-3 §2.4.2.3 LSF Layer II ladder (16 / 22.05 /
-24 kHz) is a subsequent followup (gated on docs gap #1076).
+**Round 185 (2026-05-29)** wired ISO/IEC 13818-3 §2.4.2.3 LSF
+Layer II support. `FrameHeader::lsf` captures the parsed `ID` bit;
+`decode_bitrate_lsf` / `decode_sampling_frequency_lsf` (and their
+encode-side inverses) handle the LSF 8..160 kbit/s ladder and the
+16 / 22.05 / 24 kHz sampling-frequency table from PDF page 21.
+`BitAllocTable::B1Lsf` reflects the §2.4.3.1 mandate ("instead of
+tables B.2 ..., table B.1 ... of this part of ISO/IEC 13818 should
+be used"): a single allocation table covering all LSF
+(`sblimit = 30`, `Sum of nbal = 75`, PDF page 71). `select_table`
+routes every LSF header to `B1Lsf`. The §2.4.2.3 "not all
+combinations of total bitrate and mode are allowed" matrix is
+scoped to MPEG-1 — the 13818-3 LSF extension does not restate the
+matrix, so every (LSF bitrate, mode) pair is accepted by both
+`parse` and `emit_bytes`. The MPEG-1 polyphase synthesis path
+applies verbatim to LSF (§2.4.3.2 reuses 11172-3 §2.4.3 for
+Layer II), so end-to-end LSF `decode_frame` works today; an
+all-zero-allocation LSF frame round-trips to exactly 1152 silent
+samples per channel.
 
 ## Spec note recorded
 

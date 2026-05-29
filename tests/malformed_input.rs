@@ -144,7 +144,6 @@ fn header_bit_flips_never_panic_or_violate_postconditions() {
                 match err {
                     HeaderError::BufferTooShort
                     | HeaderError::BadSync
-                    | HeaderError::LsfNotSupported
                     | HeaderError::UnsupportedLayer(_)
                     | HeaderError::ForbiddenBitrate
                     | HeaderError::FreeFormat
@@ -160,12 +159,16 @@ fn header_bit_flips_never_panic_or_violate_postconditions() {
 }
 
 /// Some bit positions are §2.4.1.3 hard-coded fields whose flip MUST
-/// always produce a specific error. Pin them by position:
+/// always produce a specific error or a specific successful re-decode.
+/// Pin them by position:
 ///
 /// * bits 31..20 — syncword (12 bits): any single flip breaks the
 ///   §2.4.2.3 `'1111 1111 1111'` requirement → `BadSync`.
-/// * bit 19 — `ID`: flipping `'1'` to `'0'` selects ISO/IEC 13818-3
-///   LSF, which this crate does not accept → `LsfNotSupported`.
+/// * bit 19 — `ID`: flipping `'1'` → `'0'` switches the header from
+///   ISO/IEC 11172-3 MPEG-1 to the ISO/IEC 13818-3 §2.4.2.3 LSF
+///   extension. The flipped baseline still parses successfully; the
+///   `lsf` field flips and the bitrate / sample-rate fields decode
+///   against the LSF ladder rather than the MPEG-1 ladder.
 /// * bits 18..17 — `layer`: flipping either bit moves us off `'10'`
 ///   → `UnsupportedLayer(_)`.
 #[test]
@@ -187,14 +190,19 @@ fn header_bit_flips_in_fixed_fields_produce_specific_errors() {
     }
 
     // Bit 19: ID. Word position bit 19 = (32-1)-19 = 12 bits from MSB
-    // → byte 1 bit (7 - (12 % 8)) = byte 1, mask 1<<3 = 0x08.
+    // → byte 1 bit (7 - (12 % 8)) = byte 1, mask 1<<3 = 0x08. The
+    // canonical baseline has bitrate_index='1010' (= 192 kbit/s in
+    // MPEG-1, = 96 kbit/s in LSF) and sf_index='00' (= 44.1 kHz in
+    // MPEG-1, = 22.05 kHz in LSF); flipping the ID bit re-decodes
+    // both fields against the LSF ladder per ISO/IEC 13818-3 §2.4.2.3.
+    let baseline_parsed = FrameHeader::parse(&baseline).unwrap();
+    assert!(!baseline_parsed.lsf, "baseline is MPEG-1");
     let mut mutated = baseline;
     mutated[1] ^= 0x08;
-    assert_eq!(
-        FrameHeader::parse(&mutated),
-        Err(HeaderError::LsfNotSupported),
-        "ID bit flip did not yield LsfNotSupported"
-    );
+    let lsf_parsed = FrameHeader::parse(&mutated).unwrap();
+    assert!(lsf_parsed.lsf, "ID bit flip should select LSF");
+    assert_eq!(lsf_parsed.bit_rate, 96_000, "LSF bitrate_index='1010' = 96");
+    assert_eq!(lsf_parsed.sample_rate, 22_050, "LSF sf_index='00' = 22.05");
 
     // Bits 18..17: layer.
     //   bit 18 → byte 1 bit (7 - (13 % 8)) = bit 2 → mask 0x04

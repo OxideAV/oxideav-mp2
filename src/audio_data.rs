@@ -423,6 +423,7 @@ mod tests {
 
     fn make_header(bit_rate: u32, sample_rate: u32, mode: Mode) -> FrameHeader {
         FrameHeader {
+            lsf: false,
             bit_rate,
             sample_rate,
             padding: false,

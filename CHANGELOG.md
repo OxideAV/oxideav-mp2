@@ -6,6 +6,52 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 185 — ISO/IEC 13818-3 LSF Layer II support)
+
+- **Low-sampling-rate (LSF) Layer II decode + emit.** `FrameHeader`
+  now decodes both ISO/IEC 11172-3 (`ID == 1`, MPEG-1) and ISO/IEC
+  13818-3 (`ID == 0`, LSF) Layer II headers. A new
+  `FrameHeader::lsf: bool` field captures the parsed `ID` bit; the
+  bitrate (8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 80 / 96 / 112 /
+  128 / 144 / 160 kbit/s, ISO/IEC 13818-3 §2.4.2.3 PDF page 21) and
+  sampling-frequency (16 / 22.05 / 24 kHz, same page) tables are
+  exposed as `decode_bitrate_lsf` / `encode_bitrate_lsf` and
+  `decode_sampling_frequency_lsf` / `encode_sampling_frequency_lsf`.
+  `FrameHeader::emit_bytes` round-trips LSF headers bit-for-bit.
+  The ISO 11172-3 §2.4.2.3 "not all (bitrate, mode) combinations
+  are allowed" matrix is restricted to MPEG-1; the 13818-3 LSF
+  extension does not restate the matrix, so every LSF (bitrate,
+  mode) pair is accepted by both `parse` and `emit_bytes`.
+  `HeaderError::LsfNotSupported` (previously raised on every
+  `ID == 0` frame) is removed.
+
+- **ISO/IEC 13818-3 Annex B Table B.1 bit-allocation table.**
+  `BitAllocTable::B1Lsf` is a new variant covering the single
+  Layer II bit-allocation table that ISO/IEC 13818-3 §2.4.3.1
+  mandates in place of the four ISO 11172-3 sub-tables B.2a..d for
+  every LSF Layer II frame. Layout per PDF page 71: `sblimit = 30`,
+  per-subband `nbal` widths `4/4/4/4/3/3/3/3/3/3/3/2 * 19/0 * 2`,
+  sum of `nbal = 75`. The 30-row table is encoded as three shared
+  PDF-row slices plus the trailing two empty rows. `select_table`
+  unconditionally routes `header.lsf == true` to `B1Lsf`; every
+  Table B.1 cell is covered by the existing
+  `every_b2_table_cell_resolves_to_a_known_b4_class` and
+  `allocation_index_is_total_inverse_of_nb_steps_for_every_cell`
+  exhaustive tests (Table 3-B.4 is shared between 11172-3 and
+  13818-3 per §2.4.3.1 prose).
+
+- **Tests.** Five new lib tests (`b1_lsf_sblimit_and_nbal_layout_*`,
+  `b1_lsf_subbands_*_to_*_decode_to_iso_13818_3_table_b1_*_row`,
+  `select_table_routes_every_lsf_header_to_b1_lsf`) plus a fresh
+  `tests/lsf_layer2.rs` integration file with six end-to-end
+  scenarios (header parse over the 42-cell LSF bitrate × sample-rate
+  grid, 168-cell parse/emit round-trip including all four modes,
+  padding-bit byte-count check, sblimit drives audio_data
+  iteration, all-zero-payload truncation diagnostics, all-zero
+  allocation → bit-exact silence at 1152 samples per channel via
+  `decode_frame`). Total: 139 lib + 14 malformed_input + 6 LSF
+  integration = 159 tests, all green.
+
 ### Added (round 182 — `oxideav_core::Decoder` trait wiring + registry tags)
 
 - **`codec_decoder` module** wraps the existing

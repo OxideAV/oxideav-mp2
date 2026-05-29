@@ -1,14 +1,18 @@
-//! MPEG-1 Audio Layer II bit-allocation tables — ISO/IEC 11172-3 (1993)
-//! Annex B, Table 3-B.2 ("Layer II bit allocation tables") and Table
-//! 3-B.4 ("Layer II classes of quantization").
+//! MPEG-1 / MPEG-2 LSF Audio Layer II bit-allocation tables — ISO/IEC
+//! 11172-3 (1993) Annex B Table 3-B.2 ("Layer II bit allocation
+//! tables") and Table 3-B.4 ("Layer II classes of quantization"), plus
+//! ISO/IEC 13818-3 (1997) Annex B Table B.1 ("Possible quantisation
+//! per subband, Layer II") for the low-sampling-rate (16, 22.05,
+//! 24 kHz) extension.
 //!
 //! Clean-room: every numeric value in this module is transcribed
 //! directly from the staged
 //! `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` (157-page edition with
 //! Annex B; SHA-256
 //! `ef67bbc34eaab825e804bb87835c0cc0cd9ae6c7f77d3cec64d779726ffe322d`),
-//! PDF pages 46-50 (Tables 3-B.2a..d and 3-B.4). No third-party MP2
-//! source was consulted.
+//! PDF pages 46-50 (Tables 3-B.2a..d and 3-B.4), and the staged
+//! `docs/audio/mp3/ISO_IEC_13818-3-MPEG2-audio-1997.pdf`, PDF page 71
+//! (Table B.1 of 13818-3). No third-party MP2 source was consulted.
 //!
 //! # §2.4.2.3 — table-selection rule
 //!
@@ -55,9 +59,14 @@ use crate::header::{FrameHeader, Mode};
 /// where `sblimit ≤ 32`).
 pub const NUM_SUBBANDS: usize = 32;
 
-/// The four §2.4.2.3 Layer II bit-allocation sub-tables, as named in
-/// the ISO/IEC 11172-3 PDF page headers (Tables 3-B.2a, 3-B.2b,
-/// 3-B.2c, 3-B.2d).
+/// The five Layer II bit-allocation sub-tables. Four are from ISO/IEC
+/// 11172-3 §2.4.2.3 (Tables 3-B.2a..d) and select for MPEG-1
+/// (`ID == 1`) per (sample rate, per-channel bitrate); the fifth is
+/// ISO/IEC 13818-3 Annex B Table B.1, used for every LSF
+/// (`ID == 0`) Layer II frame irrespective of (16 / 22.05 / 24 kHz)
+/// sample rate and bitrate per ISO/IEC 13818-3 §2.4.3.1 ("For Layer
+/// II, instead of tables B.2 ..., table B.1 ... of this part of
+/// ISO/IEC 13818 should be used.").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BitAllocTable {
     /// Table 3-B.2a — high-rate at 48 kHz, mid-rate at 44.1 / 32 kHz.
@@ -68,17 +77,24 @@ pub enum BitAllocTable {
     B2c,
     /// Table 3-B.2d — low-rate at 32 kHz.
     B2d,
+    /// Table B.1 of ISO/IEC 13818-3 — low-sampling-rate Layer II
+    /// (16 / 22.05 / 24 kHz). Replaces the four 11172-3 sub-tables
+    /// for every LSF Layer II frame.
+    B1Lsf,
 }
 
 impl BitAllocTable {
-    /// Each B.2 sub-table fixes its own `sblimit` (§2.4.2.3 prose; PDF
-    /// page footers under each table).
+    /// Each sub-table fixes its own `sblimit`: the four MPEG-1 tables
+    /// take it from §2.4.2.3 PDF page footers (11172-3); the LSF table
+    /// takes it from ISO/IEC 13818-3 Annex B Table B.1 footer
+    /// ("sblimit = 30").
     pub fn sblimit(self) -> usize {
         match self {
             BitAllocTable::B2a => 27,
             BitAllocTable::B2b => 30,
             BitAllocTable::B2c => 8,
             BitAllocTable::B2d => 12,
+            BitAllocTable::B1Lsf => 30,
         }
     }
 
@@ -110,6 +126,18 @@ impl BitAllocTable {
             BitAllocTable::B2d => match sb {
                 0 | 1 => 4,
                 2..=11 => 3,
+                _ => 0,
+            },
+            // ISO/IEC 13818-3 Annex B Table B.1, "nbal" column:
+            //   sb 0..=3  → 4 bits
+            //   sb 4..=10 → 3 bits
+            //   sb 11..=29 → 2 bits
+            //   sb 30..=31 → 0 bits (rows show `0 -` and the row is
+            //                empty per the PDF)
+            BitAllocTable::B1Lsf => match sb {
+                0..=3 => 4,
+                4..=10 => 3,
+                11..=29 => 2,
                 _ => 0,
             },
         }
@@ -189,6 +217,7 @@ impl BitAllocTable {
             BitAllocTable::B2b => &B2B_ROWS,
             BitAllocTable::B2c => &B2C_ROWS,
             BitAllocTable::B2d => &B2D_ROWS,
+            BitAllocTable::B1Lsf => &B1_LSF_ROWS,
         };
         table.get(sb).copied()
     }
@@ -197,12 +226,20 @@ impl BitAllocTable {
 /// §2.4.2.3 / §2.4.2.5 table-selection: given the parsed [`FrameHeader`]
 /// pick the active Layer II bit-allocation sub-table.
 ///
-/// Returns `None` if the (Fs, per-channel bitrate) pair is not covered
-/// by any of the four B.2 sub-tables. With
+/// For LSF headers (`header.lsf == true`, ISO/IEC 13818-3 §2.4.3.1)
+/// always returns [`BitAllocTable::B1Lsf`]: 13818-3 specifies a single
+/// table for every (Fs ∈ {16, 22.05, 24 kHz}, bitrate) combination,
+/// replacing the four 11172-3 sub-tables wholesale.
+///
+/// For MPEG-1 headers returns `None` if the (Fs, per-channel bitrate)
+/// pair is not covered by any of the four B.2 sub-tables. With
 /// [`crate::header::is_layer2_bitrate_mode_allowed`] enforced at parse
 /// time, every header that survives [`FrameHeader::parse`] is covered;
 /// callers may treat `None` as an internal-consistency failure.
 pub fn select_table(header: &FrameHeader) -> Option<BitAllocTable> {
+    if header.lsf {
+        return Some(BitAllocTable::B1Lsf);
+    }
     let per_ch = bitrate_per_channel_kbps(header)?;
     match header.sample_rate {
         48_000 => match per_ch {
@@ -655,6 +692,74 @@ const B2D_ROWS: [&[u32]; NUM_SUBBANDS] = [
     B2_EMPTY_ROW,
 ];
 
+// =========================================================================
+// ISO/IEC 13818-3 Annex B Table B.1 — PDF page 71
+// =========================================================================
+//
+// "Possible quantisation per subband, Layer II — Sampling frequencies
+// 16; 22,05; 24 kHz." A single table replaces the four ISO 11172-3
+// Tables 3-B.2a..d for every LSF Layer II frame.
+//
+//   sb 0..=3   : nbal=4, row = `- 3 5 7 9 15 31 63 127 255 511 1023 2047 4095 8191 16383`
+//   sb 4..=10  : nbal=3, row = `- 3 5 9 15 31 63 127`
+//   sb 11..=29 : nbal=2, row = `- 3 5 9`
+//   sb 30..=31 : nbal=0 (PDF: row prints `0 -` only — no allocation field)
+//
+// sblimit = 30; sum of nbal = 4 × 4 + 3 × 7 + 2 × 19 = 16 + 21 + 38 = 75
+// (matches the PDF page-71 footer "Sum of nbal = 75").
+//
+// Note the row content differs subtly from the 11172-3 sub-tables:
+//   • the nbal=4 row carries `7` between `5` and `9` (whereas the
+//     B.2c / B.2d wide row goes `- 3 5 9 15 …` skipping `7`),
+//   • the nbal=3 row matches B.2c/B.2d's `- 3 5 9 15 31 63 127`
+//     short row,
+//   • the nbal=2 row is `- 3 5 9` (whereas B.2a/B.2b's nbal=2 row
+//     terminates with `- 3 5 65535`).
+// Every tabulated nb_steps value appears in Table 3-B.4 — covered by
+// the `every_b2_table_cell_resolves_to_a_known_b4_class` test that
+// now iterates over the LSF table as well.
+
+const B1_LSF_ROW_0_TO_3: &[u32] = &[
+    0, 3, 5, 7, 9, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383,
+];
+const B1_LSF_ROW_4_TO_10: &[u32] = &[0, 3, 5, 9, 15, 31, 63, 127];
+const B1_LSF_ROW_11_TO_29: &[u32] = &[0, 3, 5, 9];
+
+const B1_LSF_ROWS: [&[u32]; NUM_SUBBANDS] = [
+    B1_LSF_ROW_0_TO_3,
+    B1_LSF_ROW_0_TO_3,
+    B1_LSF_ROW_0_TO_3,
+    B1_LSF_ROW_0_TO_3,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_4_TO_10,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B1_LSF_ROW_11_TO_29,
+    B2_EMPTY_ROW,
+    B2_EMPTY_ROW,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +767,7 @@ mod tests {
 
     fn make_header(bit_rate: u32, sample_rate: u32, mode: Mode) -> FrameHeader {
         FrameHeader {
+            lsf: false,
             bit_rate,
             sample_rate,
             padding: false,
@@ -990,12 +1096,14 @@ mod tests {
     #[test]
     fn every_b2_table_cell_resolves_to_a_known_b4_class() {
         // For every (table, sb, allocation) with allocation > 0, the
-        // resulting nb_steps must appear in Table 3-B.4.
+        // resulting nb_steps must appear in Table 3-B.4 (LSF reuses
+        // the same Table 3-B.4 classes per ISO/IEC 13818-3 §2.4.3.1).
         for table in [
             BitAllocTable::B2a,
             BitAllocTable::B2b,
             BitAllocTable::B2c,
             BitAllocTable::B2d,
+            BitAllocTable::B1Lsf,
         ] {
             for sb in 0..table.sblimit() {
                 let nbal = table.nbal(sb);
@@ -1016,14 +1124,15 @@ mod tests {
         // The §2.4.2.3 encoder primitive: for every defined
         // (table, sb, on-wire index) triple, the encoder-side
         // `allocation_index(sb, nb_steps)` must round-trip back to
-        // that same on-wire index. Coverage is exhaustive across all
-        // four B.2 sub-tables: B.2a (27 subbands), B.2b (30), B.2c (8),
-        // B.2d (12).
+        // that same on-wire index. Coverage is exhaustive across the
+        // four MPEG-1 sub-tables (B.2a/b/c/d) and the LSF sub-table
+        // (B.1 from 13818-3).
         for table in [
             BitAllocTable::B2a,
             BitAllocTable::B2b,
             BitAllocTable::B2c,
             BitAllocTable::B2d,
+            BitAllocTable::B1Lsf,
         ] {
             for sb in 0..table.sblimit() {
                 let nbal = table.nbal(sb);
@@ -1053,6 +1162,7 @@ mod tests {
             BitAllocTable::B2b,
             BitAllocTable::B2c,
             BitAllocTable::B2d,
+            BitAllocTable::B1Lsf,
         ] {
             for sb in 0..table.sblimit() {
                 assert_eq!(
@@ -1073,6 +1183,7 @@ mod tests {
             (BitAllocTable::B2b, 30),
             (BitAllocTable::B2c, 8),
             (BitAllocTable::B2d, 12),
+            (BitAllocTable::B1Lsf, 30),
         ] {
             for sb in sblimit..NUM_SUBBANDS {
                 assert_eq!(
@@ -1119,6 +1230,106 @@ mod tests {
                 None,
                 "off-row nb_steps={nb} should be None for B2a sb=0"
             );
+        }
+    }
+
+    #[test]
+    fn b1_lsf_sblimit_and_nbal_layout_match_iso_13818_3_pdf_page_71() {
+        let t = BitAllocTable::B1Lsf;
+        assert_eq!(t.sblimit(), 30);
+
+        // Sum of nbal = 75 per PDF page 71 footer ("Sum of nbal = 75").
+        let sum: u32 = (0..NUM_SUBBANDS).map(|sb| t.nbal(sb)).sum();
+        assert_eq!(sum, 75);
+
+        for sb in 0..=3 {
+            assert_eq!(t.nbal(sb), 4, "B1Lsf sb={sb} nbal");
+        }
+        for sb in 4..=10 {
+            assert_eq!(t.nbal(sb), 3, "B1Lsf sb={sb} nbal");
+        }
+        for sb in 11..=29 {
+            assert_eq!(t.nbal(sb), 2, "B1Lsf sb={sb} nbal");
+        }
+        for sb in 30..NUM_SUBBANDS {
+            assert_eq!(t.nbal(sb), 0, "B1Lsf sb={sb} nbal");
+        }
+    }
+
+    #[test]
+    fn b1_lsf_subbands_0_to_3_decode_to_iso_13818_3_table_b1_wide_row() {
+        // PDF page 71, sb 0..=3 row: - 3 5 7 9 15 31 63 127 255 511
+        //                              1023 2047 4095 8191 16383
+        let expected = [
+            0u32, 3, 5, 7, 9, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383,
+        ];
+        for sb in 0..=3 {
+            for (idx, &steps) in expected.iter().enumerate() {
+                assert_eq!(
+                    BitAllocTable::B1Lsf.nb_steps(sb, idx as u32),
+                    Some(steps),
+                    "B1Lsf sb={sb} idx={idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b1_lsf_subbands_4_to_10_decode_to_iso_13818_3_table_b1_short_row() {
+        // PDF page 71, sb 4..=10 row: - 3 5 9 15 31 63 127
+        let expected = [0u32, 3, 5, 9, 15, 31, 63, 127];
+        for sb in 4..=10 {
+            for (idx, &steps) in expected.iter().enumerate() {
+                assert_eq!(
+                    BitAllocTable::B1Lsf.nb_steps(sb, idx as u32),
+                    Some(steps),
+                    "B1Lsf sb={sb} idx={idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn b1_lsf_subbands_11_to_29_decode_to_iso_13818_3_table_b1_narrow_row() {
+        // PDF page 71, sb 11..=29 row: - 3 5 9
+        let expected = [0u32, 3, 5, 9];
+        for sb in 11..=29 {
+            for (idx, &steps) in expected.iter().enumerate() {
+                assert_eq!(
+                    BitAllocTable::B1Lsf.nb_steps(sb, idx as u32),
+                    Some(steps),
+                    "B1Lsf sb={sb} idx={idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn select_table_routes_every_lsf_header_to_b1_lsf() {
+        // For LSF the 13818-3 §2.4.3.1 prose mandates Table B.1
+        // irrespective of (Fs, bitrate); cover the three sampling
+        // rates × a sample of LSF bitrates.
+        for &sr in &[16_000u32, 22_050, 24_000] {
+            for &kbps in &[8u32, 24, 64, 96, 144, 160] {
+                let h = FrameHeader {
+                    lsf: true,
+                    bit_rate: kbps * 1000,
+                    sample_rate: sr,
+                    padding: false,
+                    private_bit: false,
+                    mode: Mode::Stereo,
+                    mode_extension: ModeExtension::Bound4,
+                    copyright: false,
+                    original: true,
+                    emphasis: Emphasis::None,
+                    protection_bit: true,
+                };
+                assert_eq!(
+                    select_table(&h),
+                    Some(BitAllocTable::B1Lsf),
+                    "LSF header Fs={sr} kbps={kbps} should select B1Lsf"
+                );
+            }
         }
     }
 
