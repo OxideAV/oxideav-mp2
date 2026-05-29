@@ -139,6 +139,45 @@ impl BitAllocTable {
         row.get(index as usize).copied()
     }
 
+    /// Encoder-side inverse of [`Self::nb_steps`]: given the
+    /// `nb_steps` value the encoder wants to record for subband `sb`,
+    /// return the `nbal`-bit `allocation[ch][sb]` field code that
+    /// [`Self::nb_steps`] would decode back to that same `nb_steps`.
+    ///
+    /// `nb_steps == 0` returns `Some(0)` — the §2.4.2.3 "no bits
+    /// allocated" sentinel — since the row's entry-0 slot is fixed by
+    /// the spec irrespective of subband.
+    ///
+    /// Returns `None` when:
+    /// * `sb ≥ sblimit` (no allocation field exists for the subband
+    ///   under this sub-table), or
+    /// * `nb_steps` does not appear in the row for subband `sb` — the
+    ///   §2.4.2.3 prose constrains the encoder to one of the
+    ///   tabulated column values, so an off-row value is not
+    ///   representable and must be rejected.
+    ///
+    /// The mapping is well-defined: every B.2 row carries each
+    /// `nb_steps` value at most once (the columns are strictly
+    /// monotonically increasing in the PDF), so the inverse is a
+    /// total function on the row's range and the empty function
+    /// elsewhere.
+    pub fn allocation_index(self, sb: usize, nb_steps: u32) -> Option<u32> {
+        if sb >= self.sblimit() {
+            return None;
+        }
+        if nb_steps == 0 {
+            return Some(0);
+        }
+        let row = self.row(sb)?;
+        // Skip the unused entry-0 slot (§2.4.2.3 "-" sentinel) — only
+        // indices 1..row.len() are tabulated values.
+        row.iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, &steps)| steps == nb_steps)
+            .map(|(idx, _)| idx as u32)
+    }
+
     /// Per-subband row of the active B.2 sub-table.
     ///
     /// The row is `1 << nbal(sb)` entries wide. Entry `0` is unused
@@ -968,6 +1007,164 @@ mod tests {
                         table
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_index_is_total_inverse_of_nb_steps_for_every_cell() {
+        // The §2.4.2.3 encoder primitive: for every defined
+        // (table, sb, on-wire index) triple, the encoder-side
+        // `allocation_index(sb, nb_steps)` must round-trip back to
+        // that same on-wire index. Coverage is exhaustive across all
+        // four B.2 sub-tables: B.2a (27 subbands), B.2b (30), B.2c (8),
+        // B.2d (12).
+        for table in [
+            BitAllocTable::B2a,
+            BitAllocTable::B2b,
+            BitAllocTable::B2c,
+            BitAllocTable::B2d,
+        ] {
+            for sb in 0..table.sblimit() {
+                let nbal = table.nbal(sb);
+                for idx in 0..(1u32 << nbal) {
+                    let nb = table.nb_steps(sb, idx).unwrap_or_else(|| {
+                        panic!("nb_steps None at table={table:?} sb={sb} idx={idx}")
+                    });
+                    let back = table.allocation_index(sb, nb).unwrap_or_else(|| {
+                        panic!("allocation_index None at table={table:?} sb={sb} nb_steps={nb}")
+                    });
+                    assert_eq!(
+                        back, idx,
+                        "round-trip table={table:?} sb={sb}: index {idx} -> nb_steps {nb} -> index {back}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_index_zero_sentinel_returns_zero_for_every_in_range_subband() {
+        // §2.4.2.3 "-" sentinel — `nb_steps = 0` always encodes as
+        // the all-zero allocation field, regardless of subband or
+        // sub-table.
+        for table in [
+            BitAllocTable::B2a,
+            BitAllocTable::B2b,
+            BitAllocTable::B2c,
+            BitAllocTable::B2d,
+        ] {
+            for sb in 0..table.sblimit() {
+                assert_eq!(
+                    table.allocation_index(sb, 0),
+                    Some(0),
+                    "zero sentinel table={table:?} sb={sb}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_index_rejects_subbands_at_or_past_sblimit() {
+        // No allocation field exists for sb ≥ sblimit, so even the
+        // zero sentinel is unrepresentable.
+        for (table, sblimit) in [
+            (BitAllocTable::B2a, 27usize),
+            (BitAllocTable::B2b, 30),
+            (BitAllocTable::B2c, 8),
+            (BitAllocTable::B2d, 12),
+        ] {
+            for sb in sblimit..NUM_SUBBANDS {
+                assert_eq!(
+                    table.allocation_index(sb, 0),
+                    None,
+                    "table={table:?} sb={sb} (≥ sblimit={sblimit}) must be None"
+                );
+                // Off-row nb_steps similarly None.
+                assert_eq!(table.allocation_index(sb, 3), None);
+                assert_eq!(table.allocation_index(sb, 65535), None);
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_index_rejects_off_row_nb_steps() {
+        // §2.4.2.3 constrains the encoder to one of the tabulated
+        // column values; any other nb_steps is not representable.
+        //
+        // The nbal=4 wide row (B.2a sb=0..=2) carries
+        // {3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191,
+        //  16383, 32767, 65535}. `5` and `9` are explicitly NOT in
+        // that row (they live in the nbal=4 short row, B.2a sb=3..=10).
+        assert_eq!(BitAllocTable::B2a.allocation_index(0, 5), None);
+        assert_eq!(BitAllocTable::B2a.allocation_index(0, 9), None);
+        // ... but they DO appear in the short row.
+        assert_eq!(BitAllocTable::B2a.allocation_index(3, 5), Some(2));
+        assert_eq!(BitAllocTable::B2a.allocation_index(3, 9), Some(4));
+
+        // The nbal=3 row carries {3, 5, 7, 9, 15, 31, 65535}; `63`
+        // is one column code beyond and not representable.
+        assert_eq!(BitAllocTable::B2a.allocation_index(11, 63), None);
+        // ... but `31` is.
+        assert_eq!(BitAllocTable::B2a.allocation_index(11, 31), Some(6));
+
+        // The nbal=2 row carries {3, 5, 65535}. `7` is not there.
+        assert_eq!(BitAllocTable::B2a.allocation_index(23, 7), None);
+        assert_eq!(BitAllocTable::B2a.allocation_index(23, 65535), Some(3));
+
+        // Arbitrary out-of-table values fail uniformly.
+        for nb in [1u32, 2, 4, 6, 8, 10, 11, 16, 99] {
+            assert_eq!(
+                BitAllocTable::B2a.allocation_index(0, nb),
+                None,
+                "off-row nb_steps={nb} should be None for B2a sb=0"
+            );
+        }
+    }
+
+    #[test]
+    fn allocation_index_matches_pdf_rows_for_b2c_and_b2d() {
+        // B.2c / B.2d wide row (`- 3 5 9 15 31 63 127 255 511 1023
+        // 2047 4095 8191 16383 32767`): indices 1..=15 map to those
+        // 15 column values in order.
+        let wide_row = [
+            0u32, 3, 5, 9, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767,
+        ];
+        for sb in 0..=1 {
+            for (idx, &nb) in wide_row.iter().enumerate().skip(1) {
+                assert_eq!(
+                    BitAllocTable::B2c.allocation_index(sb, nb),
+                    Some(idx as u32)
+                );
+                assert_eq!(
+                    BitAllocTable::B2d.allocation_index(sb, nb),
+                    Some(idx as u32)
+                );
+            }
+        }
+
+        // B.2c / B.2d short row (`- 3 5 9 15 31 63 127`): 7 column
+        // values in order.
+        let short_row = [0u32, 3, 5, 9, 15, 31, 63, 127];
+        for sb in 2..=7 {
+            for (idx, &nb) in short_row.iter().enumerate().skip(1) {
+                assert_eq!(
+                    BitAllocTable::B2c.allocation_index(sb, nb),
+                    Some(idx as u32)
+                );
+                assert_eq!(
+                    BitAllocTable::B2d.allocation_index(sb, nb),
+                    Some(idx as u32)
+                );
+            }
+        }
+        // B.2d extends the short row through sb=11.
+        for sb in 8..=11 {
+            for (idx, &nb) in short_row.iter().enumerate().skip(1) {
+                assert_eq!(
+                    BitAllocTable::B2d.allocation_index(sb, nb),
+                    Some(idx as u32)
+                );
             }
         }
     }

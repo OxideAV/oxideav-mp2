@@ -81,6 +81,14 @@ solely from the ISO/IEC 11172-3 PDF:
   constants plus `grouping`, `samples_per_codeword`, and
   `bits_per_codeword` columns); `is_grouped` materialises the
   §2.4.2.3 "value is 3, 5, or 9" grouping check.
+  `BitAllocTable::allocation_index(sb, nb_steps) -> Option<u32>` is
+  the encoder-side inverse of `nb_steps(sb, index)`: it returns the
+  `nbal`-bit `allocation[ch][sb]` field code that the decoder would
+  read back into the given `nb_steps`, accepting the §2.4.2.3 "no
+  bits allocated" sentinel `nb_steps == 0` (which always maps to
+  index 0) and rejecting both `sb ≥ sblimit` and off-row `nb_steps`
+  values (the encoder cannot emit a `nb_steps` that does not appear
+  in the row for the targeted subband).
 - **§2.4.1.6 audio-data side info** (`audio_data` module): the
   bit-allocation loop (with per-subband `nbal` widths and the
   joint-stereo "intensity-stereo subbands share one allocation"
@@ -151,7 +159,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-121 unit tests cover the bitrate / sampling-frequency ladders
+126 unit tests cover the bitrate / sampling-frequency ladders
 end-to-end, sync detection (positive + negative paths), the §2.4.2.3
 disallowed bitrate/mode combinations (rejection + the matching allow
 paths), every emphasis value (including the reserved-`'10'`
@@ -247,6 +255,22 @@ report `None`) and over the 255 first-byte values different from
 `0xFF` (must also report `None`); `FrameHeader::parse` is
 exhaustively confirmed to report `BadSync` across the same 240
 non-`0xF_` second-byte values without panicking.
+
+Round 175 added five encoder-side tests (121 → 126) for the new
+`BitAllocTable::allocation_index` inverse mapping: an exhaustive
+round-trip across every defined `(table, sb, index)` triple of all
+four B.2 sub-tables (B.2a / B.2b / B.2c / B.2d — every cell of
+every row, including the entry-0 sentinel) confirms that
+`allocation_index(sb, nb_steps(sb, idx))` returns the original
+`idx`; the §2.4.2.3 zero sentinel `nb_steps == 0` is pinned to
+`Some(0)` for every in-range subband; subbands at or past `sblimit`
+return `None` regardless of `nb_steps` (including the sentinel);
+off-row `nb_steps` values (`5` and `9` against B.2a's wide row
+sb=0..=2, `63` against the nbal=3 row, `7` against the nbal=2 row,
+plus a battery of arbitrary out-of-table values) all return `None`
+without false positives; and the B.2c / B.2d row-by-row encoder
+mapping matches the literal PDF page-48/49 ordering for every
+column.
 
 ## What does not work yet
 

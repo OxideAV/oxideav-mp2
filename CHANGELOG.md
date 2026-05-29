@@ -6,6 +6,59 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 175 — encoder, step 2: §2.4.2.3 bit-allocation inverse mapping)
+
+- **`BitAllocTable::allocation_index(sb, nb_steps) -> Option<u32>`**
+  (`bitalloc` module): encoder-side inverse of the existing
+  `BitAllocTable::nb_steps(sb, index)`. Given the `nb_steps` value
+  the encoder wants to record for subband `sb`, the function returns
+  the `nbal`-bit `allocation[ch][sb]` field code that the §2.4.1.6
+  decoder will read back into that same `nb_steps`. The §2.4.2.3
+  "-" sentinel `nb_steps == 0` always maps to the index-0 code
+  (irrespective of subband); subbands at or past the active
+  sub-table's `sblimit` return `None` (no allocation field exists);
+  and off-row `nb_steps` values — those that do not appear in the
+  PDF row for the targeted subband — return `None` (the §2.4.2.3
+  prose constrains the encoder to one of the tabulated column
+  values, so an off-row value is not representable on the wire).
+  The mapping is well-defined: each B.2 row carries each `nb_steps`
+  value at most once because the columns are strictly monotonically
+  increasing in the PDF, so the inverse is a total function on the
+  row's range and the empty function elsewhere. This is the first
+  encoder-side primitive required to build the §2.4.1.6 audio-data
+  writer (next encoder step after the existing §2.4.1.3 / §2.4.2.3
+  header writer and the §2.4.1.4 / §2.4.3.1 CRC-16 write primitives).
+- **Five new tests** under `bitalloc::tests` (121 → 126, all green):
+  `allocation_index_is_total_inverse_of_nb_steps_for_every_cell`
+  walks every `(table, sb, index)` triple of all four B.2 sub-tables
+  (B.2a / B.2b / B.2c / B.2d — 27 + 30 + 8 + 12 sblimit subbands ×
+  every `nbal`-bit column) and confirms
+  `allocation_index(sb, nb_steps(sb, idx)) == idx` byte-for-byte;
+  `allocation_index_zero_sentinel_returns_zero_for_every_in_range_subband`
+  pins the §2.4.2.3 zero-sentinel rule across every in-range
+  `(table, sb)` pair;
+  `allocation_index_rejects_subbands_at_or_past_sblimit` confirms
+  `None` for every `sb ∈ [sblimit, 32)` against each of the four
+  sub-tables, including the zero sentinel and arbitrary
+  in-the-row-elsewhere `nb_steps` values;
+  `allocation_index_rejects_off_row_nb_steps` exercises specific
+  off-row probes (`5` and `9` against B.2a's wide row sb=0..=2 vs.
+  presence in the short row sb=3..=10; `63` against the nbal=3 row
+  vs. presence of `31`; `7` against the nbal=2 row vs. presence of
+  `65535`; plus a battery of arbitrary non-tabulated values
+  including `1, 2, 4, 6, 8, 10, 11, 16, 99`);
+  `allocation_index_matches_pdf_rows_for_b2c_and_b2d` cross-checks
+  the encoder mapping against the literal PDF page-48/49 column
+  ordering for both the nbal=4 wide row (sb=0..=1) and the nbal=3
+  short row (B.2c sb=2..=7 and B.2d sb=2..=11).
+
+The new function does not change any decode behaviour or the
+existing public surface; it is purely additive (one new method on
+`BitAllocTable`, already re-exported at the crate root) and
+strictly clean-room — every numeric value the tests assert is
+already in `src/bitalloc.rs` (transcribed directly from the
+staged ISO/IEC 11172-3 PDF pages 46-49 in earlier rounds).
+
 ### Added (round 162 — malformed-input property tests)
 
 - **`tests/malformed_input.rs`** integration suite (+14 tests; total
