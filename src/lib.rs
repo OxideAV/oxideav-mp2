@@ -117,6 +117,7 @@ use oxideav_core::RuntimeContext;
 
 pub mod audio_data;
 pub mod bitalloc;
+pub mod codec_decoder;
 pub mod crc;
 pub mod frame;
 pub mod header;
@@ -132,6 +133,9 @@ pub use audio_data::{
 pub use bitalloc::{
     bitrate_per_channel_kbps, class_of_quantization, is_grouped, select_table, BitAllocTable,
     QuantClass, NUM_SUBBANDS,
+};
+pub use codec_decoder::{
+    make_decoder, register_codecs, Mp2CoreDecoder, CODEC_ID_STR, WAVE_FORMAT_MPEG,
 };
 pub use crc::{
     crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
@@ -212,8 +216,17 @@ impl std::error::Error for Error {
     }
 }
 
-/// Codec registration — currently a no-op; the audio-data decode path
-/// is not yet wired into the runtime codec registry.
-pub fn register(_ctx: &mut RuntimeContext) {}
+/// Codec registration: install the MPEG-1 Audio Layer II decoder into
+/// `ctx`'s codec registry. The factory accepts a [`CodecParameters`]
+/// hint and returns a [`Mp2CoreDecoder`] that adapts the existing
+/// [`frame::decode_frame_with`] primitive to the framework's
+/// packet-in / frame-out [`oxideav_core::Decoder`] trait. See
+/// [`codec_decoder::register_codecs`] for the claimed container tags
+/// (`WAVE_FORMAT_MPEG = 0x0050`, Matroska `A_MPEG/L2`) and the §2.4.1.3
+/// layer-field probe used to disambiguate the `0x0050` collision with
+/// `oxideav-mp1`.
+pub fn register(ctx: &mut RuntimeContext) {
+    codec_decoder::register_codecs(&mut ctx.codecs);
+}
 
 oxideav_core::register!("mp2", register);

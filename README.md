@@ -272,13 +272,48 @@ without false positives; and the B.2c / B.2d row-by-row encoder
 mapping matches the literal PDF page-48/49 ordering for every
 column.
 
-## What does not work yet
+Round 182 wired the codec through `oxideav_core`'s `Decoder` trait
+(`codec_decoder` module): `Mp2CoreDecoder` adapts the existing
+`decode_frame_with` primitive to the framework's packet-in / frame-out
+contract; `make_decoder(&CodecParameters) -> Box<dyn Decoder>` is the
+factory the registry hands out; `register_codecs(&mut CodecRegistry)`
+installs the factory under id `"mp2"` and claims two container tags —
+the Win32 WAVE format `0x0050` (`WAVE_FORMAT_MPEG`, shared with Layer
+I) and the Matroska `A_MPEG/L2` CodecID. The `0x0050` tag collision
+with `oxideav-mp1` is disambiguated by a §2.4.1.3-layer-field probe:
+given a first-packet hint, the probe inspects bits 18..17 of the
+syncword'd header (`'10'` = Layer II → confidence 1.0; `'11'` /
+`'01'` = Layer I / III → 0.0; no packet hint → 0.5). The top-level
+`register(&mut RuntimeContext)` now calls `register_codecs(&mut
+ctx.codecs)`; `oxideav_core::register!("mp2", register)` makes that
+reachable via `oxideav-meta`. Output is planar little-endian `i16` in
+`Frame::Audio` (`data[ch].len() == 1152 * 2`); per-frame samples are
+clamped at `[i16::MIN, i16::MAX]` after the §2.4.3.4.7.1 nominal
+`[-1.0, +1.0]` float-to-int rescaling.
 
-`register()` remains a no-op until the codec is wired through
-`oxideav_core`'s `Decoder` trait surface (registry-level integration
-contract). The bottom-up decoder primitive `decode_frame(buf)` is
-already callable; the remaining wiring is the framework's
-`Decoder for Mp2Decoder` adapter plus a tag declaration.
+22 new tests on `codec_decoder` (126 → 134 in `src`, +8 there plus
+13 in the trait surface itself = 22 new — total now 148 across the
+crate): `make_decoder` accepts mono and stereo and rejects every
+non-{1,2}-channel hint, defaults are applied when params are blank;
+the staged 31-frame stereo fixture decodes packet-by-packet through
+the trait surface and yields one `Frame::Audio` per packet with the
+expected planar shape; PTS is propagated from `Packet::pts` to
+`AudioFrame::pts` verbatim; `receive_frame` without a prior
+`send_packet` returns `Error::NeedMore`; `flush` followed by a drain
+yields `Error::Eof`; `send_packet` after `flush` is rejected;
+`reset` re-enables the surface; a truncated packet surfaces the
+`decode_frame_with` truncation error through the trait error channel;
+the layer-field probe scores 1.0 against Layer II headers, 0.0
+against Layer I and Layer III, 0.5 with no packet hint, and below
+0.5 on bad sync / short packets; the same probe scores 1.0 against
+the staged fixture's first 4 bytes; `register_codecs` installs a
+discoverable decoder factory and resolves both container tags
+(`WAVE_FORMAT_MPEG` + `A_MPEG/L2`) back to id `"mp2"` via
+`resolve_tag_ref`; and the `f64 → i16 LE` plane converter is pinned
+at the {0, ±0.5, ±1, ±1.5, ±2} reference points (the ±1.5 and ±2
+inputs clamp at the i16 endpoints).
+
+## What does not work yet
 
 Bit-exact PCM-against-reference validation (PSNR / SNR vs the
 `expected.wav` next to the staged fixture, or against ffmpeg /

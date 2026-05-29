@@ -6,6 +6,79 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 182 — `oxideav_core::Decoder` trait wiring + registry tags)
+
+- **`codec_decoder` module** wraps the existing
+  `frame::decode_frame_with` primitive in the framework's packet-in /
+  frame-out [`oxideav_core::Decoder`] trait so containers can route
+  Layer II streams through the registry. The new public surface is:
+  - `make_decoder(&CodecParameters) -> Result<Box<dyn Decoder>>` —
+    factory used by `oxideav_core::CodecRegistry::first_decoder` /
+    `make_decoder`; defaults blank `sample_rate` to 44_100 and
+    blank `channels` to 1, rejects `channels != 1 && channels != 2`
+    (the §2.4.2.3 `mode` field encodes at most two channels), and
+    re-derives the real rate / channel count from each frame header
+    on the first `send_packet`.
+  - `Mp2CoreDecoder` — packet-to-frame adaptor; threads the Annex A
+    Figure A.2 V ring buffer across packets via an internal
+    [`FrameDecodeState`], queues one [`AudioFrame`] per
+    `send_packet`, and surfaces `decode_frame_with` errors through
+    the trait's `Error::other` channel. `reset()` wipes the
+    filterbank state per the trait contract; `flush()` blocks
+    further `send_packet` calls and causes a subsequent
+    `receive_frame` to return `Error::Eof` once the pending-frames
+    queue drains.
+  - `register_codecs(&mut CodecRegistry)` — installs the codec under
+    id `"mp2"` with `CodecCapabilities::audio("mp2").with_decode()`
+    and claims two container tags:
+    `CodecTag::wave_format(WAVE_FORMAT_MPEG)` (Win32 `mmreg.h`
+    `0x0050`, shared with Layer I per §B.1.6.6) and
+    `CodecTag::matroska("A_MPEG/L2")`. A `probe_mp2` disambiguates
+    the `0x0050` collision with `oxideav-mp1` by inspecting the
+    §2.4.1.3 layer field of the first packet (bits 18..17): `'10'`
+    Layer II → 1.0; `'11'` / `'01'` Layer I / III → 0.0; no packet
+    hint → 0.5; bad sync / short packet → 0.1.
+  - `CODEC_ID_STR = "mp2"` and `WAVE_FORMAT_MPEG = 0x0050` are
+    re-exported at the crate root for downstream containers.
+- **Top-level `register(&mut RuntimeContext)`** now installs the
+  decoder into `ctx.codecs` via `codec_decoder::register_codecs`
+  (the prior body was a no-op stub). The existing
+  `oxideav_core::register!("mp2", register)` macro at the crate
+  root makes that reachable from `oxideav-meta`.
+- **Output PCM format**: planar little-endian `i16` in
+  `Frame::Audio` — `data.len() == channels`, each `data[ch]` is
+  `1152 * 2` bytes per packet (§2.4.2.1 "1 152 for Layer II").
+  Float-to-int rescaling is `clamp(s_f64 * 32767, i16::MIN,
+  i16::MAX).round() as i16` so out-of-range physically-unrealisable
+  samples saturate at the i16 endpoints without panicking.
+- **22 new tests** under `codec_decoder::tests` covering the factory
+  shape (mono/stereo accepted, every non-{1,2}-channel hint rejected,
+  blank-params default path), trait surface behaviour (one frame
+  per packet across the 31-frame staged stereo fixture with
+  per-packet PTS propagation, `Error::NeedMore` before any
+  `send_packet`, `Error::Eof` after `flush`-then-drain, post-flush
+  `send_packet` rejection, `reset` re-enables the surface,
+  truncated packet surfaces as a decode error), the layer-field
+  probe (returns 1.0 for Layer II, 0.0 for Layer I and Layer III,
+  0.5 with no packet hint, < 0.5 on bad sync / short packets, and
+  1.0 against the staged fixture's first 4 bytes), the registry
+  wiring (`register_codecs` installs a `first_decoder`-discoverable
+  factory and resolves both `WAVE_FORMAT_MPEG` and `A_MPEG/L2` back
+  to id `"mp2"` via `resolve_tag_ref`), and the `f64 → i16 LE`
+  plane converter at the {0, ±0.5, ±1, ±1.5, ±2} reference points
+  (with the ±1.5 / ±2 inputs clamped at the i16 endpoints). The
+  staged-fixture tests skip cleanly when `docs/` is absent
+  (standalone-crate CI checkouts).
+- **Re-exports** at the crate root: `make_decoder`, `register_codecs`,
+  `Mp2CoreDecoder`, `CODEC_ID_STR`, `WAVE_FORMAT_MPEG`.
+
+The encoder factory is intentionally **not** wired in this round —
+the §2.4.1.6 audio-data writer, §C.1.5.2.7 bit-allocation iteration,
+and Annex C polyphase analysis filterbank are still pending per
+earlier rollups. When those land, the `register_codecs` builder
+picks up a `.encoder(make_encoder)` line alongside the existing
+decoder factory and `CodecCapabilities` gains `with_encode()`.
+
 ### Added (round 175 — encoder, step 2: §2.4.2.3 bit-allocation inverse mapping)
 
 - **`BitAllocTable::allocation_index(sb, nb_steps) -> Option<u32>`**
