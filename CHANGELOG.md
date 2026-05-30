@@ -6,6 +6,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-mp2/releases/tag/v0.0.8) - 2026-05-30
+
+### Other
+
+- §C.1.3 Annex C polyphase analysis filterbank (encoder side)
+- ISO/IEC 13818-3 LSF Layer II support (decode + emit + Table B.1)
+- wire `oxideav_core::Decoder` trait surface + registry tags
+- mp2 r175 encoder step 2: §2.4.2.3 bit-allocation inverse mapping
+- mp2 r162: malformed-input property tests (+14, 107 → 121)
+- mp2 r157 encoder step 1: §2.4.2.3 frame-header writer
+- rebuild step 6 fix-up: skip fixture-driven tests when docs/ is absent
+- rebuild step 6: §2.4.1.6 / §2.4.3.1 / §2.4.3.2 frame-level decode loop
+- rebuild step 5: §2.4.3.2 / §2.4.3.3.5 polyphase synthesis filterbank
+- rebuild step 4: §2.4.1.4 / §2.4.3.1 CRC-16 over Annex B Table B.5 protected fields
+- rebuild step 3: §2.4.3.3.4 Layer II sample requantizer
+- rebuild step 2: §2.4.1.6 audio-data side info (bit allocation + scfsi + scalefactors)
+- rebuild step 1: Layer II frame header + Annex B Table B.1 scalefactors
+- rustfmt — split Display write! across lines (Linux CI parity)
+- orphan rebuild: clean-room scaffold post-audit 2026-05-24
+
 ### Added (round 192 — §C.1.3 Annex C analysis filterbank for encoder side)
 
 - **§C.1.3 Annex C polyphase analysis subband filterbank.** The
