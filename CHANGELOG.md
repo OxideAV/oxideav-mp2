@@ -6,6 +6,52 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (round 192 — §C.1.3 Annex C analysis filterbank for encoder side)
+
+- **§C.1.3 Annex C polyphase analysis subband filterbank.** The
+  encoder's time-reversed dual of the §2.4.3.3.5 decoder filterbank,
+  packaged as a `tables_analysis` module (Annex C Table C.1
+  coefficients C[i], all 512 entries) and an `analysis` module
+  (`AnalysisFilterbank::push_audio(&[f64; 32], &mut [f64; 32])`,
+  exactly mirroring the existing `SynthesisFilterbank::push_subbands`
+  API). One call consumes 32 PCM input samples and produces 32
+  subband samples through the §C.1.3 pipeline: shift X buffer →
+  insert most-recent-at-X[0] → window `Z = X * C` → compact
+  `Y_i = sum_{j = 0..8} Z[i + 64*j]` → matrix
+  `S_i = sum_{k = 0..64} M_ik * Y_k`. The 32×64 `M_ik` matrix is
+  precomputed at construction from the §C.1.3 closed form
+  `M_ik = cos[(2i + 1)(k - 16) * pi / 64]`. The 512 C[i] values
+  are read verbatim from Annex C Table C.1 (PDF pages 67-69) via
+  300-DPI tesseract OCR on `pdftoppm`-rendered PNGs, with two
+  independent `pdftotext` extractions as tie-breakers against
+  index-side OCR noise. The spec-paired filterbank-window identity
+  `D[i] == 32 * C[i]` (where D is Annex B Table 3-B.3, the synthesis
+  side) is honoured to within 1 ULP at the 9-decimal-digit grid;
+  this is cross-checked by the
+  `c_matches_d_over_32_within_rounding` unit test as a transcription
+  oracle (both tables come from the same PDF; the spec pairs them by
+  the prototype low-pass response, with the synthesis side
+  compensating the 32-subband critical sampling). The
+  `most_recent_sample_lands_at_x0` and
+  `shift_then_insert_preserves_old_samples_at_offset_32` tests pin
+  the §C.1.3 X-buffer convention literally.
+
+- **Cross-checks.** 22 new lib tests (161 total, was 139): C table
+  size = 512, `C[0] == 0`, `C[256] == 0.035780907` (global peak),
+  `|C[69]| == |C[70]| == |C[442]| == |C[443]| == 0.000108719`
+  (secondary-peak symmetric pair), 7 sign-block boundaries flip at
+  documented indices (64 / 128 / 192 / 256 / 320 / 384 / 448),
+  magnitude anti-mirror identity `|C[256 + k]| == |C[256 - k]|`
+  for k = 1..=255, and the D/32 invariant across all 512 entries.
+  M_ik matrix matches the closed form for every (i, k) ∈ [0, 32) ×
+  [0, 64), hits the algebraic landmarks `M[0, 16] = M[8, 16] =
+  M[31, 16] = cos(0) = 1` and `M[0, 0] = cos(-pi/4) = sqrt(2)/2`,
+  and is bounded by 1 in magnitude. Filterbank invariants: X buffer
+  starts at zero, zero input across 100 frames produces exactly zero
+  output, `reset()` re-zeros X, two independent instances given
+  different inputs produce different outputs, unit DC input across
+  64 frames stays finite + bounded.
+
 ### Added (round 185 — ISO/IEC 13818-3 LSF Layer II support)
 
 - **Low-sampling-rate (LSF) Layer II decode + emit.** `FrameHeader`

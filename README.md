@@ -331,14 +331,47 @@ Bit-exact PCM-against-reference validation (PSNR / SNR vs the
 mpg123 black-box validator output) is pending an Auditor round.
 
 Encoder is partially staged: the §2.4.1.4 / §2.4.3.1 CRC-16 write
-primitives (`crc16_layer2` + streaming `crc16_update_*`) and the
+primitives (`crc16_layer2` + streaming `crc16_update_*`), the
 §2.4.1.3 / §2.4.2.3 header writer (`FrameHeader::emit_bytes` +
-`encode_bitrate` + `encode_sampling_frequency`) are in place. The
-remaining encoder pieces are the Annex C polyphase analysis
-filterbank (`forward_polyphase_analysis`, symmetric to the
-existing synthesis path), §2.4.3.3.3 scalefactor extraction +
-Table A.2 SCFSI selection, the iterative §C.1.5.2.7 bit-allocator,
-and the §2.4.1.6 audio-data writer that ties everything together.
+`encode_bitrate` + `encode_sampling_frequency`), and the §C.1.3
+Annex C polyphase analysis filterbank
+(`AnalysisFilterbank::push_audio`, added in round 192) are in
+place. The remaining encoder pieces are §2.4.3.3.3 scalefactor
+extraction + Table C.4 SCFSI selection, the iterative §C.1.5.2.7
+bit-allocator, and the §2.4.1.6 audio-data writer that ties
+everything together.
+
+**Round 192 (2026-05-30)** added the §C.1.3 Annex C polyphase
+analysis subband filterbank
+(`analysis::AnalysisFilterbank::push_audio(&[f64; 32], &mut [f64;
+32])`) and the supporting Annex C Table C.1 transcription
+(`tables_analysis::C`, 512 entries). The filterbank is the
+time-reversed dual of the existing `synthesis::SynthesisFilterbank`:
+one call drives a 512-entry X ring buffer through the documented
+`shift X by 32` → `insert audio (most recent at X[0])` → `window Z =
+X * C` → `Y_i = Σ_{j=0..8} Z[i + 64j]` → `S_i = Σ_{k=0..64} M_ik *
+Y_k` pipeline. The 32×64 `M_ik` matrix is precomputed at
+construction from the §C.1.3 closed form `M_ik = cos[(2i + 1)(k −
+16) π/64]`; the 512 C[i] window coefficients were transcribed from
+ISO/IEC 11172-3 (1993) PDF pages 67-69 via 300-DPI tesseract OCR on
+`pdftoppm` renders, with `pdftotext -layout` + `pdftotext -raw` as
+tie-breakers against index-side OCR noise. The spec-paired
+filterbank-window identity `D[i] == 32 * C[i]` (where D is Annex B
+Table 3-B.3, the synthesis-side window) is honoured to within 1
+ULP at the 9-decimal-digit grid and is cross-checked by the
+`c_matches_d_over_32_within_rounding` unit test as a transcription
+oracle — both tables come from the same PDF and the spec pairs
+them by their shared prototype low-pass response. 22 new lib tests
+(161 total, was 139) pin the C[] endpoint readings (C[0] = 0;
+C[256] = 0.035780907 global peak; |C[69]| = |C[70]| = |C[442]| =
+|C[443]| = 0.000108719 secondary-peak symmetric pair), the 7
+sign-block boundaries at indices 64 / 128 / 192 / 256 / 320 / 384
+/ 448, the magnitude anti-mirror identity |C[256+k]| = |C[256-k]|
+for k = 1..=255, the M_ik landmarks (M[0,16] = M[8,16] = M[31,16]
+= cos(0) = 1, M[0,0] = cos(-π/4) = √2/2), and the §C.1.3
+"most-recent at position 0" X-buffer convention (literally pinned
+by `most_recent_sample_lands_at_x0` and
+`shift_then_insert_preserves_old_samples_at_offset_32`).
 
 **Round 185 (2026-05-29)** wired ISO/IEC 13818-3 §2.4.2.3 LSF
 Layer II support. `FrameHeader::lsf` captures the parsed `ID` bit;

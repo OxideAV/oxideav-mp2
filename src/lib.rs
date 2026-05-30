@@ -107,6 +107,22 @@
 //!   Figure A.2 footnote 1. [`frame::decode_all_frames`] chains
 //!   successive frames until the input buffer is exhausted.
 //!
+//! * **§C.1.3 Annex C polyphase analysis filterbank** ([`analysis`]
+//!   module): the encoder's time-reversed dual of the §2.4.3.3.5
+//!   decoder filterbank. One [`AnalysisFilterbank::push_audio`] call
+//!   consumes one 32-vector of PCM input samples and produces one
+//!   32-vector of subband samples through the documented
+//!   `shift X` → `insert 32 most-recent samples` → `window Z = X * C`
+//!   → `Y_i = sum_{j = 0..8} Z[i + 64 * j]` →
+//!   `S_i = sum_{k = 0..64} M_ik * Y_k` pipeline. The 32x64 `M_ik`
+//!   matrix is precomputed at construction from the §C.1.3 closed
+//!   form `M_ik = cos[(2i + 1)(k - 16) * pi / 64]`; the 512 C[i]
+//!   analysis-window coefficients are read verbatim from Annex C
+//!   Table C.1 (PDF pages 67-69) into [`tables_analysis::C`]. The
+//!   spec-paired filterbank-window identity `D[i] == 32 * C[i]` is
+//!   honoured to within 1 ULP at the 9-decimal-digit grid (cross-
+//!   checked by [`tables_analysis::tests::c_matches_d_over_32_within_rounding`]).
+//!
 //! ## What does not work yet
 //!
 //! [`register`] remains a no-op until the codec is wired through
@@ -117,6 +133,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod analysis;
 pub mod audio_data;
 pub mod bitalloc;
 pub mod codec_decoder;
@@ -126,8 +143,10 @@ pub mod header;
 pub mod requant;
 pub mod synthesis;
 pub mod tables;
+pub mod tables_analysis;
 pub mod tables_synthesis;
 
+pub use analysis::{AnalysisFilterbank, NUM_SUBBANDS as ANALYSIS_NUM_SUBBANDS, X_BUF_LEN};
 pub use audio_data::{
     parse_audio_data, parse_audio_data_with_section_bits, AudioData, AudioDataError, Scfsi,
     MAX_CHANNELS,
@@ -156,6 +175,7 @@ pub use header::{
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
+pub use tables_analysis::{C as ANALYSIS_WINDOW, C_LEN as ANALYSIS_WINDOW_LEN};
 pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 
 /// Crate-local error type. The frame-level decode path is wired up via
