@@ -335,11 +335,36 @@ primitives (`crc16_layer2` + streaming `crc16_update_*`), the
 §2.4.1.3 / §2.4.2.3 header writer (`FrameHeader::emit_bytes` +
 `encode_bitrate` + `encode_sampling_frequency`), and the §C.1.3
 Annex C polyphase analysis filterbank
-(`AnalysisFilterbank::push_audio`, added in round 192) are in
-place. The remaining encoder pieces are §2.4.3.3.3 scalefactor
-extraction + Table C.4 SCFSI selection, the iterative §C.1.5.2.7
-bit-allocator, and the §2.4.1.6 audio-data writer that ties
-everything together.
+(`AnalysisFilterbank::push_audio`, added in round 192), and the
+§2.4.3.3.3 / Annex C §C.1.5.2.6 scalefactor extraction
+(`compute_scalefactors` / `extract_scalefactor_index` /
+`pick_scalefactor_index`, added in round 195) are in place. The
+remaining encoder pieces are Table C.4 SCFSI selection, the
+iterative §C.1.5.2.7 bit-allocator, and the §2.4.1.6 audio-data
+writer that ties everything together.
+
+**Round 195 (2026-05-31)** added §2.4.3.3.3 / Annex C §C.1.5.2.6
+encoder scalefactor extraction (`encoder_scalefactors` module).
+For each scalefactor-granule of 12 sub-band samples produced by
+`AnalysisFilterbank::push_audio`, `pick_scalefactor_index(max_abs)`
+returns the largest index `i` whose Table 3-B.1 entry
+`SCALEFACTORS[i] >= max_abs` — i.e. the smallest multiplier still
+large enough to cover the granule's peak, the inverse of the
+§2.4.3.3.3 decode lookup. Because Table 3-B.1 is monotonically
+decreasing (entry 0 = 2.0, entry 62 ≈ 1.2e-6), "smallest value
+`>= max_abs`" is equivalently "largest qualifying index".
+`extract_scalefactor_index(&[f64; 12])` wraps the per-granule
+max-abs; `compute_scalefactors(&[[f64; 36]; 32], sblimit)` returns
+the per-frame `[granule][sub-band]` indices for one channel (3
+granules × 32 sub-bands, sub-bands ≥ `sblimit` left at index 62).
+All-zero granules map to index 62; input beyond the table
+(`> SCALEFACTORS[0]`) clamps to index 0 per the §2.4.3.4.7.1
+`[-1, +1)` precondition. 8 new lib tests (169 total, was 161) pin
+the exact / slightly-below / slightly-above lookup property across
+every entry, the all-zero and top-of-table-clamp edge cases, the
+in-range invariant, a 1000-vector round-trip envelope property
+(chosen multiplier covers every sample, and is the tightest such),
+and `sblimit` gating.
 
 **Round 192 (2026-05-30)** added the §C.1.3 Annex C polyphase
 analysis subband filterbank

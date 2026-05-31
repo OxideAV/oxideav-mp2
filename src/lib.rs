@@ -138,6 +138,7 @@ pub mod audio_data;
 pub mod bitalloc;
 pub mod codec_decoder;
 pub mod crc;
+pub mod encoder_scalefactors;
 pub mod frame;
 pub mod header;
 pub mod requant;
@@ -161,6 +162,9 @@ pub use codec_decoder::{
 pub use crc::{
     crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
     INIT_STATE as CRC_INIT_STATE,
+};
+pub use encoder_scalefactors::{
+    compute_scalefactors, extract_scalefactor_index, pick_scalefactor_index,
 };
 pub use frame::{
     decode_all_frames, decode_frame, decode_frame_with, layer2_crc, DecodedFrame, FrameDecodeState,

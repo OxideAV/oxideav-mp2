@@ -6,6 +6,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- §2.4.3.3.3 / Annex C §C.1.5.2.6 encoder scalefactor extraction
+  (`encoder_scalefactors` module: `compute_scalefactors`,
+  `extract_scalefactor_index`, `pick_scalefactor_index`). For each
+  scalefactor-granule of 12 sub-band samples, selects the smallest
+  Table 3-B.1 multiplier that is `>= max(|sample|)` and emits its
+  6-bit index — the inverse of the §2.4.3.3.3 decode lookup
+  (Table 3-B.1 is monotonically decreasing, so this is the largest
+  index whose entry still covers the granule peak). All-zero
+  granules map to index 62; out-of-range input clamps to index 0
+  per the §2.4.3.4.7.1 `[-1, +1)` precondition. 8 new lib tests
+  (161 → 169).
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-mp2/releases/tag/v0.0.8) - 2026-05-30
 
 ### Other
