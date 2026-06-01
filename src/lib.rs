@@ -150,7 +150,8 @@ pub mod tables_synthesis;
 
 pub use analysis::{AnalysisFilterbank, NUM_SUBBANDS as ANALYSIS_NUM_SUBBANDS, X_BUF_LEN};
 pub use audio_data::{
-    parse_audio_data, parse_audio_data_with_section_bits, AudioData, AudioDataError, Scfsi,
+    parse_audio_data, parse_audio_data_with_section_bits, write_audio_data,
+    write_audio_data_with_section_bits, AudioData, AudioDataError, AudioDataWriteError, Scfsi,
     MAX_CHANNELS,
 };
 pub use bitalloc::{

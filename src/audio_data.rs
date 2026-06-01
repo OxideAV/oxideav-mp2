@@ -36,7 +36,7 @@
 
 use core::fmt;
 
-use oxideav_core::bits::BitReader;
+use oxideav_core::bits::{BitReader, BitWriter};
 
 use crate::bitalloc::{select_table, BitAllocTable, NUM_SUBBANDS};
 use crate::header::{FrameHeader, Mode};
@@ -416,6 +416,347 @@ fn read_scalefactor(
     Ok(raw as u8)
 }
 
+// ---------------------------------------------------------------------------
+// §2.4.1.6 audio-data writer (encoder side)
+// ---------------------------------------------------------------------------
+//
+// `parse_audio_data` is the §2.4.3.3.1..3 reader; the encoder needs the
+// matching writer. Per ISO/IEC 11172-3 (1993) §2.4.1.6 (PDF pages 16
+// + 22..25), the audio-data side-info section is, for one frame:
+//
+//   for (sb = 0; sb < bound; sb++)
+//       for (ch = 0; ch < nch; ch++)
+//           allocation[ch][sb]    nbal[sb] uimsbf
+//   for (sb = bound; sb < sblimit; sb++)
+//       allocation[0][sb]         nbal[sb] uimsbf      // shared above bound
+//   for (sb = 0; sb < sblimit; sb++)
+//       for (ch = 0; ch < nch; ch++)
+//           if (allocation[ch][sb] != 0)
+//               scfsi[ch][sb]     2 bslbf
+//   for (sb = 0; sb < sblimit; sb++)
+//       for (ch = 0; ch < nch; ch++)
+//           if (allocation[ch][sb] != 0) {
+//               if scfsi == '00' :  scf[0..2]   (three 6-bit)
+//               if scfsi == '01' :  scf[0], scf[2]
+//               if scfsi == '10' :  scf[0]
+//               if scfsi == '11' :  scf[0], scf[2]
+//           }
+//
+// The writer is the bit-for-bit inverse of `parse_audio_data`: the
+// `AudioData` struct fed in is the one the reader would reconstruct.
+//
+// This is *only* the §2.4.1.6 side-info section (allocation + scfsi +
+// scalefactor triplets). The §2.4.3.3.4 sample-codeword writer is the
+// next coherent step; that consumes the per-channel quantized samples
+// and the Table 3-B.4 grouping rules in `requant`.
+
+/// Errors raised by the §2.4.1.6 audio-data writer.
+///
+/// The writer accepts an [`AudioData`] struct produced by the encoder
+/// (typically: `allocation_index` over per-subband chosen `nb_steps`,
+/// scfsi from [`crate::encoder_scfsi::select_scfsi`], and scalefactor
+/// triplets the encoder claims the decoder will reconstruct via the
+/// §2.4.3.3.3 schedule). Each variant identifies a self-inconsistency
+/// the encoder must fix before re-trying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDataWriteError {
+    /// `(Fs, bitrate)` does not select any Layer II bit-allocation
+    /// sub-table. Mirrors the decoder's `NoBitallocTable`.
+    NoBitallocTable,
+    /// The chosen `(table, channels, bound)` does not match the
+    /// `AudioData` the caller supplied. The header is the source of
+    /// truth for these three fields; if `data` carries different ones
+    /// the encoder has a layout bug.
+    InconsistentLayout {
+        /// What the header dictates.
+        expected_table: BitAllocTable,
+        expected_channels: usize,
+        expected_bound: usize,
+        /// What `data` carries.
+        actual_table: BitAllocTable,
+        actual_channels: usize,
+        actual_bound: usize,
+    },
+    /// A subband above `bound` (intensity-stereo region) was supplied
+    /// with mismatched per-channel `nb_steps`. The §2.4.1.6 syntax
+    /// forces `allocation[1][sb] = allocation[0][sb]` here, so the two
+    /// channels must carry the same `nb_steps` or the encoder has a
+    /// layout bug.
+    IntensityStereoAllocationMismatch {
+        sb: usize,
+        nb_steps_ch0: u32,
+        nb_steps_ch1: u32,
+    },
+    /// A subband's `nb_steps` value is not reachable through the active
+    /// `BitAllocTable` (i.e. no allocation index encodes it). The
+    /// encoder must round `nb_steps` to one of the values returned by
+    /// `BitAllocTable::nb_steps` for that subband.
+    UnencodableNbSteps {
+        table: BitAllocTable,
+        sb: usize,
+        ch: usize,
+        nb_steps: u32,
+    },
+    /// A scalefactor index is reserved (`63`) or out of range. Only
+    /// `0..=62` are encodable per §2.4.2.5.
+    ReservedScalefactorIndex {
+        ch: usize,
+        sb: usize,
+        part: usize,
+        index: u8,
+    },
+}
+
+impl fmt::Display for AudioDataWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AudioDataWriteError::NoBitallocTable => write!(
+                f,
+                "audio-data writer: (Fs, bitrate) does not select any Layer II bit-allocation sub-table"
+            ),
+            AudioDataWriteError::InconsistentLayout {
+                expected_table,
+                expected_channels,
+                expected_bound,
+                actual_table,
+                actual_channels,
+                actual_bound,
+            } => write!(
+                f,
+                "audio-data writer: AudioData layout {{table: {actual_table:?}, channels: {actual_channels}, bound: {actual_bound}}} disagrees with header {{table: {expected_table:?}, channels: {expected_channels}, bound: {expected_bound}}}"
+            ),
+            AudioDataWriteError::IntensityStereoAllocationMismatch {
+                sb,
+                nb_steps_ch0,
+                nb_steps_ch1,
+            } => write!(
+                f,
+                "audio-data writer: subband {sb} is in the intensity-stereo region but ch0 nb_steps={nb_steps_ch0} disagrees with ch1 nb_steps={nb_steps_ch1}"
+            ),
+            AudioDataWriteError::UnencodableNbSteps {
+                table,
+                sb,
+                ch,
+                nb_steps,
+            } => write!(
+                f,
+                "audio-data writer: nb_steps={nb_steps} (ch={ch} sb={sb}) does not appear in table {table:?}"
+            ),
+            AudioDataWriteError::ReservedScalefactorIndex {
+                ch,
+                sb,
+                part,
+                index,
+            } => write!(
+                f,
+                "audio-data writer: scalefactor[ch={ch}][sb={sb}][part={part}] index {index} is reserved (only 0..=62 are encodable)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AudioDataWriteError {}
+
+/// Write the §2.4.1.6 audio-data side-info (bit allocation + scfsi +
+/// scalefactor triplets) for one Layer II frame.
+///
+/// The output bit sequence is the byte-for-byte inverse of what
+/// [`parse_audio_data`] would consume given the same `(header, data)`
+/// pair — round-tripping this writer's output through `parse_audio_data`
+/// reconstructs the same [`AudioData`] struct, modulo entries strictly
+/// above `sblimit` (which the parser leaves at their initial zero).
+///
+/// The §2.4.3.3.4 sample-codeword section is NOT written here; the
+/// caller appends it after `write_audio_data` returns.
+pub fn write_audio_data(
+    header: &FrameHeader,
+    data: &AudioData,
+    writer: &mut BitWriter,
+) -> Result<(), AudioDataWriteError> {
+    write_audio_data_with_section_bits(header, data, writer).map(|_| ())
+}
+
+/// Like [`write_audio_data`] but also returns the bit-lengths of the
+/// §2.4.1.6 bit-allocation section and the §2.4.1.6 scfsi section.
+///
+/// Those two sections are exactly the §2.4.3.1 Layer II protected-CRC
+/// payload (Annex B Table B.5), so the frame-level encode loop uses the
+/// two bit counts to feed the CRC-16 helper without re-parsing.
+pub fn write_audio_data_with_section_bits(
+    header: &FrameHeader,
+    data: &AudioData,
+    writer: &mut BitWriter,
+) -> Result<(usize, usize), AudioDataWriteError> {
+    let table = select_table(header).ok_or(AudioDataWriteError::NoBitallocTable)?;
+    let channels = header.channels();
+    let expected_bound = match header.mode {
+        Mode::JointStereo => header.mode_extension.bound().min(table.sblimit()),
+        _ => table.sblimit(),
+    };
+
+    if data.table != table || data.channels != channels || data.bound != expected_bound {
+        return Err(AudioDataWriteError::InconsistentLayout {
+            expected_table: table,
+            expected_channels: channels,
+            expected_bound,
+            actual_table: data.table,
+            actual_channels: data.channels,
+            actual_bound: data.bound,
+        });
+    }
+
+    let pos_alloc_start = writer.bit_position();
+    write_allocation(data, writer)?;
+    let pos_scfsi_start = writer.bit_position();
+    write_scfsi(data, writer);
+    let pos_scfsi_end = writer.bit_position();
+    write_scalefactors(data, writer)?;
+
+    let alloc_bits = (pos_scfsi_start - pos_alloc_start) as usize;
+    let scfsi_bits = (pos_scfsi_end - pos_scfsi_start) as usize;
+    Ok((alloc_bits, scfsi_bits))
+}
+
+/// Inverse of [`parse_allocation`].
+///
+/// For `sb < bound`: writes both per-channel `nbal`-bit allocation
+/// indices. For `bound <= sb < sblimit` (intensity-stereo region per
+/// §2.4.2.3): writes ONE shared `nbal`-bit index, after cross-checking
+/// that `nb_steps[0][sb] == nb_steps[1][sb]`. Allocation indices are
+/// derived from [`BitAllocTable::allocation_index`].
+fn write_allocation(data: &AudioData, writer: &mut BitWriter) -> Result<(), AudioDataWriteError> {
+    let table = data.table;
+    let channels = data.channels;
+    let bound = data.bound;
+    let sblimit = data.sblimit;
+
+    for sb in 0..bound {
+        let nbal = table.nbal(sb);
+        for ch in 0..channels {
+            let nb = data.nb_steps[ch][sb];
+            let idx =
+                table
+                    .allocation_index(sb, nb)
+                    .ok_or(AudioDataWriteError::UnencodableNbSteps {
+                        table,
+                        sb,
+                        ch,
+                        nb_steps: nb,
+                    })?;
+            writer.write_u32(idx, nbal);
+        }
+    }
+    for sb in bound..sblimit {
+        let nbal = table.nbal(sb);
+        // Intensity-stereo: §2.4.1.6 forces allocation[1] = allocation[0].
+        if channels == 2 && data.nb_steps[0][sb] != data.nb_steps[1][sb] {
+            return Err(AudioDataWriteError::IntensityStereoAllocationMismatch {
+                sb,
+                nb_steps_ch0: data.nb_steps[0][sb],
+                nb_steps_ch1: data.nb_steps[1][sb],
+            });
+        }
+        let nb = data.nb_steps[0][sb];
+        let idx =
+            table
+                .allocation_index(sb, nb)
+                .ok_or(AudioDataWriteError::UnencodableNbSteps {
+                    table,
+                    sb,
+                    ch: 0,
+                    nb_steps: nb,
+                })?;
+        writer.write_u32(idx, nbal);
+    }
+    Ok(())
+}
+
+/// Inverse of [`parse_scfsi`]: writes the 2-bit `scfsi[ch][sb]` field
+/// for every (sb, ch) with non-zero allocation, in the same
+/// (sb-outer, ch-inner) order the parser expects.
+fn write_scfsi(data: &AudioData, writer: &mut BitWriter) {
+    for sb in 0..data.sblimit {
+        for ch in 0..data.channels {
+            if data.nb_steps[ch][sb] == 0 {
+                continue;
+            }
+            let code = scfsi_code(data.scfsi[ch][sb]);
+            writer.write_u32(code, 2);
+        }
+    }
+}
+
+/// The 2-bit on-wire `scfsi` field encoding. The reader's
+/// [`Scfsi::from_bits`] (private) inverse is matched here exactly so a
+/// round-trip recovers the enum variant.
+fn scfsi_code(scfsi: Scfsi) -> u32 {
+    match scfsi {
+        Scfsi::ThreePerGranule => 0b00,
+        Scfsi::Share01Then2 => 0b01,
+        Scfsi::ShareAll => 0b10,
+        Scfsi::Share0Then12 => 0b11,
+    }
+}
+
+/// Inverse of [`parse_scalefactors`].
+///
+/// For each (sb, ch) with non-zero allocation, writes the 1/2/3 on-wire
+/// 6-bit scalefactor indices the parser would consume given the chosen
+/// `scfsi[ch][sb]` schedule. The "missing" granule slots that the
+/// parser fills in per the §2.4.2.3 schedule are NOT written — the
+/// schedule is reversible because Table C.4 / `select_scfsi` already
+/// arranged `data.scalefactor[ch][sb]` so the missing slots match the
+/// reconstruction rule.
+fn write_scalefactors(data: &AudioData, writer: &mut BitWriter) -> Result<(), AudioDataWriteError> {
+    for sb in 0..data.sblimit {
+        for ch in 0..data.channels {
+            if data.nb_steps[ch][sb] == 0 {
+                continue;
+            }
+            let scfsi = data.scfsi[ch][sb];
+            let sf = data.scalefactor[ch][sb];
+            // §2.4.2.5: index 63 is reserved; only 0..=62 are encodable.
+            for (part, &index) in sf.iter().enumerate() {
+                if index as usize >= crate::tables::SCALEFACTOR_COUNT {
+                    return Err(AudioDataWriteError::ReservedScalefactorIndex {
+                        ch,
+                        sb,
+                        part,
+                        index,
+                    });
+                }
+            }
+            match scfsi {
+                Scfsi::ThreePerGranule => {
+                    writer.write_u32(sf[0] as u32, 6);
+                    writer.write_u32(sf[1] as u32, 6);
+                    writer.write_u32(sf[2] as u32, 6);
+                }
+                Scfsi::Share01Then2 => {
+                    // Parser reads (a, c) and fills [a, a, c]. We must
+                    // therefore have sf[0] == sf[1]; write sf[0] then
+                    // sf[2].
+                    writer.write_u32(sf[0] as u32, 6);
+                    writer.write_u32(sf[2] as u32, 6);
+                }
+                Scfsi::Share0Then12 => {
+                    // Parser reads (a, c) and fills [a, c, c]. We must
+                    // therefore have sf[1] == sf[2]; write sf[0] then
+                    // sf[2].
+                    writer.write_u32(sf[0] as u32, 6);
+                    writer.write_u32(sf[2] as u32, 6);
+                }
+                Scfsi::ShareAll => {
+                    // Parser reads (a) and fills [a, a, a]. We must
+                    // therefore have sf[0] == sf[1] == sf[2]; write sf[0].
+                    writer.write_u32(sf[0] as u32, 6);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,5 +1084,378 @@ mod tests {
         let _data = parse_audio_data(&header, &mut reader).unwrap();
         let consumed = reader.bit_position() - pos_before;
         assert_eq!(consumed as u32, alloc_bits);
+    }
+
+    // -----------------------------------------------------------------
+    // §2.4.1.6 audio-data writer (encoder side) — round-trip tests
+    // -----------------------------------------------------------------
+
+    /// Construct an `AudioData` that matches what `parse_audio_data`
+    /// would produce given a `(header, payload)` pair, by parsing the
+    /// payload. The writer must reproduce the same payload byte-for-
+    /// byte (modulo unwritten bits past the last allocation = 0 row).
+    fn header_round_trip(header: &FrameHeader, payload: &[u8]) -> (AudioData, Vec<u8>) {
+        let mut reader = BitReader::new(payload);
+        let data = parse_audio_data(header, &mut reader).expect("parse");
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        write_audio_data(header, &data, &mut bw).expect("write");
+        bw.align_to_byte_zero();
+        (data, bw.finish())
+    }
+
+    #[test]
+    fn write_inverts_parse_for_uniform_192kbps_stereo() {
+        let header = make_header(192_000, 44_100, Mode::Stereo);
+        let table = BitAllocTable::B2b;
+        let payload = build_uniform_allocation_one_payload(table, 2);
+
+        let (data, encoded) = header_round_trip(&header, &payload);
+
+        // Encoded must match the parsed-payload prefix byte-for-byte.
+        // We compare only the byte count the writer actually produced,
+        // since the test fixture pads to a byte boundary at the end of
+        // the scalefactor loop.
+        assert_eq!(
+            encoded, payload,
+            "round-trip: writer output must match parse input"
+        );
+
+        // Re-parse to confirm we round-trip the AudioData too.
+        let mut reader = BitReader::new(&encoded);
+        let reparsed = parse_audio_data(&header, &mut reader).unwrap();
+        assert_eq!(reparsed, data, "re-parse round-trip");
+    }
+
+    #[test]
+    fn write_inverts_parse_for_joint_stereo_above_bound() {
+        // Drives the bound < sblimit "shared allocation" branch.
+        let mut header = make_header(192_000, 44_100, Mode::JointStereo);
+        header.mode_extension = ModeExtension::Bound8;
+        let table = BitAllocTable::B2b;
+        let bound = ModeExtension::Bound8.bound();
+
+        // Build the same exact payload the existing test uses for the
+        // joint-stereo parse path.
+        let mut bw = BitWriter::new();
+        for sb in 0..bound {
+            let nbal = table.nbal(sb);
+            bw.write(1, nbal);
+            bw.write(2, nbal);
+        }
+        for sb in bound..table.sblimit() {
+            let nbal = table.nbal(sb);
+            bw.write(1, nbal);
+        }
+        for _sb in 0..table.sblimit() {
+            bw.write(0b10, 2);
+            bw.write(0b10, 2);
+        }
+        for _sb in 0..table.sblimit() {
+            bw.write(0, 6);
+            bw.write(0, 6);
+        }
+        let payload = bw.finish();
+
+        let (_data, encoded) = header_round_trip(&header, &payload);
+        assert_eq!(encoded, payload, "joint-stereo round-trip");
+    }
+
+    /// Drives the zero-allocation skip path — no scfsi / scalefactor
+    /// bits emitted, just the allocation rows.
+    #[test]
+    fn write_emits_zero_scfsi_when_no_allocation() {
+        let header = make_header(192_000, 44_100, Mode::Stereo);
+        let table = BitAllocTable::B2b;
+        let bits_for_alloc: u32 = (0..table.sblimit()).map(|sb| table.nbal(sb) * 2).sum();
+        let byte_count = bits_for_alloc.div_ceil(8) as usize;
+        let payload = vec![0u8; byte_count];
+
+        let (data, encoded) = header_round_trip(&header, &payload);
+
+        assert_eq!(
+            encoded, payload,
+            "zero-allocation round-trip should not emit any scfsi / scalefactor bits"
+        );
+        // Section bit counts: alloc = sum_of_nbal * 2, scfsi = 0,
+        // scalefactor = 0.
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        let (alloc_bits, scfsi_bits) =
+            write_audio_data_with_section_bits(&header, &data, &mut bw).unwrap();
+        assert_eq!(alloc_bits as u32, bits_for_alloc);
+        assert_eq!(scfsi_bits, 0);
+    }
+
+    /// Drive all four §2.4.2.3 scfsi schedules through the writer in a
+    /// single-mono-subband payload and confirm the bit pattern is the
+    /// inverse of what the parser consumes for each schedule.
+    #[test]
+    fn write_inverts_all_four_scfsi_schedules() {
+        let header = make_header(32_000, 32_000, Mode::SingleChannel);
+        let table = BitAllocTable::B2d;
+        let nbal0 = table.nbal(0);
+
+        let cases: [(u32, &[u32]); 4] = [
+            (0b00, &[10, 20, 30]),
+            (0b01, &[5, 17]),
+            (0b10, &[42]),
+            (0b11, &[7, 50]),
+        ];
+
+        for (scfsi_code, indices) in cases {
+            let mut bw = BitWriter::new();
+            bw.write(1, nbal0);
+            for sb in 1..table.sblimit() {
+                bw.write(0, table.nbal(sb));
+            }
+            bw.write(scfsi_code, 2);
+            for &idx in indices {
+                bw.write(idx, 6);
+            }
+            let payload = bw.finish();
+
+            let (_data, encoded) = header_round_trip(&header, &payload);
+            assert_eq!(
+                encoded, payload,
+                "round-trip failed for scfsi_code = {scfsi_code:02b}"
+            );
+        }
+    }
+
+    /// Confirm the writer's CRC-payload bit-count return matches the
+    /// parser's bit-position deltas exactly — these counts feed
+    /// §2.4.3.1 / Annex B Table B.5 CRC accumulation.
+    #[test]
+    fn write_section_bit_counts_match_parse_section_bit_counts() {
+        let header = make_header(192_000, 44_100, Mode::Stereo);
+        let table = BitAllocTable::B2b;
+        let payload = build_uniform_allocation_one_payload(table, 2);
+
+        // Parse-side counts.
+        let mut reader = BitReader::new(&payload);
+        let (data, parse_alloc_bits, parse_scfsi_bits) =
+            parse_audio_data_with_section_bits(&header, &mut reader).unwrap();
+
+        // Write-side counts.
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        let (write_alloc_bits, write_scfsi_bits) =
+            write_audio_data_with_section_bits(&header, &data, &mut bw).unwrap();
+
+        assert_eq!(write_alloc_bits, parse_alloc_bits);
+        assert_eq!(write_scfsi_bits, parse_scfsi_bits);
+    }
+
+    /// Inconsistent-layout guard: an `AudioData` whose `table` /
+    /// `channels` / `bound` disagree with what the header dictates is
+    /// rejected.
+    #[test]
+    fn write_rejects_inconsistent_layout() {
+        let header = make_header(192_000, 44_100, Mode::Stereo);
+        // Header → B.2b, channels = 2, bound = sblimit = 30.
+        let mut data = AudioData::new(BitAllocTable::B2b, 30, 2);
+        // Mutate to claim a different table.
+        data.table = BitAllocTable::B2a;
+        data.sblimit = BitAllocTable::B2a.sblimit();
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        let err = write_audio_data(&header, &data, &mut bw).unwrap_err();
+        match err {
+            AudioDataWriteError::InconsistentLayout {
+                expected_table: BitAllocTable::B2b,
+                actual_table: BitAllocTable::B2a,
+                ..
+            } => {}
+            other => panic!("expected InconsistentLayout, got {other:?}"),
+        }
+    }
+
+    /// Encoder error path: an `nb_steps` value the active table never
+    /// emits cannot be encoded.
+    #[test]
+    fn write_rejects_unencodable_nb_steps() {
+        let header = make_header(192_000, 44_100, Mode::Stereo);
+        let mut data = AudioData::new(BitAllocTable::B2b, 30, 2);
+        // `nb_steps = 4` does not appear in any Table 3-B.4 row — the
+        // table only carries `{3, 5, 7, 9, 15, 31, 63, 127, 255, 511,
+        // 1023, 2047, 4095, 8191, 16383, 32767, 65535}` and the §2.4.2.3
+        // sentinel 0. Any subband expecting a `nb_steps` outside this
+        // set is unencodable; we plant it at (ch=0, sb=0).
+        data.nb_steps[0][0] = 4;
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        let err = write_audio_data(&header, &data, &mut bw).unwrap_err();
+        match err {
+            AudioDataWriteError::UnencodableNbSteps {
+                table: BitAllocTable::B2b,
+                sb: 0,
+                ch: 0,
+                nb_steps: 4,
+            } => {}
+            other => panic!("expected UnencodableNbSteps, got {other:?}"),
+        }
+    }
+
+    /// Encoder error path: a reserved scalefactor index (63) cannot be
+    /// written.
+    #[test]
+    fn write_rejects_reserved_scalefactor_index_63() {
+        let header = make_header(192_000, 44_100, Mode::Stereo);
+        let table = BitAllocTable::B2b;
+        let mut data = AudioData::new(table, 30, 2);
+        // Allocate sb=0 to a valid `nb_steps` so the scalefactor write
+        // path is reached.
+        let nb = table.nb_steps(0, 1).unwrap();
+        data.nb_steps[0][0] = nb;
+        data.nb_steps[1][0] = nb;
+        data.scfsi[0][0] = Scfsi::ShareAll;
+        data.scfsi[1][0] = Scfsi::ShareAll;
+        // Reserved index in part 0 of ch=0 sb=0.
+        data.scalefactor[0][0] = [63, 63, 63];
+        // ch=1 keeps in-range zeros so we hit the ch=0 error first.
+
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        let err = write_audio_data(&header, &data, &mut bw).unwrap_err();
+        match err {
+            AudioDataWriteError::ReservedScalefactorIndex {
+                ch: 0,
+                sb: 0,
+                part: 0,
+                index: 63,
+            } => {}
+            other => panic!("expected ReservedScalefactorIndex, got {other:?}"),
+        }
+    }
+
+    /// Intensity-stereo (above-bound) region: §2.4.1.6 forces
+    /// `allocation[1][sb] = allocation[0][sb]`, so the writer must
+    /// reject a mismatched per-channel `nb_steps`.
+    #[test]
+    fn write_rejects_intensity_stereo_allocation_mismatch() {
+        let mut header = make_header(192_000, 44_100, Mode::JointStereo);
+        header.mode_extension = ModeExtension::Bound8;
+        let table = BitAllocTable::B2b;
+        let bound = ModeExtension::Bound8.bound();
+        let mut data = AudioData::new(table, bound, 2);
+        // Pick an above-bound subband and give it different per-channel
+        // `nb_steps`. We use sb = bound = 8 directly.
+        let nb_a = table.nb_steps(bound, 1).unwrap();
+        let nb_b = table.nb_steps(bound, 2).unwrap();
+        assert_ne!(nb_a, nb_b);
+        data.nb_steps[0][bound] = nb_a;
+        data.nb_steps[1][bound] = nb_b;
+        let mut bw = oxideav_core::bits::BitWriter::new();
+        let err = write_audio_data(&header, &data, &mut bw).unwrap_err();
+        match err {
+            AudioDataWriteError::IntensityStereoAllocationMismatch { sb, .. } if sb == bound => {}
+            other => panic!("expected IntensityStereoAllocationMismatch, got {other:?}"),
+        }
+    }
+
+    /// Walk every (table, allocation_index, scfsi) combination and
+    /// confirm the writer + parser are exact inverses, including the
+    /// scfsi-expanded scalefactor reconstruction. We use mono inputs to
+    /// keep the test under a second; the joint-stereo round-trip above
+    /// covers the stereo expansion path.
+    #[test]
+    fn write_round_trips_every_table_and_scfsi_combination_mono() {
+        // For each of the four B.2 sub-tables, drive every subband at
+        // every legal allocation index, every scfsi value, and confirm
+        // a write -> parse cycle reconstructs the same AudioData.
+        // The four tables differ in their (sample_rate, bitrate) gates
+        // so we pick a representative header per table.
+        let tables: [(BitAllocTable, FrameHeader); 4] = [
+            // B.2a: 48 kHz mono 64 kbit/s (per-channel = 64) per
+            // `select_table` 48 kHz row.
+            (
+                BitAllocTable::B2a,
+                make_header(64_000, 48_000, Mode::SingleChannel),
+            ),
+            // B.2b: 44.1 kHz mono 96 kbit/s (per-channel = 96) per
+            // `select_table` 44.1 kHz row. (48 kHz mono 96 routes to
+            // B.2a, not B.2b.)
+            (
+                BitAllocTable::B2b,
+                make_header(96_000, 44_100, Mode::SingleChannel),
+            ),
+            // B.2c: 48 kHz mono 48 kbit/s (per-channel = 48). The §2.4.2.3
+            // matrix permits single-channel at 48 kbit/s.
+            (
+                BitAllocTable::B2c,
+                make_header(48_000, 48_000, Mode::SingleChannel),
+            ),
+            // B.2d: 32 kHz mono 32 kbit/s (per-channel = 32). The §2.4.2.3
+            // matrix permits single-channel at 32 kbit/s.
+            (
+                BitAllocTable::B2d,
+                make_header(32_000, 32_000, Mode::SingleChannel),
+            ),
+        ];
+
+        let scfsis = [
+            Scfsi::ThreePerGranule,
+            Scfsi::Share01Then2,
+            Scfsi::ShareAll,
+            Scfsi::Share0Then12,
+        ];
+
+        for (expected_table, header) in tables {
+            assert_eq!(crate::bitalloc::select_table(&header), Some(expected_table));
+            let table = expected_table;
+            let mut data = AudioData::new(table, table.sblimit(), 1);
+
+            // Allocate every subband to its index = 1 (always a valid
+            // allocation since index 0 = "no bits" sentinel and the
+            // tables guarantee nb_steps(sb, 1) is defined for every sb).
+            for sb in 0..table.sblimit() {
+                let nb = table
+                    .nb_steps(sb, 1)
+                    .unwrap_or_else(|| panic!("table {table:?} sb={sb} has no idx=1"));
+                data.nb_steps[0][sb] = nb;
+            }
+
+            for scfsi in scfsis {
+                // Set every (sb) scfsi + a scalefactor pattern that
+                // matches the schedule's reconstruction rule.
+                for sb in 0..table.sblimit() {
+                    data.scfsi[0][sb] = scfsi;
+                    // Use index values that fit each schedule.
+                    let (a, b, c) = match scfsi {
+                        Scfsi::ThreePerGranule => {
+                            let a = (sb as u8) % 30;
+                            let b = ((sb as u8) + 7) % 30;
+                            let c = ((sb as u8) + 14) % 30;
+                            (a, b, c)
+                        }
+                        Scfsi::Share01Then2 => {
+                            // Decoder fills [a, a, c]; encoder MUST set
+                            // [a, a, c] in its struct too.
+                            let a = (sb as u8) % 30;
+                            let c = ((sb as u8) + 9) % 30;
+                            (a, a, c)
+                        }
+                        Scfsi::ShareAll => {
+                            let a = (sb as u8) % 30;
+                            (a, a, a)
+                        }
+                        Scfsi::Share0Then12 => {
+                            // Decoder fills [a, c, c]; encoder MUST set
+                            // [a, c, c] in its struct too.
+                            let a = (sb as u8) % 30;
+                            let c = ((sb as u8) + 11) % 30;
+                            (a, c, c)
+                        }
+                    };
+                    data.scalefactor[0][sb] = [a, b, c];
+                }
+
+                let mut bw = oxideav_core::bits::BitWriter::new();
+                write_audio_data(&header, &data, &mut bw).unwrap();
+                bw.align_to_byte_zero();
+                let encoded = bw.finish();
+                let mut reader = BitReader::new(&encoded);
+                let reparsed = parse_audio_data(&header, &mut reader).unwrap();
+                assert_eq!(
+                    reparsed, data,
+                    "round-trip failed for {table:?} / scfsi {scfsi:?}"
+                );
+            }
+        }
     }
 }

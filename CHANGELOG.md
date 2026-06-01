@@ -8,6 +8,41 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- §2.4.1.6 audio-data writer (encoder side): `write_audio_data` and
+  `write_audio_data_with_section_bits` in the `audio_data` module are
+  the bit-for-bit inverse of `parse_audio_data` /
+  `parse_audio_data_with_section_bits`. For one Layer II frame, the
+  writer emits, in order, the per-(sb, ch) `nbal`-bit allocation
+  indices (with the §2.4.1.6 `sb >= bound` joint-stereo branch writing
+  ONE shared index per subband), the 2-bit `scfsi[ch][sb]` for every
+  (sb, ch) with non-zero allocation, and the 1/2/3 on-wire 6-bit
+  scalefactor indices per the chosen `scfsi` schedule. Allocation
+  indices are derived via `BitAllocTable::allocation_index`
+  (round 175); scfsi codes derive from the `Scfsi` enum the §C.1.5.2.5
+  selector (round 202) hands the writer; scalefactor indices come from
+  `compute_scalefactors` (round 195) after SCFSI selection has
+  arranged the `[scf1, scf2, scf3]` triple to match the schedule's
+  reconstruction rule. `write_audio_data_with_section_bits` returns
+  the bit-lengths of the §2.4.1.6 bit-allocation and scfsi sections so
+  the yet-to-be-built §2.4.3.1 encoder CRC accumulator can index
+  Annex B Table B.5 without re-parsing. A new `AudioDataWriteError`
+  enum reports the encoder-side self-inconsistencies:
+  `NoBitallocTable`, `InconsistentLayout` (`AudioData` disagrees with
+  header on `table` / `channels` / `bound`),
+  `IntensityStereoAllocationMismatch` (above-`bound` subband has
+  unequal per-channel `nb_steps` — forbidden by §2.4.1.6),
+  `UnencodableNbSteps` (`nb_steps` not in any row of the active
+  sub-table), and `ReservedScalefactorIndex` (scalefactor index 63 is
+  reserved per §2.4.2.5). 10 new lib tests (178 -> 188): uniform
+  192 kbit/s stereo round-trip, joint-stereo above-bound round-trip,
+  zero-allocation skip path, all four scfsi schedules round-trip,
+  section bit-count parity with `parse_audio_data_with_section_bits`,
+  the four error paths (inconsistent layout / unencodable `nb_steps` /
+  reserved scalefactor 63 / intensity-stereo allocation mismatch),
+  and an exhaustive (every B.2 sub-table, every scfsi schedule) mono
+  round-trip walking 4 tables x 4 scfsi schedules through write ->
+  parse and asserting equality.
+
 - Annex C §C.1.5.2.5 / §C.1.5.2.6 encoder-side SCFSI selection
   (`encoder_scfsi` module: `select_scfsi`, `classify_difference`,
   `DifferenceClass`, `TransmissionPattern`, `ScfsiSelection`). For
