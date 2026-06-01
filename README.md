@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-139 lib tests + 6 LSF integration tests + 14 malformed-input
+178 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -333,15 +333,45 @@ mpg123 black-box validator output) is pending an Auditor round.
 Encoder is partially staged: the §2.4.1.4 / §2.4.3.1 CRC-16 write
 primitives (`crc16_layer2` + streaming `crc16_update_*`), the
 §2.4.1.3 / §2.4.2.3 header writer (`FrameHeader::emit_bytes` +
-`encode_bitrate` + `encode_sampling_frequency`), and the §C.1.3
+`encode_bitrate` + `encode_sampling_frequency`), the §C.1.3
 Annex C polyphase analysis filterbank
-(`AnalysisFilterbank::push_audio`, added in round 192), and the
+(`AnalysisFilterbank::push_audio`, added in round 192), the
 §2.4.3.3.3 / Annex C §C.1.5.2.6 scalefactor extraction
 (`compute_scalefactors` / `extract_scalefactor_index` /
-`pick_scalefactor_index`, added in round 195) are in place. The
-remaining encoder pieces are Table C.4 SCFSI selection, the
-iterative §C.1.5.2.7 bit-allocator, and the §2.4.1.6 audio-data
-writer that ties everything together.
+`pick_scalefactor_index`, added in round 195), and the Annex C
+§C.1.5.2.5 / §C.1.5.2.6 SCFSI Table-C.4 selection (`select_scfsi`
+/ `classify_difference` / `ScfsiSelection`, added in round 202)
+are in place. The remaining encoder pieces are the iterative
+§C.1.5.2.7 bit-allocator and the §2.4.1.6 audio-data writer that
+ties everything together.
+
+**Round 202 (2026-06-01)** added Annex C §C.1.5.2.5 / §C.1.5.2.6
+encoder-side SCFSI selection (`encoder_scfsi` module). For each
+`(channel, subband)` slot of a Layer II frame, `select_scfsi(&[u8;
+3])` consumes the three per-granule Table 3-B.1 scalefactor indices
+produced by `compute_scalefactors` and returns a `ScfsiSelection`
+carrying (a) the §C.1.5.2.5 "scalefactor used in encoder" triple
+the decoder will reconstruct (the spec's "adjusted" scalefactors),
+(b) the `TransmissionPattern` selecting which of the three slots
+are physically written, and (c) the 2-bit `scfsi[ch][sb]` code
+matching one of the four `audio_data::Scfsi` schedules. The
+§C.1.5.2.5 procedure runs as: compute `dscf1 = scf1 - scf2` and
+`dscf2 = scf2 - scf3`, classify each into one of the five spec
+classes (PDF page 73: `dscf <= -3`, `-3 < dscf < 0`, `dscf == 0`,
+`0 < dscf < 3`, `dscf >= 3`), and index Table C.4 (PDF page 76) by
+the `(class1, class2)` pair. The "4 = max scalefactor" recipe at
+row (2,4) maps to the *minimum index* because Table 3-B.1 is
+monotonically decreasing (larger multiplier ↔ smaller index).
+9 new lib tests (169 → 178): every-boundary classifier pin, the
+full 25-row Table C.4 lookup pin (input chosen to land in each
+target row, then `used` / pattern / `scfsi` cross-checked against
+the PDF column-by-column), all-identical-triplet → ShareAll,
+large-strictly-changing-indices in both monotonic directions,
+the (2,4) max-recipe semantics, transmitted-slot-count consistency
+per row, the wire round-trip (writing the on-wire 6-bit slots
+under the chosen `scfsi` schedule reconstructs the encoder's
+claimed `used` triple), purity / determinism, and the "at least
+one slot transmitted" lower bound.
 
 **Round 195 (2026-05-31)** added §2.4.3.3.3 / Annex C §C.1.5.2.6
 encoder scalefactor extraction (`encoder_scalefactors` module).

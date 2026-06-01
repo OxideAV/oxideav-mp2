@@ -139,6 +139,7 @@ pub mod bitalloc;
 pub mod codec_decoder;
 pub mod crc;
 pub mod encoder_scalefactors;
+pub mod encoder_scfsi;
 pub mod frame;
 pub mod header;
 pub mod requant;
@@ -165,6 +166,9 @@ pub use crc::{
 };
 pub use encoder_scalefactors::{
     compute_scalefactors, extract_scalefactor_index, pick_scalefactor_index,
+};
+pub use encoder_scfsi::{
+    classify_difference, select_scfsi, DifferenceClass, ScfsiSelection, TransmissionPattern,
 };
 pub use frame::{
     decode_all_frames, decode_frame, decode_frame_with, layer2_crc, DecodedFrame, FrameDecodeState,

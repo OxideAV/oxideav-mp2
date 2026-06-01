@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex C §C.1.5.2.5 / §C.1.5.2.6 encoder-side SCFSI selection
+  (`encoder_scfsi` module: `select_scfsi`, `classify_difference`,
+  `DifferenceClass`, `TransmissionPattern`, `ScfsiSelection`). For
+  each `(channel, subband)` slot, consumes the three Table 3-B.1
+  scalefactor indices produced by `compute_scalefactors` and emits
+  the §C.1.5.2.5 "adjusted" `used` triple, the §C.1.5.2.5
+  transmission pattern (which slots are physically written), and
+  the 2-bit `scfsi` code matching one of the four `audio_data::Scfsi`
+  schedules. Classification of `dscf1 = scf1 - scf2` and
+  `dscf2 = scf2 - scf3` into the five spec classes (PDF page 73)
+  indexes Table C.4 (PDF page 76). The "4 = max scalefactor"
+  recipe at row (2,4) maps to the minimum index because Table 3-B.1
+  is monotonically decreasing (larger multiplier ↔ smaller index).
+  9 new lib tests (169 → 178): full 25-row Table C.4 lookup pin
+  (input chosen to land in each target row, then `used` / pattern /
+  `scfsi` cross-checked column-by-column against the PDF), every
+  classifier boundary, all-identical-triplet → ShareAll, large
+  strictly-changing-indices in both monotonic directions, the (2,4)
+  max-recipe semantics, transmitted-slot-count consistency per row,
+  the wire round-trip (writing the on-wire 6-bit slots under the
+  chosen `scfsi` schedule reconstructs the encoder's claimed `used`
+  triple), purity / determinism, and the "at least one slot
+  transmitted" lower bound.
+
 - §2.4.3.3.3 / Annex C §C.1.5.2.6 encoder scalefactor extraction
   (`encoder_scalefactors` module: `compute_scalefactors`,
   `extract_scalefactor_index`, `pick_scalefactor_index`). For each
