@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-178 lib tests + 6 LSF integration tests + 14 malformed-input
+202 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -327,10 +327,10 @@ inputs clamp at the i16 endpoints).
 ## What does not work yet
 
 Bit-exact PCM-against-reference validation (PSNR / SNR vs the
-`expected.wav` next to the staged fixture, or against ffmpeg /
-mpg123 black-box validator output) is pending an Auditor round.
+`expected.wav` next to the staged fixture, or against black-box
+validator output) is pending an Auditor round.
 
-Encoder is partially staged: the §2.4.1.4 / §2.4.3.1 CRC-16 write
+Encoder is mostly staged: the §2.4.1.4 / §2.4.3.1 CRC-16 write
 primitives (`crc16_layer2` + streaming `crc16_update_*`), the
 §2.4.1.3 / §2.4.2.3 header writer (`FrameHeader::emit_bytes` +
 `encode_bitrate` + `encode_sampling_frequency`), the §C.1.3
@@ -341,12 +341,76 @@ Annex C polyphase analysis filterbank
 `pick_scalefactor_index`, added in round 195), the Annex C
 §C.1.5.2.5 / §C.1.5.2.6 SCFSI Table-C.4 selection (`select_scfsi`
 / `classify_difference` / `ScfsiSelection`, added in round 202),
-and the §2.4.1.6 audio-data writer (`write_audio_data` /
-`write_audio_data_with_section_bits` — the bit-for-bit inverse of
-`parse_audio_data`, added in round 208) are in place. The
-remaining encoder piece is the iterative §C.1.5.2.7 bit-allocator
-that decides the per-(channel, subband) allocation indices to feed
-the audio-data writer.
+the §2.4.1.6 audio-data writer (`write_audio_data` /
+`write_audio_data_with_section_bits`, added in round 208), and
+the §C.1.5.2.7 iterative bit-allocator (`allocate_bits` /
+`fixed_bit_budget` / `snr_db` / `sample_bits_for`, added in round
+214) are in place. The encoder's remaining piece is the per-frame
+top-level orchestrator that pulls PCM through the analysis
+filterbank, runs the psychoacoustic model (Annex D Models 1 / 2,
+informative) to compute per-(channel, subband) SMR, calls
+`allocate_bits` → `compute_scalefactors` → `select_scfsi` →
+`write_audio_data`, emits the §2.4.1.4 CRC-16 over the protected
+fields, and prepends the §2.4.1.3 header — i.e. the encoder's
+counterpart to `decode_frame`.
+
+**Round 214 (2026-06-03)** added the §C.1.5.2.7 encoder iterative
+bit-allocator (`encoder_bit_allocator` module). `allocate_bits(&FrameHeader,
+&SmrTable, banc) -> Result<AudioData, BitAllocError>` runs the Annex C
+"each iteration loop" procedure verbatim: it (a) computes the
+constant-budget terms (`bhdr = 32`, `bcrc ∈ {0, 16}`, `bbal = Σ
+nbal(sb) × channels-or-shared-above-bound`) via the public
+`fixed_bit_budget(&FrameHeader)` helper, (b) initialises every
+`nb_steps[ch][sb] = 0` and `MNR[ch][sb] = SNR(0) − SMR[ch][sb] =
+−SMR[ch][sb]`, then (c) repeatedly picks the lowest-MNR slot,
+advances its B.2 row position by one column, charges the marginal
+sample-bit cost (and on first-time non-zero, the worst-case 2-bit
+scfsi + 18-bit scalefactor reservation), backs the step out if it
+would push `adb` negative, otherwise updates that slot's MNR using
+the new `SNR(nb_steps)` from Table C.5. Termination is the spec's
+"adb is not less than any possible increase" condition. The Annex C
+Table C.5 SNR-vs-`nb_steps` table (PDF page 76) is exposed via
+`snr_db(nb_steps) -> Option<f64>` (`0 -> 0.00 dB` through `65535 ->
+98.01 dB`, monotonically increasing); the per-frame
+sample-codeword bit cost is exposed via `sample_bits_for(nb_steps)
+-> u32` (a grouped class with `nb_steps ∈ {3, 5, 9}` packs 3
+samples per codeword → `12 × bits_per_codeword`; an ungrouped class
+costs `36 × bits_per_codeword`). The §2.4.1.6 joint-stereo
+above-`bound` constraint (`allocation[1][sb] = allocation[0][sb]`)
+is enforced inline: a single "merged" slot covers both channels at
+once, both channels' `nb_steps` advance together, the marginal
+sample-bit cost doubles (two channels' codewords), the scfsi +
+scalefactor cost also doubles (both channels still carry
+independent per-channel scalefactor + scfsi above bound per
+§2.4.1.6), and the merged MNR feeds the iteration from the
+*worse* of the two channels' MNRs so the joint allocation chases
+the noisier channel. The bit budget is intentionally conservative:
+the actual scfsi schedule, decided later by `select_scfsi`
+(round 202), can only *reduce* the per-slot scalefactor count from
+the worst-case 3 to 1, 2, or 3 transmitted slots, so the actual
+frame can never overrun `adb`. The `BitAllocError::InsufficientFrameSize`
+error surfaces frames whose constant budget already exceeds `cb`
+(possible only with an oversized `banc` reservation, never for a
+real Layer II header). 14 new lib tests (188 → 202): Table C.5
+landmark spot-checks (PDF page 76 `0 → 0`, `3 → 7`, `9 → 20.84`,
+`63 → 37.75`, `1023 → 61.96`, `65535 → 98.01`), strict
+monotonicity of the SNR column (the iteration's invariant), every
+Table 3-B.4 `nb_steps` having a Table C.5 entry, the closed-form
+`sample_bits_for` against grouped (`{3, 5, 9}`) and ungrouped
+classes, the `fixed_bit_budget` arithmetic across canonical
+192k/44.1k stereo (`cb=5008`, `bbal=188`), joint-stereo with
+`bound=4` (`bbal=32+78=110`), and single-channel 80 kbit/s
+(`bbal=88`), the allocator's budget invariant under uniformly
+negative SMR (termination still holds), the budget invariant
+under uniformly +100 dB SMR, the priority property (a single
+high-SMR slot ends up with the largest `nb_steps` of the frame),
+every emitted `nb_steps` being reachable through
+`BitAllocTable::allocation_index` (the writer's prerequisite),
+the joint-stereo above-`bound` shared-allocation invariant
+(`nb_steps[0][sb] == nb_steps[1][sb]`), the
+`InsufficientFrameSize` error path, and an end-to-end round-trip
+through `write_audio_data` → `parse_audio_data` confirming the
+allocator's `nb_steps` are bit-exact preserved.
 
 **Round 208 (2026-06-02)** added the §2.4.1.6 audio-data writer
 (encoder side). `write_audio_data(&FrameHeader, &AudioData, &mut

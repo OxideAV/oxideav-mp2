@@ -8,6 +8,43 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- §C.1.5.2.7 encoder iterative bit-allocator (`encoder_bit_allocator`
+  module). `allocate_bits(&FrameHeader, &SmrTable, banc) ->
+  Result<AudioData, BitAllocError>` runs the Annex C iterative loop:
+  initialise every `nb_steps[ch][sb] = 0`, compute the constant-budget
+  terms (`bhdr=32`, `bcrc ∈ {0, 16}`, `bbal = Σ nbal(sb) × channels
+  or shared above bound`) via the public
+  `fixed_bit_budget(&FrameHeader)` helper, then repeatedly pick the
+  lowest-MNR `(channel, sub-band)` slot, advance its B.2 row position,
+  charge the marginal sample-bit cost (and on first-time non-zero the
+  worst-case 2-bit scfsi + 18-bit scalefactor reservation), back out
+  the step if `adb` would go negative, otherwise update the slot's
+  MNR with the new `SNR(nb_steps)` from Table C.5. The Annex C Table
+  C.5 SNR table is exposed via `snr_db(nb_steps) -> Option<f64>`
+  (`0 → 0.00 dB` through `65535 → 98.01 dB`, monotonically
+  increasing); the per-(channel, sub-band) sample-codeword cost is
+  exposed via `sample_bits_for(nb_steps) -> u32` (grouped classes
+  pack 3 samples per codeword → `12 × bits_per_codeword`; ungrouped
+  → `36 × bits_per_codeword`). The §2.4.1.6 joint-stereo
+  above-`bound` shared-allocation rule is enforced inline (a merged
+  slot's `nb_steps` advances for both channels simultaneously; both
+  per-channel scfsi + scalefactor reservations still count; the
+  merged MNR feeds from the *worse* of the two channels' MNRs so the
+  joint allocation chases the noisier channel). 14 new lib tests
+  (188 → 202): Table C.5 landmarks, strict monotonicity, every
+  Table 3-B.4 step having a C.5 entry, `sample_bits_for` against
+  grouped vs ungrouped classes, the `fixed_bit_budget` arithmetic
+  across canonical 192k/44.1k stereo + joint-stereo bound=4 +
+  single-channel 80 kbit/s, the budget invariant under both
+  uniformly-negative and uniformly-+100 dB SMR, the priority
+  property (single high-SMR slot ends with the largest `nb_steps`),
+  every emitted `nb_steps` reachable through
+  `BitAllocTable::allocation_index`, the joint-stereo above-`bound`
+  `nb_steps[0][sb] == nb_steps[1][sb]` invariant, the
+  `InsufficientFrameSize` error path, and an end-to-end round-trip
+  through `write_audio_data` → `parse_audio_data` confirming the
+  allocator's `nb_steps` survives the audio-data wire format.
+
 - §2.4.1.6 audio-data writer (encoder side): `write_audio_data` and
   `write_audio_data_with_section_bits` in the `audio_data` module are
   the bit-for-bit inverse of `parse_audio_data` /

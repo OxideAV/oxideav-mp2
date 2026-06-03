@@ -123,6 +123,21 @@
 //!   honoured to within 1 ULP at the 9-decimal-digit grid (cross-
 //!   checked by [`tables_analysis::tests::c_matches_d_over_32_within_rounding`]).
 //!
+//! * **§C.1.5.2.7 encoder iterative bit-allocator**
+//!   ([`encoder_bit_allocator`] module). [`allocate_bits`] runs the
+//!   informative Annex C iterative loop end-to-end against a
+//!   per-(channel, sub-band) signal-to-mask ratio table
+//!   ([`encoder_bit_allocator::SmrTable`]) supplied by the caller
+//!   (typically the §D.1 / §D.2 psychoacoustic model). It returns an
+//!   [`AudioData`] whose `nb_steps` field is populated and ready to be
+//!   fed to [`compute_scalefactors`] → [`select_scfsi`] →
+//!   [`write_audio_data`]. [`fixed_bit_budget`] surfaces the constant
+//!   bit-budget terms (`bhdr`, `bcrc`, `bbal`) the iteration starts
+//!   from; [`snr_db`] reads the Annex C Table C.5
+//!   "Layer II Signal-to-Noise Ratios" entry for a given `nb_steps`;
+//!   [`sample_bits_for`] returns the per-frame sample-codeword bit
+//!   cost the iteration charges when an `nb_steps` decision is taken.
+//!
 //! ## What does not work yet
 //!
 //! [`register`] remains a no-op until the codec is wired through
@@ -138,6 +153,7 @@ pub mod audio_data;
 pub mod bitalloc;
 pub mod codec_decoder;
 pub mod crc;
+pub mod encoder_bit_allocator;
 pub mod encoder_scalefactors;
 pub mod encoder_scfsi;
 pub mod frame;
@@ -164,6 +180,10 @@ pub use codec_decoder::{
 pub use crc::{
     crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
     INIT_STATE as CRC_INIT_STATE,
+};
+pub use encoder_bit_allocator::{
+    allocate_bits, fixed_bit_budget, sample_bits_for, snr_db, BitAllocError, FixedBitBudget,
+    SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
 pub use encoder_scalefactors::{
     compute_scalefactors, extract_scalefactor_index, pick_scalefactor_index,
