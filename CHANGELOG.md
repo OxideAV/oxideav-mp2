@@ -8,6 +8,61 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- §2.4 / Annex C frame-level encode loop (`encoder_frame` module).
+  `encode_frame(header, pcm, smr_db, banc) -> Result<Vec<u8>,
+  EncodeError>` pulls the previously-landed encoder primitives
+  together into a single `pcm-in → byte-stream-out` call: analysis
+  filterbank → per-(channel, sub-band, granule) scalefactor
+  extraction → §C.1.5.2.7 bit allocation against the supplied
+  signal-to-mask-ratio table → §C.1.5.2.5 / Table C.4 SCFSI selection
+  (which rewrites `audio.scalefactor[ch][sb]` to the Table C.4
+  `used` triple and populates `audio.scfsi[ch][sb]`) → §2.4.1.3
+  header bytes → §2.4.1.4 CRC slot (reserved, patched after) →
+  §2.4.1.6 audio-data section → §2.4.3.3.4 sample codewords (the
+  same `(sample_gr, sb, ch)` ordering the decoder reads) → §2.4.1.10
+  `banc` ancillary reservation → zero-padding to
+  `header.frame_size_bytes()` → §2.4.3.1 CRC patch (re-extracting
+  the protected region from the just-emitted bytes and writing the
+  16-bit CRC into the reserved slot when `protection_bit == 0`).
+  `encode_frame_with(header, pcm, smr_db, banc, &mut state)` takes a
+  caller-supplied `EncodeFrameState` so the §C.1.3 X ring buffer
+  persists across successive frames (the encoder dual of
+  `frame::FrameDecodeState`); `EncodeFrameState::reset` re-zeros
+  every channel's X buffer on a seek / discontinuity. The emitted
+  frame is exactly `header.frame_size_bytes()` bytes long; the
+  bytes round-trip through `frame::decode_frame` to recover the
+  same header, the same `nb_steps` table, and a per-channel PCM
+  vector of `frame::PCM_SAMPLES_PER_CHANNEL` samples. The frame's
+  §2.4.3.1 CRC verifies on the decode side; flipping any
+  CRC-payload bit afterwards makes `decode_frame` reject the
+  frame with `FrameError::CrcMismatch`. `EncodeError` wraps the
+  sub-stage errors (`HeaderError`, `BitAllocError`,
+  `AudioDataWriteError`, `SampleWriteError`) plus PCM-shape
+  validation (`BadPcmChannelCount`, `BadPcmLen`). 15 new lib tests
+  (215 → 230): zero-input emits a well-formed frame whose header
+  round-trips; a 1 kHz / 0.5-amplitude stereo tone round-trips
+  through `decode_frame`; a single-channel 64 kbit/s 440 Hz tone
+  round-trips; the §2.4.1.6 audio-data section parses back via
+  `parse_audio_data_with_section_bits` with non-zero `alloc_bits`,
+  non-zero `scfsi_bits`, and at least one non-zero `nb_steps`
+  entry; the §2.4.3.1 CRC patch passes on the emitted frame; a
+  high-bit flip of the first byte of the bit-allocation section
+  triggers `FrameError::CrcMismatch`; mismatched
+  `pcm.len()` / `pcm[ch].len()` raise `BadPcmChannelCount` /
+  `BadPcmLen` with the expected `have`/`need` fields; a `banc=256`
+  reservation produces a still-decodable frame; a `banc` larger
+  than the data-bit budget surfaces
+  `BitAllocError::InsufficientFrameSize`; encoding the same input
+  twice with a persistent `EncodeFrameState` produces a second
+  frame that differs from the first (proving X accumulates) but
+  matches when run against a fresh state for the first frame;
+  `EncodeFrameState::reset` restores the first-frame identity;
+  the no-CRC path (`protection_bit == 1`) round-trips through
+  `decode_frame`; the joint-stereo above-`bound` allocation
+  balance invariant (`nb_steps[0][sb] == nb_steps[1][sb]`) holds;
+  and boosting per-(channel, sub-band) SMR for the low / high
+  sub-band groups never reduces the allocator's spend on the
+  boosted band.
 - §2.4.3.3.4 encoder sub-band sample quantizer (`encoder_samples`
   module). `quantize_sample(class, s'') -> u32` inverts the
   normative decode mapping: divide out the Table 3-B.4 linear

@@ -347,16 +347,50 @@ the §2.4.1.6 audio-data writer (`write_audio_data` /
 `fixed_bit_budget` / `snr_db` / `sample_bits_for`, added in round
 214), and the §2.4.3.3.4 sub-band sample quantizer
 (`quantize_sample` / `quantize_scaled` / `write_triplet` /
-`write_triplet_scaled`, added in round 220) are in place. The
-encoder's remaining piece is the per-frame top-level orchestrator
-that pulls PCM through the analysis filterbank, runs the
-psychoacoustic model (Annex D Models 1 / 2, informative) to
-compute per-(channel, subband) SMR, calls `allocate_bits` →
-`compute_scalefactors` → `select_scfsi` → `write_audio_data` →
-`write_triplet_scaled` × `36 × sblimit × channels`, emits the
-§2.4.1.4 CRC-16 over the protected fields, and prepends the
-§2.4.1.3 header — i.e. the encoder's counterpart to
-`decode_frame`.
+`write_triplet_scaled`, added in round 220) are in place, and the
+round-227 §2.4 / Annex C frame-level encode orchestrator
+(`encode_frame` / `encode_frame_with` / `EncodeFrameState` /
+`EncodeError`, `encoder_frame` module) ties them together. The
+remaining piece is the §D.1 / §D.2 psychoacoustic model: the
+encoder accepts a caller-supplied `SmrTable` (per-(channel,
+sub-band) signal-to-mask ratio in dB) so a real perceptual model
+can be slotted in later; a constant 0 dB table produces a
+syntactically-valid bit-allocated frame whose subjective quality
+is rate-driven only.
+
+**Round 227 (2026-06-04)** added the §2.4 / Annex C frame-level
+encode orchestrator (`encoder_frame` module). `encode_frame(header,
+pcm, smr_db, banc) -> Result<Vec<u8>, EncodeError>` pulls the
+previously-landed encoder primitives together into a single
+`pcm-in → byte-stream-out` call: §C.1.3 analysis filterbank →
+§C.1.5.2.6 scalefactor extraction per (channel, sub-band, granule)
+→ §C.1.5.2.7 bit allocation against the supplied `SmrTable` →
+§C.1.5.2.5 / Table C.4 SCFSI selection (rewriting
+`audio.scalefactor[ch][sb]` to the Table C.4 `used` triple and
+populating `audio.scfsi[ch][sb]`) → §2.4.1.3 header bytes →
+§2.4.1.4 CRC slot (reserved, patched after the protected region
+exists) → §2.4.1.6 audio-data section → §2.4.3.3.4 sample
+codewords in the spec's `(sample_gr, sb, ch)` order → §2.4.1.10
+`banc` ancillary reservation → zero-padding to
+`header.frame_size_bytes()` → §2.4.3.1 CRC-16 patch (extracting
+the protected region from the just-emitted bytes and writing the
+16 bits into the reserved slot when `protection_bit == 0`).
+`encode_frame_with(header, pcm, smr_db, banc, &mut state)` takes
+a caller-supplied `EncodeFrameState` whose per-channel
+`AnalysisFilterbank` X ring buffers persist across successive
+frames — the encoder dual of `frame::FrameDecodeState`;
+`EncodeFrameState::reset` re-zeros every channel's X buffer on a
+seek / discontinuity. The emitted frame is exactly
+`header.frame_size_bytes()` bytes long; the bytes round-trip
+through `frame::decode_frame` to recover the same header, the
+same `nb_steps` table, and a per-channel PCM vector of
+`frame::PCM_SAMPLES_PER_CHANNEL` samples. The §2.4.3.1 CRC verifies
+on the decode side; flipping any CRC-payload bit afterwards makes
+`decode_frame` reject the frame with `FrameError::CrcMismatch`.
+`EncodeError` wraps the sub-stage errors (`HeaderError`,
+`BitAllocError`, `AudioDataWriteError`, `SampleWriteError`) plus
+PCM-shape validation (`BadPcmChannelCount` /
+`BadPcmLen`).
 
 **Round 220 (2026-06-03)** added the §2.4.3.3.4 encoder sub-band
 sample quantizer (`encoder_samples` module). `quantize_sample(class,

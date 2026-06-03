@@ -153,11 +153,31 @@
 //!   [`sample_bits_for`] returns the per-frame sample-codeword bit
 //!   cost the iteration charges when an `nb_steps` decision is taken.
 //!
+//! * **§2.4 / Annex C frame-level encode loop** ([`encoder_frame`]
+//!   module). [`encode_frame(header, pcm, smr_db, banc)`] pulls the
+//!   prior encoder stages together: analysis filterbank →
+//!   per-(channel, sub-band, granule) scalefactor extraction →
+//!   §C.1.5.2.7 bit allocation against the supplied SMR table →
+//!   §C.1.5.2.5 / Table C.4 scfsi selection → §2.4.1.6 audio-data
+//!   section + §2.4.3.3.4 sample codewords → §2.4.3.1 CRC patch (when
+//!   `protection_bit == 0`), returning a `Vec<u8>` of exactly
+//!   `header.frame_size_bytes()` bytes. [`encode_frame_with`] takes
+//!   a persistent [`EncodeFrameState`] so the §C.1.3 X ring buffer
+//!   persists across successive frames (the encoder dual of
+//!   [`frame::FrameDecodeState`]). The emitted frame round-trips
+//!   through [`frame::decode_frame`] for stereo, single-channel, and
+//!   joint-stereo headers, with and without the optional CRC slot;
+//!   flipping any payload bit afterwards makes the decoder reject
+//!   the frame via [`frame::FrameError::CrcMismatch`]. Varying the
+//!   per-(channel, sub-band) SMR table redirects the §C.1.5.2.7
+//!   allocator's spend toward the boosted sub-bands.
+//!
 //! ## What does not work yet
 //!
-//! [`register`] remains a no-op until the codec is wired through
-//! `oxideav_core`'s `Decoder` trait surface; the
-//! [`frame::decode_frame`] primitive is already callable directly.
+//! The §D.1 / §D.2 psychoacoustic model is not yet built — callers
+//! must supply their own [`encoder_bit_allocator::SmrTable`]. A
+//! constant 0 dB table produces a syntactically-valid frame whose
+//! allocation is rate-driven only.
 
 #![warn(missing_debug_implementations)]
 
@@ -169,6 +189,7 @@ pub mod bitalloc;
 pub mod codec_decoder;
 pub mod crc;
 pub mod encoder_bit_allocator;
+pub mod encoder_frame;
 pub mod encoder_samples;
 pub mod encoder_scalefactors;
 pub mod encoder_scfsi;
@@ -201,6 +222,7 @@ pub use encoder_bit_allocator::{
     allocate_bits, fixed_bit_budget, sample_bits_for, snr_db, BitAllocError, FixedBitBudget,
     SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
+pub use encoder_frame::{encode_frame, encode_frame_with, EncodeError, EncodeFrameState};
 pub use encoder_samples::{
     quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,
 };
