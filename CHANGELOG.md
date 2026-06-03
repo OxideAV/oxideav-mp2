@@ -8,6 +8,55 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- §2.4.3.3.4 encoder sub-band sample quantizer (`encoder_samples`
+  module). `quantize_sample(class, s'') -> u32` inverts the
+  normative decode mapping: divide out the Table 3-B.4 linear
+  formula (`s''' = s''/C − D`), clamp the integer `k = round(s''' ·
+  2^(n−1))` into the legal range for the active class (ungrouped:
+  `[−2^(n−1), 2^(n−1) − 1]`; grouped: `[−2^(n−1), nb_steps − 1 −
+  2^(n−1)]` because §2.4.3.3.4 degrouping yields three digits in
+  `[0, nb_steps)`), encode as `n`-bit two's complement, then
+  re-invert the MSB to match what
+  `crate::requant::requantize_code` would consume. The returned
+  code is the radix-`nlevels` digit for grouped classes and the
+  raw `bits_per_codeword`-bit codeword for ungrouped classes.
+  `quantize_scaled(class, sf_index, s')` divides out the Table
+  3-B.1 multiplier before quantizing (rejects the reserved
+  scalefactor index `63`). `write_triplet(class, &[s''; 3],
+  writer)` drives an `oxideav_core::bits::BitWriter` through one
+  (subband, granule) triplet: for grouped classes it packs the
+  three digits via the radix-`nlevels` rule `combined = s[0] +
+  nlevels·s[1] + nlevels²·s[2]` (exact inverse of
+  `requant::degroup`) and writes one `bits_per_codeword`-bit
+  field; for ungrouped classes it writes three independent
+  `bits_per_codeword`-bit codes. `write_triplet_scaled(class,
+  sf_index, &[s'; 3], writer)` layers the §2.4.3.3.3 Table 3-B.1
+  division on top. The writer advances by exactly the bit count
+  `crate::requant::read_triplet` would consume on the decoder
+  side. 13 new lib tests (202 → 215): every defined raw code of
+  every Table 3-B.4 class round-trips through `requantize_code →
+  quantize_sample` back to itself (the bin-centre identity); an
+  arbitrary `s''` produces a code whose `requantize_code`-decoded
+  bin centre is within one quantization step (`C / 2^(n−1)`); the
+  grouped-class digit never falls outside `[0, nb_steps)`
+  (otherwise `degroup`'s range check would fire); out-of-range
+  positive / negative inputs clamp to `nb_steps − 1` / `0` for
+  grouped and `2^n − 1` / `0` for ungrouped; `group_combined`
+  inverts `requant::degroup` exhaustively for every triple of
+  grouped classes 3 / 5 / 9 (27 + 125 + 729 = 881 combinations
+  walked); `quantize_scaled` reproduces `quantize_sample(s' /
+  factor)` and rejects index 63; `write_triplet` advances the
+  writer by `bits_per_codeword` (grouped) / `3 · bits_per_codeword`
+  (ungrouped); `write_triplet` then `read_triplet` round-trips
+  every bin-centre triplet for nb_steps ∈ {3, 5, 7, 9, 15, 31, 63,
+  127, 255, 511}; `write_triplet_scaled` then `requantize_scaled`
+  round-trips bin-centre triplets across five scalefactor indices
+  (unity, doubling, mid-range, near-max-attenuation); the
+  symmetric input / code property around the zero point holds
+  (s'' = C·D maps to code = 2^(n−1)); and every level triplet of
+  every grouped class round-trips through write → read exhaustively
+  (3³ + 5³ + 9³ = 881 triplets).
+
 - §C.1.5.2.7 encoder iterative bit-allocator (`encoder_bit_allocator`
   module). `allocate_bits(&FrameHeader, &SmrTable, banc) ->
   Result<AudioData, BitAllocError>` runs the Annex C iterative loop:

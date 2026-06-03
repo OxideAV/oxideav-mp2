@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-202 lib tests + 6 LSF integration tests + 14 malformed-input
+215 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -342,17 +342,68 @@ Annex C polyphase analysis filterbank
 §C.1.5.2.5 / §C.1.5.2.6 SCFSI Table-C.4 selection (`select_scfsi`
 / `classify_difference` / `ScfsiSelection`, added in round 202),
 the §2.4.1.6 audio-data writer (`write_audio_data` /
-`write_audio_data_with_section_bits`, added in round 208), and
-the §C.1.5.2.7 iterative bit-allocator (`allocate_bits` /
+`write_audio_data_with_section_bits`, added in round 208), the
+§C.1.5.2.7 iterative bit-allocator (`allocate_bits` /
 `fixed_bit_budget` / `snr_db` / `sample_bits_for`, added in round
-214) are in place. The encoder's remaining piece is the per-frame
-top-level orchestrator that pulls PCM through the analysis
-filterbank, runs the psychoacoustic model (Annex D Models 1 / 2,
-informative) to compute per-(channel, subband) SMR, calls
-`allocate_bits` → `compute_scalefactors` → `select_scfsi` →
-`write_audio_data`, emits the §2.4.1.4 CRC-16 over the protected
-fields, and prepends the §2.4.1.3 header — i.e. the encoder's
-counterpart to `decode_frame`.
+214), and the §2.4.3.3.4 sub-band sample quantizer
+(`quantize_sample` / `quantize_scaled` / `write_triplet` /
+`write_triplet_scaled`, added in round 220) are in place. The
+encoder's remaining piece is the per-frame top-level orchestrator
+that pulls PCM through the analysis filterbank, runs the
+psychoacoustic model (Annex D Models 1 / 2, informative) to
+compute per-(channel, subband) SMR, calls `allocate_bits` →
+`compute_scalefactors` → `select_scfsi` → `write_audio_data` →
+`write_triplet_scaled` × `36 × sblimit × channels`, emits the
+§2.4.1.4 CRC-16 over the protected fields, and prepends the
+§2.4.1.3 header — i.e. the encoder's counterpart to
+`decode_frame`.
+
+**Round 220 (2026-06-03)** added the §2.4.3.3.4 encoder sub-band
+sample quantizer (`encoder_samples` module). `quantize_sample(class,
+s'') -> u32` is the documented arithmetic inverse of the
+§2.4.3.3.4 decode mapping: divide out the Table 3-B.4 linear
+formula (`s''' = s''/C − D`), clamp the integer `k = round(s''' ·
+2^(n−1))` into the legal range for the active class (ungrouped:
+`[−2^(n−1), 2^(n−1) − 1]`; grouped: `[−2^(n−1), nb_steps − 1 −
+2^(n−1)]`, narrower because §2.4.3.3.4 degrouping yields three
+digits in `[0, nb_steps)`), encode as `n`-bit two's complement,
+then re-invert the MSB so the returned code is exactly what
+`requant::requantize_code` would consume — the radix-`nlevels`
+digit for a grouped class, the raw `bits_per_codeword`-bit
+codeword for an ungrouped class. `write_triplet(class, &[s''; 3],
+writer)` drives an `oxideav_core::bits::BitWriter` through one
+(subband, granule) triplet: grouped classes pack the three digits
+via the radix-`nlevels` rule (exact inverse of `requant::degroup`)
+and emit one `bits_per_codeword`-bit field; ungrouped classes emit
+three independent `bits_per_codeword`-bit codes. The writer
+advances by exactly the bit count `requant::read_triplet` would
+consume on the decoder side. `quantize_scaled` /
+`write_triplet_scaled` layer the §2.4.3.3.3 Table 3-B.1 division
+on top (rejects the reserved index `63` as
+`SampleWriteError::ReservedScalefactorIndex`). 13 new lib tests
+(202 → 215): every defined raw code of every Table 3-B.4 class
+round-trips through `requantize_code → quantize_sample` back to
+itself (the bin-centre identity); an arbitrary `s''` produces a
+code whose `requantize_code`-decoded bin centre is within one
+quantization step (`C / 2^(n−1)`) of the input; the grouped-class
+digit never falls outside `[0, nb_steps)` (otherwise `degroup`'s
+range check would fire); out-of-range positive / negative inputs
+clamp to `nb_steps − 1` / `0` for grouped and `2^n − 1` / `0` for
+ungrouped; `group_combined` inverts `requant::degroup` exhaustively
+for every triple of grouped classes 3 / 5 / 9 (27 + 125 + 729 =
+881 combinations walked); `quantize_scaled` reproduces
+`quantize_sample(s' / factor)` and rejects the reserved index 63;
+`write_triplet` advances the writer by `bits_per_codeword`
+(grouped) / `3 × bits_per_codeword` (ungrouped); `write_triplet`
+then `read_triplet` round-trips every bin-centre triplet for
+`nb_steps ∈ {3, 5, 7, 9, 15, 31, 63, 127, 255, 511}`;
+`write_triplet_scaled` then `requantize_scaled` round-trips
+bin-centre triplets across five scalefactor indices (unity,
+doubling, mid-range, near-max-attenuation); the symmetric input /
+code property around the zero point holds (`s'' = C·D` maps to
+code `= 2^(n−1)`); and every level triplet of every grouped class
+round-trips through write → read exhaustively (3³ + 5³ + 9³ = 881
+triplets).
 
 **Round 214 (2026-06-03)** added the §C.1.5.2.7 encoder iterative
 bit-allocator (`encoder_bit_allocator` module). `allocate_bits(&FrameHeader,

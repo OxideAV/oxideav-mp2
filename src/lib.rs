@@ -123,6 +123,21 @@
 //!   honoured to within 1 ULP at the 9-decimal-digit grid (cross-
 //!   checked by [`tables_analysis::tests::c_matches_d_over_32_within_rounding`]).
 //!
+//! * **§2.4.3.3.4 encoder sub-band sample quantizer**
+//!   ([`encoder_samples`] module). [`quantize_sample`] inverts the
+//!   normative decode mapping: divide out the Table 3-B.4 linear
+//!   formula (`s''' = s''/C − D`), clamp into the legal `k` range
+//!   for the active class (ungrouped: `[−2^(n−1), 2^(n−1) − 1]`;
+//!   grouped: `[−2^(n−1), nb_steps − 1 − 2^(n−1)]`), encode as
+//!   `n`-bit two's complement, then re-invert the MSB to match
+//!   [`crate::requant::requantize_code`]'s consumption. For grouped
+//!   classes the three per-triplet digits are packed via the radix-
+//!   `nlevels` rule (the inverse of [`crate::requant::degroup`]).
+//!   [`write_triplet`] / [`write_triplet_scaled`] drive a
+//!   `oxideav_core::bits::BitWriter` through one (subband, granule)
+//!   triplet, advancing it by the same
+//!   bit count [`crate::requant::read_triplet`] would consume.
+//!
 //! * **§C.1.5.2.7 encoder iterative bit-allocator**
 //!   ([`encoder_bit_allocator`] module). [`allocate_bits`] runs the
 //!   informative Annex C iterative loop end-to-end against a
@@ -154,6 +169,7 @@ pub mod bitalloc;
 pub mod codec_decoder;
 pub mod crc;
 pub mod encoder_bit_allocator;
+pub mod encoder_samples;
 pub mod encoder_scalefactors;
 pub mod encoder_scfsi;
 pub mod frame;
@@ -184,6 +200,9 @@ pub use crc::{
 pub use encoder_bit_allocator::{
     allocate_bits, fixed_bit_budget, sample_bits_for, snr_db, BitAllocError, FixedBitBudget,
     SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
+};
+pub use encoder_samples::{
+    quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,
 };
 pub use encoder_scalefactors::{
     compute_scalefactors, extract_scalefactor_index, pick_scalefactor_index,
