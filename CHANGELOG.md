@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- §2.4.1.8 `ancillary_data()` emission on the Layer II encoder
+  (`encoder_frame` module). Two new public entry points,
+  `encode_frame_with_ancillary(header, pcm, smr_db, banc, ancillary)`
+  and `encode_frame_with_state_and_ancillary(header, pcm, smr_db,
+  banc, ancillary, &mut state)`, copy a caller-supplied
+  `ancillary_data()` byte payload into the §2.4.2.1 frame tail that
+  begins immediately after the §2.4.1.6 audio-data + §2.4.3.3.4
+  sample-codeword region. The payload starts on the first byte
+  boundary past the sample region (the encoder calls
+  `BitWriter::align_to_byte` before the copy so the §2.4.1.8 tail is
+  always byte-granular regardless of how the §2.4.3.3.4 codewords
+  ended). Any frame bytes the payload does not fill are zero-padded
+  so the byte count still matches `header.frame_size_bytes()`. The
+  caller's `banc` reservation continues to steer the §C.1.5.2.7
+  iterative allocator — a typical call picks `banc >= ancillary.len()
+  * 8` so the allocator leaves at least the payload-sized tail
+  unfilled. A new `EncodeError::AncillaryTooLarge { space, got }`
+  variant surfaces over-long payloads with both the actual tail
+  capacity (`space`) and the rejected length (`got`); the legacy
+  `encode_frame` / `encode_frame_with` entry points are now thin
+  shims over the same shared `encode_frame_inner` implementation,
+  passing `ancillary = &[]`. The §2.4.3.1 CRC patch runs after the
+  ancillary copy and continues to verify clean — Annex B Table B.5
+  protects the second half of the header + §2.4.1.6 audio-data
+  (allocation + scfsi) but excludes the §2.4.1.8 tail, so the
+  stored CRC word at frame bytes 4..6 is byte-identical to the
+  no-ancillary reference frame for any payload. Six new lib tests
+  (230 → 236): empty-ancillary call matches `encode_frame` byte-
+  for-byte; a 32-byte distinctive payload lands at the §2.4.1.8 tail
+  start (located via an all-`0xCC` marker-frame probe) and the
+  trailing pad is zero; the §2.4.3.1 CRC word matches between the
+  empty-ancillary and non-empty-ancillary frames (Table B.5
+  exclusion); a frame-size-long payload surfaces `AncillaryTooLarge`
+  with `got == huge.len()` and `space < got`; the stateful entry
+  point preserves the §C.1.3 X ring-buffer evolution (same input +
+  same payload + fresh state yields byte-identical first frames; a
+  second frame from the persistent state differs); and a payload
+  sized exactly `space` fits while `space + 1` is rejected with the
+  same reported `space` value.
 - §2.4 / Annex C frame-level encode loop (`encoder_frame` module).
   `encode_frame(header, pcm, smr_db, banc) -> Result<Vec<u8>,
   EncodeError>` pulls the previously-landed encoder primitives

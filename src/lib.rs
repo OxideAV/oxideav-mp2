@@ -172,6 +172,22 @@
 //!   per-(channel, sub-band) SMR table redirects the §C.1.5.2.7
 //!   allocator's spend toward the boosted sub-bands.
 //!
+//! * **§2.4.1.8 `ancillary_data()` emission** on the encoder
+//!   ([`encoder_frame`] module). [`encode_frame_with_ancillary`] and
+//!   [`encode_frame_with_state_and_ancillary`] accept an `ancillary:
+//!   &[u8]` payload and copy it into the §2.4.2.1 frame tail that
+//!   begins immediately after the §2.4.1.6 audio-data + §2.4.3.3.4
+//!   sample-codeword region (the copy starts on the next byte
+//!   boundary so the tail is byte-granular). The §C.1.5.2.7 `banc`
+//!   reservation still steers the allocator — pass
+//!   `banc >= ancillary.len() * 8` to guarantee the tail is wide
+//!   enough. Over-long payloads surface
+//!   [`EncodeError::AncillaryTooLarge`] carrying both the actual
+//!   tail capacity (`space`) and the rejected length (`got`). The
+//!   §2.4.3.1 CRC patch is byte-identical between the empty-
+//!   ancillary and non-empty-ancillary frames — Annex B Table B.5
+//!   does not protect the §2.4.1.8 tail.
+//!
 //! ## What does not work yet
 //!
 //! The §D.1 / §D.2 psychoacoustic model is not yet built — callers
@@ -222,7 +238,10 @@ pub use encoder_bit_allocator::{
     allocate_bits, fixed_bit_budget, sample_bits_for, snr_db, BitAllocError, FixedBitBudget,
     SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
-pub use encoder_frame::{encode_frame, encode_frame_with, EncodeError, EncodeFrameState};
+pub use encoder_frame::{
+    encode_frame, encode_frame_with, encode_frame_with_ancillary,
+    encode_frame_with_state_and_ancillary, EncodeError, EncodeFrameState,
+};
 pub use encoder_samples::{
     quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,
 };

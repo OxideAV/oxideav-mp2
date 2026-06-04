@@ -120,6 +120,21 @@ pub enum EncodeError {
         /// The offending `nb_steps`.
         nb_steps: u32,
     },
+    /// The caller-supplied §2.4.1.8 `ancillary_data()` payload does not
+    /// fit in the §2.4.2.1 frame tail that remains after the §2.4.1.6
+    /// audio-data + §2.4.3.3.4 sample-codeword region. The §2.4.2.8
+    /// "no_of_ancillary_bits = frame_bits − header − error_check −
+    /// audio_data" identity puts an upper bound on the payload; this
+    /// error is raised when `ancillary.len() > space`. `space` is the
+    /// byte capacity of the §2.4.1.8 tail (computed after byte-
+    /// alignment of the §2.4.3.3.4 sample region); `got` is the byte
+    /// length of the rejected payload.
+    AncillaryTooLarge {
+        /// Number of bytes the §2.4.1.8 tail can hold for this frame.
+        space: usize,
+        /// Byte length of the rejected payload.
+        got: usize,
+    },
 }
 
 impl core::fmt::Display for EncodeError {
@@ -144,6 +159,10 @@ impl core::fmt::Display for EncodeError {
             EncodeError::UnknownQuantClass { ch, sb, nb_steps } => write!(
                 f,
                 "encode_frame: allocator produced unknown nb_steps={nb_steps} at (ch={ch}, sb={sb})"
+            ),
+            EncodeError::AncillaryTooLarge { space, got } => write!(
+                f,
+                "encode_frame: ancillary_data() payload of {got} bytes exceeds the {space}-byte §2.4.1.8 tail capacity"
             ),
         }
     }
@@ -247,7 +266,7 @@ pub fn encode_frame(
     smr_db: &SmrTable,
     banc: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_frame_with(header, pcm, smr_db, banc, &mut EncodeFrameState::new())
+    encode_frame_inner(header, pcm, smr_db, banc, &[], &mut EncodeFrameState::new())
 }
 
 /// Like [`encode_frame`] but with caller-supplied
@@ -258,6 +277,85 @@ pub fn encode_frame_with(
     pcm: &[Vec<f64>],
     smr_db: &SmrTable,
     banc: u32,
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(header, pcm, smr_db, banc, &[], state)
+}
+
+/// Encode one Layer II frame and copy a §2.4.1.8 `ancillary_data()`
+/// payload into the §2.4.2.1 frame tail that begins immediately after
+/// the §2.4.1.6 audio-data + §2.4.3.3.4 sample-codeword region.
+///
+/// The §2.4.2.8 semantic identity
+/// `no_of_ancillary_bits = (frame bits) − (header + error_check +
+/// audio_data)` bounds the available tail capacity. The capacity is
+/// computed after byte-aligning the §2.4.3.3.4 sample region, so the
+/// payload always starts on a whole byte. Bytes the payload does not
+/// fill are zero-padded; an over-long payload is rejected with
+/// [`EncodeError::AncillaryTooLarge`] carrying both the actual
+/// capacity (`space`) and the rejected length (`got`).
+///
+/// The §C.1.5.2.7 bit-allocator's `banc` reservation continues to
+/// apply: callers staging an ancillary payload typically pick
+/// `banc >= ancillary.len() * 8` so the allocator leaves at least the
+/// payload-sized tail free; passing `banc == 0` lets the allocator
+/// spend the full data-bit budget, in which case `ancillary` must be
+/// short enough to fit whatever residue the allocator leaves over the
+/// §2.4.2.1 byte rounding.
+///
+/// The §2.4.3.1 CRC patch runs after the ancillary copy and continues
+/// to verify clean — Annex B Table B.5 protects the header second
+/// half + the §2.4.1.6 audio-data section (allocation + scfsi),
+/// *not* the §2.4.1.8 tail, so the stored CRC is byte-identical to
+/// what an empty-ancillary encode would produce.
+///
+/// Passing `ancillary = &[]` is equivalent to calling
+/// [`encode_frame`].
+pub fn encode_frame_with_ancillary(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    smr_db: &SmrTable,
+    banc: u32,
+    ancillary: &[u8],
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(
+        header,
+        pcm,
+        smr_db,
+        banc,
+        ancillary,
+        &mut EncodeFrameState::new(),
+    )
+}
+
+/// Like [`encode_frame_with_ancillary`] but with caller-supplied
+/// [`EncodeFrameState`] so the §C.1.3 X ring buffer persists across
+/// successive frames.
+///
+/// Passing `ancillary = &[]` is equivalent to calling
+/// [`encode_frame_with`].
+pub fn encode_frame_with_state_and_ancillary(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    smr_db: &SmrTable,
+    banc: u32,
+    ancillary: &[u8],
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(header, pcm, smr_db, banc, ancillary, state)
+}
+
+/// Shared implementation of the four public encode entry points.
+///
+/// All bit-stream assembly happens here so the §2.4.1.8 ancillary copy
+/// is wired in exactly one place; the entry points are thin shims that
+/// pick the `ancillary` slice and the state instance.
+fn encode_frame_inner(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    smr_db: &SmrTable,
+    banc: u32,
+    ancillary: &[u8],
     state: &mut EncodeFrameState,
 ) -> Result<Vec<u8>, EncodeError> {
     let channels = header.channels();
@@ -422,22 +520,58 @@ pub fn encode_frame_with(
         }
     }
 
-    // §2.4.1.10 ancillary-data reservation: the §C.1.5.2.7
-    // allocator subtracted `banc` from `adb` so this many bits at
-    // the tail of the frame are reserved as zeros.
-    for _ in 0..banc {
-        writer.write_bit(false);
+    // §2.4.1.8 ancillary_data() — the spec's tail bit-loop:
+    //
+    //   if ((layer == 1) || (layer == 2))
+    //       for (b = 0; b < no_of_ancillary_bits; b++)
+    //           ancillary_bit                       1   bslbf
+    //
+    // §2.4.2.8 fixes `no_of_ancillary_bits` as the frame-byte budget
+    // minus the header / error-check / audio-data spend. The
+    // §C.1.5.2.7 allocator's `banc` reservation already steers the
+    // bit budget so at least `banc` tail bits are left free.
+    //
+    // We first byte-align the §2.4.3.3.4 sample region; any partial
+    // trailing bits left by the sample-codeword loop are padded with
+    // zeros up to the next byte boundary so the §2.4.1.8 tail starts
+    // on a whole byte. (The §2.4.1.8 syntax is bit-loop, but in
+    // practice the §2.4.2.1 frame is byte-granular and so is every
+    // §2.4.1.6 field we wrote before this point; the only sub-byte
+    // residue is the tail of the sample region.)
+    writer.align_to_byte();
+
+    let audio_data_end = writer.byte_len();
+    debug_assert!(
+        audio_data_end <= frame_size,
+        "encode_frame: §2.4.1.6 + §2.4.3.3.4 region exceeded frame_size_bytes(); \
+         allocator's banc / sblimit accounting is broken"
+    );
+    let ancillary_capacity = frame_size - audio_data_end;
+    if ancillary.len() > ancillary_capacity {
+        return Err(EncodeError::AncillaryTooLarge {
+            space: ancillary_capacity,
+            got: ancillary.len(),
+        });
     }
 
-    // Pad the remainder of the frame with zeros so the byte count
-    // equals `header.frame_size_bytes()`. The allocator's
-    // worst-case scalefactor-bit reservation is always at least as
-    // large as the actual `bscf` cost, so some bits are typically
-    // unused and become trailing-zero padding (the §2.4.1.10
-    // ancillary section absorbs them on the parse side).
+    // Copy the caller-supplied §2.4.1.8 payload into the tail. Any
+    // bytes the payload does not fill are zero-padded so the §2.4.2.1
+    // frame-byte budget is met exactly.
+    for &b in ancillary {
+        writer.write_byte(b);
+    }
     while writer.byte_len() < frame_size {
         writer.write_byte(0);
     }
+
+    // The `banc` parameter remains the allocator-side reservation
+    // hint per §C.1.5.2.7; with an ancillary payload the caller
+    // typically picks `banc >= ancillary.len() * 8` so the allocator
+    // leaves at least the payload-sized tail unfilled. The value is
+    // not re-checked here because the §C.1.5.2.7 `allocate_bits`
+    // call above already honours it when it bounds `adb`; the
+    // AncillaryTooLarge branch above is the post-allocation sanity
+    // check.
 
     let mut bytes = writer.into_bytes();
 
@@ -906,5 +1040,233 @@ mod tests {
             sum_high_band(&nb_high) >= sum_high_band(&nb_flat),
             "boosting high SMR did not steer allocation toward the high band"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // §2.4.1.8 ancillary_data() tests
+    //
+    // The §2.4.2.8 prose puts no_of_ancillary_bits = (frame bits) −
+    // (header + error_check + audio_data). With a §C.1.5.2.7 banc
+    // reservation in hand, the encoder leaves at least `banc` bits at
+    // the tail free; we use `banc >= ancillary.len() * 8` to ensure
+    // the payload fits without depending on the allocator's
+    // post-budget residue.
+    // ----------------------------------------------------------------
+
+    /// Byte-range of the §2.4.1.8 tail in an emitted frame: starts
+    /// right after the §2.4.1.6 + §2.4.3.3.4 region, ends at
+    /// `frame_size_bytes`. Used by the ancillary tests to inspect the
+    /// payload byte-for-byte without re-running the encoder pipeline.
+    ///
+    /// We approximate the tail start by re-encoding the same frame
+    /// with an all-`0xCC` payload of capacity `frame_size`; the first
+    /// `0xCC` byte marks the tail boundary. The §2.4.1.6 + §2.4.3.3.4
+    /// region never contains `0xCC` as a byte-aligned marker because
+    /// the encoder zero-pads to byte alignment before the ancillary
+    /// copy, so the first `0xCC` in the frame is unambiguously the
+    /// tail start.
+    fn locate_ancillary_tail_start(
+        header: &FrameHeader,
+        pcm: &[Vec<f64>],
+        smr: &SmrTable,
+        banc: u32,
+    ) -> usize {
+        let frame_size = header.frame_size_bytes();
+        let mut marker = vec![0xCCu8; frame_size];
+        // Try progressively smaller markers until the encoder accepts
+        // one. We do not actually need a tight fit — once we find a
+        // marker that encodes successfully, the first 0xCC byte in the
+        // emitted frame is the tail start.
+        let bytes = loop {
+            match encode_frame_with_ancillary(header, pcm, smr, banc, &marker) {
+                Ok(b) => break b,
+                Err(EncodeError::AncillaryTooLarge { space, .. }) => {
+                    marker.truncate(space);
+                }
+                Err(other) => panic!("encode_frame_with_ancillary failed: {other:?}"),
+            }
+        };
+        bytes
+            .iter()
+            .position(|&b| b == 0xCC)
+            .expect("ancillary marker not found in emitted frame")
+    }
+
+    #[test]
+    fn empty_ancillary_matches_legacy_encode_frame() {
+        // Calling `encode_frame_with_ancillary` with `&[]` must
+        // produce bit-identical bytes to the legacy `encode_frame`
+        // for any header / pcm / smr / banc combination.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_200.0, 0.35);
+        let smr = zero_smr();
+        let legacy = encode_frame(&header, &pcm, &smr, 0).expect("legacy encode");
+        let new =
+            encode_frame_with_ancillary(&header, &pcm, &smr, 0, &[]).expect("ancillary encode");
+        assert_eq!(legacy, new);
+    }
+
+    #[test]
+    fn ancillary_bytes_land_in_frame_tail() {
+        // A small distinctive ancillary payload is copied verbatim
+        // into the §2.4.1.8 tail.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_500.0, 0.4);
+        let smr = zero_smr();
+        let payload: Vec<u8> = (0..32u8)
+            .map(|i| i.wrapping_mul(0x37).wrapping_add(0x11))
+            .collect();
+        // banc covers the payload + a safety margin so the allocator
+        // leaves a tail wide enough for the payload regardless of how
+        // the §C.1.5.2.7 marginal-cost loop behaves on the input.
+        let banc = (payload.len() as u32) * 8 + 32;
+        let bytes = encode_frame_with_ancillary(&header, &pcm, &smr, banc, &payload)
+            .expect("encode with ancillary");
+        assert_eq!(bytes.len(), header.frame_size_bytes());
+
+        // Locate the §2.4.1.8 tail by encoding the same input with a
+        // marker payload, then verifying that the same offset in our
+        // real-payload frame matches the real payload byte-for-byte.
+        let tail_start = locate_ancillary_tail_start(&header, &pcm, &smr, banc);
+        assert!(tail_start + payload.len() <= bytes.len());
+        assert_eq!(&bytes[tail_start..tail_start + payload.len()], &payload[..]);
+
+        // Trailing bytes past the payload (if any) must be zero.
+        for &b in &bytes[tail_start + payload.len()..] {
+            assert_eq!(b, 0, "ancillary trailing pad must be zero");
+        }
+
+        // The §2.4.3.1 CRC patch is over the Annex B Table B.5
+        // protected region (header bits 16..31 + allocation + scfsi),
+        // which does NOT include the §2.4.1.8 tail. The decoder must
+        // therefore accept this frame.
+        let _decoded = decode_frame(&bytes).expect("decode ancillary frame");
+    }
+
+    #[test]
+    fn ancillary_crc_matches_empty_ancillary_frame() {
+        // The two-byte §2.4.3.1 CRC slot must be byte-identical
+        // between an empty-ancillary frame and the same frame with a
+        // non-empty payload — Annex B Table B.5 excludes the §2.4.1.8
+        // tail from the CRC.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 800.0, 0.5);
+        let smr = zero_smr();
+        let payload: Vec<u8> = (0..48u8).map(|i| i ^ 0xA5).collect();
+        let banc = (payload.len() as u32) * 8 + 32;
+        let empty = encode_frame_with_ancillary(&header, &pcm, &smr, banc, &[]).unwrap();
+        let with_anc = encode_frame_with_ancillary(&header, &pcm, &smr, banc, &payload).unwrap();
+        // bytes [4, 6) hold the §2.4.3.1 CRC word when protection_bit
+        // == false (the canonical_stereo_header convention).
+        assert_eq!(empty[4..6], with_anc[4..6]);
+    }
+
+    #[test]
+    fn oversized_ancillary_is_rejected() {
+        // A payload larger than the §2.4.1.8 tail capacity surfaces
+        // `AncillaryTooLarge` with both `space` and `got` populated.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.3);
+        let smr = zero_smr();
+        // A payload sized to the full frame is guaranteed not to fit
+        // because the header + CRC slot + audio_data already consume
+        // a non-trivial prefix.
+        let huge = vec![0xFFu8; header.frame_size_bytes()];
+        match encode_frame_with_ancillary(&header, &pcm, &smr, 0, &huge) {
+            Err(EncodeError::AncillaryTooLarge { space, got }) => {
+                assert!(space < huge.len(), "space must be < got = huge.len()");
+                assert_eq!(got, huge.len());
+            }
+            other => panic!("expected AncillaryTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ancillary_with_state_round_trips() {
+        // The state-carrying entry point preserves the §C.1.3 X ring
+        // buffer across successive frames just like
+        // `encode_frame_with`; piping an ancillary payload through it
+        // must not perturb the cross-frame identity.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.4);
+        let smr = zero_smr();
+        let payload = b"oxideav-mp2 ancillary tail";
+
+        let mut state_a = EncodeFrameState::new();
+        let f1_a = encode_frame_with_state_and_ancillary(
+            &header,
+            &pcm,
+            &smr,
+            (payload.len() as u32) * 8 + 32,
+            payload,
+            &mut state_a,
+        )
+        .unwrap();
+        // The first-frame X buffer starts at zero in both states, so
+        // the same input + same payload + same banc yields byte-
+        // identical frames.
+        let mut state_b = EncodeFrameState::new();
+        let f1_b = encode_frame_with_state_and_ancillary(
+            &header,
+            &pcm,
+            &smr,
+            (payload.len() as u32) * 8 + 32,
+            payload,
+            &mut state_b,
+        )
+        .unwrap();
+        assert_eq!(f1_a, f1_b);
+
+        // The frame decodes cleanly through the §2.4.3.1 CRC check.
+        let _decoded = decode_frame(&f1_a).expect("decode stateful ancillary frame");
+
+        // A second frame from `state_a` differs from the first frame
+        // (X buffer accumulated content), so the per-call ancillary
+        // path is not accidentally caching anything that breaks the
+        // §C.1.3 state evolution.
+        let f2_a = encode_frame_with_state_and_ancillary(
+            &header,
+            &pcm,
+            &smr,
+            (payload.len() as u32) * 8 + 32,
+            payload,
+            &mut state_a,
+        )
+        .unwrap();
+        assert_ne!(f1_a, f2_a);
+    }
+
+    #[test]
+    fn ancillary_too_large_reports_correct_space_and_got() {
+        // Probe the AncillaryTooLarge `space` field by feeding a
+        // payload exactly `space + 1` long and confirming the error
+        // reports the same `space` and the new `got`.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.3);
+        let smr = zero_smr();
+        // First find the real `space` by overflowing.
+        let probe = vec![0u8; header.frame_size_bytes()];
+        let space = match encode_frame_with_ancillary(&header, &pcm, &smr, 0, &probe) {
+            Err(EncodeError::AncillaryTooLarge { space, .. }) => space,
+            other => panic!("expected AncillaryTooLarge, got {other:?}"),
+        };
+        // A payload sized exactly `space` must fit.
+        let fits = vec![0xA5u8; space];
+        let ok = encode_frame_with_ancillary(&header, &pcm, &smr, 0, &fits)
+            .expect("space bytes must fit");
+        assert_eq!(ok.len(), header.frame_size_bytes());
+        // A payload sized `space + 1` must not fit and must report
+        // the same `space` value.
+        let over = vec![0x5Au8; space + 1];
+        match encode_frame_with_ancillary(&header, &pcm, &smr, 0, &over) {
+            Err(EncodeError::AncillaryTooLarge {
+                space: reported,
+                got,
+            }) => {
+                assert_eq!(reported, space);
+                assert_eq!(got, space + 1);
+            }
+            other => panic!("expected AncillaryTooLarge, got {other:?}"),
+        }
     }
 }
