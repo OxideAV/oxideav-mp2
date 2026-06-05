@@ -211,6 +211,7 @@ pub mod encoder_scalefactors;
 pub mod encoder_scfsi;
 pub mod frame;
 pub mod header;
+pub mod psy;
 pub mod requant;
 pub mod synthesis;
 pub mod tables;
@@ -260,6 +261,11 @@ pub use header::{
     encode_bitrate, encode_bitrate_lsf, encode_sampling_frequency, encode_sampling_frequency_lsf,
     find_sync, is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, HeaderError, Mode,
     ModeExtension, SYNCWORD,
+};
+pub use psy::{
+    global_masking_threshold_db, individual_masking_threshold_db, masking_function_vf,
+    masking_index_non_tonal, masking_index_tonal, Masker, MaskerKind, MASKING_FUNCTION_DZ_HI,
+    MASKING_FUNCTION_DZ_LO,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};

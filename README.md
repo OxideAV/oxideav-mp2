@@ -356,7 +356,50 @@ encoder accepts a caller-supplied `SmrTable` (per-(channel,
 sub-band) signal-to-mask ratio in dB) so a real perceptual model
 can be slotted in later; a constant 0 dB table produces a
 syntactically-valid bit-allocated frame whose subjective quality
-is rate-driven only.
+is rate-driven only. The masker → masking-threshold half of
+Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
+module — see **Round 238** below.
+
+**Round 238 (2026-06-05)** added Annex D Model 1 §D.1 Step 6
+masking-function `vf` and §D.1 Step 7 global-masking-threshold
+`LTg` primitives (`psy` module). Five new pure functions land
+the masker → masking-threshold half of Model 1:
+`masking_index_tonal(z_j_bark)` reproduces the verbatim spec
+equation `av_tm = -1.525 - 0.275 * z(j) - 4.5` dB;
+`masking_index_non_tonal(z_j_bark)` reproduces
+`av_nm = -1.525 - 0.175 * z(j) - 0.5` dB;
+`masking_function_vf(dz_bark, x_db) -> Option<f64>` is the
+four-branch piecewise function defined on the half-open Bark
+window `[-3, 8)` — outside the window it returns `None` (the
+spec's "masker ignored, `LT = -inf dB`" semantics). The four
+branches are `17·(dz+1) − (0.4·X + 6)` on `[-3, -1)`,
+`(0.4·X + 6)·dz` on `[-1, 0)`, `-17·dz` on `[0, 1)`, and
+`-(dz−1)·(17 − 0.15·X) − 17` on `[1, 8)`; the function is
+continuous at `dz = 0`. `individual_masking_threshold_db(masker,
+z_i_bark)` composes the per-masker individual threshold
+`LT = SPL + av + vf`, returning `None` outside the `vf` window;
+`global_masking_threshold_db(maskers, z_i_bark, ltq_db)` is the
+Step-7 energy sum `LTg(i) = 10·log10( 10^(LTq/10) +
+Σ 10^(LT_j/10) )` over every in-range masker, with the
+threshold-in-quiet `LTq` carried in dB. Two new public types
+(`MaskerKind { Tonal, NonTonal }` and `Masker { kind, z_bark,
+spl_db }`) and two public constants (`MASKING_FUNCTION_DZ_LO =
+-3.0`, `MASKING_FUNCTION_DZ_HI = 8.0`) expose the masker carrier
+and the window endpoints. The primitives operate on
+caller-supplied Bark coordinates — Steps 1..5 of Model 1
+(1024-sample FFT, SPL conversion, tonality classifier,
+decimation / reorganisation, masker selection) remain
+unimplemented because they depend on the PNG-only inner rows of
+Annex D Tables D.1d–f (Layer II threshold-in-quiet) and Tables
+D.2d–f / D.3 / D.4 (Bark / Hz / FFT-line mapping). Eighteen new
+lib tests (236 → 254, all green) validate every piecewise branch
+with hand-computed numeric anchors, the `[-3, 8)` window
+boundaries, continuity at `dz = 0`, the `LT = SPL + av` identity
+at `z(i) = z(j)`, the tonal-below-non-tonal ordering at matched
+parameters, and the four Step-7 invariants: no maskers ⇒
+`LTg = LTq`, distant masker ⇒ `LTg = LTq`, strong local masker
+dominates `LTq`, two equal-power co-located maskers add exactly
+`10·log10(2) ≈ +3.0103` dB.
 
 **Round 234 (2026-06-04)** added §2.4.1.8 `ancillary_data()`
 emission to the Layer II encoder. Two new public entry points

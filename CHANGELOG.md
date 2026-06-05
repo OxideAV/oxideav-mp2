@@ -8,6 +8,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 6 masking-function `vf` and §D.1 Step 7
+  global-masking-threshold `LTg` primitives (`psy` module). Annex D
+  is informative; the encoder's §C.1.5.2.7 iterative bit-allocator
+  needs a per-(channel, sub-band) signal-to-mask-ratio (SMR) table
+  and Models 1 / 2 are the spec's worked examples for producing one.
+  Five new pure functions land the masker → masking-threshold half
+  of Model 1 (Steps 6 and 7):
+  * `masking_index_tonal(z_j_bark) -> f64` reproduces the verbatim
+    spec equation `av_tm = -1.525 - 0.275 * z(j) - 4.5` dB.
+  * `masking_index_non_tonal(z_j_bark) -> f64` reproduces
+    `av_nm = -1.525 - 0.175 * z(j) - 0.5` dB.
+  * `masking_function_vf(dz_bark, x_db) -> Option<f64>` is the
+    four-branch piecewise `vf` defined on the half-open Bark window
+    `[-3, 8)` — outside the window the function returns `None`
+    (the spec's "masker ignored, `LT = -inf dB`" semantics). The
+    four branches are: `17·(dz+1) − (0.4·X + 6)` on `[-3, -1)`,
+    `(0.4·X + 6)·dz` on `[-1, 0)`, `-17·dz` on `[0, 1)`,
+    `-(dz−1)·(17 − 0.15·X) − 17` on `[1, 8)`. Continuous at
+    `dz = 0` (both adjacent branches yield 0 dB).
+  * `individual_masking_threshold_db(masker, z_i_bark) ->
+    Option<f64>` composes the per-masker individual masking
+    threshold `LT = SPL + av + vf`, returning `None` when the
+    Bark distance falls outside the `vf` window.
+  * `global_masking_threshold_db(maskers, z_i_bark, ltq_db) -> f64`
+    is the Step-7 energy sum `LTg(i) = 10·log10( 10^(LTq/10) +
+    Σ 10^(LT_j/10) )` over every in-range masker, with the
+    threshold-in-quiet `LTq` carried in dB.
+  Two new public types — `MaskerKind { Tonal, NonTonal }` and
+  `Masker { kind, z_bark, spl_db }` — and two public constants
+  (`MASKING_FUNCTION_DZ_LO = -3.0`, `MASKING_FUNCTION_DZ_HI = 8.0`)
+  expose the masker carrier and the window endpoints used by the
+  `vf` window guard. The primitives operate on caller-supplied
+  Bark coordinates — Steps 1..5 of Model 1 (1024-sample FFT, SPL
+  conversion, tonality classifier, decimation / reorganisation,
+  masker selection) remain unimplemented because they depend on
+  the PNG-only inner rows of Annex D Tables D.1d–f (Layer II
+  threshold-in-quiet) and Tables D.2d–f / D.3 / D.4 (Bark / Hz /
+  FFT-line mapping) — see DOCS-GAP `#1262`. Eighteen new lib
+  tests (236 → 254, all green) validate every piecewise branch
+  with hand-computed numeric anchors, the `[-3, 8)` window
+  boundaries, continuity at `dz = 0`, the `LT = SPL + av` identity
+  at `z(i) = z(j)`, the tonal-below-non-tonal ordering at matched
+  parameters, and the four Step-7 invariants: no maskers ⇒
+  `LTg = LTq`, distant masker ⇒ `LTg = LTq`, strong local masker
+  dominates `LTq`, two equal-power co-located maskers add exactly
+  `10·log10(2) ≈ +3.0103` dB.
+
 - §2.4.1.8 `ancillary_data()` emission on the Layer II encoder
   (`encoder_frame` module). Two new public entry points,
   `encode_frame_with_ancillary(header, pcm, smr_db, banc, ancillary)`
