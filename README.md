@@ -360,6 +360,51 @@ is rate-driven only. The masker → masking-threshold half of
 Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
 module — see **Round 238** below.
 
+**Round 248 (2026-06-07)** added Annex D Model 1 §D.1 Step 1 Hann
+window and §D.1 Step 4 tonality classifier primitives (`psy` module).
+Five new spec-text-only entry points land the FFT-windowing and the
+tonal/non-tonal labelling halves of Model 1:
+`hann_window_layer2() -> [f64; 1024]` reproduces the verbatim spec
+equation `h(i) = sqrt(8/3) * 0.5 * (1 - cos(2*pi*i/N))` with
+`N = LAYER2_FFT_LEN = 1024` (the spec's Layer II FFT length per the
+PDF page 116 "Technical data of the FFT" table; the front coefficient
+is the spec's RMS-matching normalization for the Hann window's power
+gain). `is_local_maximum(spl_db, k) -> bool` runs the verbatim Step
+4(a) rule `X(k) > X(k - 1) AND X(k) >= X(k + 1)` with the
+asymmetry-preserving strict `>` on the lower side and non-strict
+`>=` on the upper side. `tonal_neighbourhood_layer2(k) ->
+Option<&'static [i32]>` returns the per-`k` Layer II `j`
+neighbourhood (verbatim spec table at PDF p.117): `{-2, +2}` for
+`2 < k < 63`, `{-3, -2, +2, +3}` for `63 <= k < 127`, `{-6, …, -2,
++2, …, +6}` for `127 <= k < 255`, `{-12, …, -2, +2, …, +12}` for
+`255 <= k <= 500`. `is_tonal_layer2(spl_db, k) -> bool` runs the
+verbatim Step 4(b) inequality `X(k) - X(k + j) >= 7 dB` for every
+`j` in the neighbourhood (with `TONALITY_THRESHOLD_DB = 7.0` the
+spec constant) after verifying the Step 4(a) local-maximum
+precondition. `tonal_spl_db(spl_db, k) -> Option<f64>` is the
+three-line power sum `X_tm(k) = 10 * log10(10^(X(k-1)/10) +
+10^(X(k)/10) + 10^(X(k+1)/10))` the spec applies to a confirmed
+tonal line. Two new public constants `LAYER2_FFT_LEN = 1024` and
+`LAYER2_FFT_BINS = 513` expose the FFT working range
+(`k = 0 .. N/2` inclusive). 17 new lib tests (254 → 271): Hann
+window pinned at `h(0) = 0` and `h(N/2) = sqrt(8/3)`, symmetry
+around `i = N/2` at six sampled offsets, and the `[0, sqrt(8/3)]`
+codomain bound across all 1024 samples; local-maximum on a simple
+peak, on a two-bin plateau (left index passes, right index fails by
+the strict `>` rule), and at edge indices (always `false`);
+neighbourhood-row dispatch on each spec boundary (`k = 3, 62, 63,
+126, 127, 254, 255, 500, 501`) with length matching the spec row,
+strict symmetry around `j = 0`, and `j = 0` never present; tonality
+classifier above-threshold acceptance (a clean 50 dB peak), narrow
+below-threshold rejection (6 dB above neighbours), single-neighbour
+rejection (one `j` slot fails by 2 dB), local-maximum-precondition
+enforcement (a non-maximum bin is never tonal), and window-edge
+rejection; tonal-SPL three-equal-power identity (`60 + 60 + 60` →
+`60 + 10·log10(3) ≈ 64.7712`), centre-dominated case (`80` dB peak
+above `0` dB shoulders ≈ 80 dB), edge-returns-None for the first /
+last bin, and monotone-in-power lower-bound (the three-line sum is
+always at least the centre bin's SPL).
+
 **Round 238 (2026-06-05)** added Annex D Model 1 §D.1 Step 6
 masking-function `vf` and §D.1 Step 7 global-masking-threshold
 `LTg` primitives (`psy` module). Five new pure functions land

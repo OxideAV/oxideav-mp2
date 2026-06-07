@@ -9,18 +9,35 @@
 //! ratio (SMR) table, and Models 1 / 2 are the spec's worked
 //! examples for producing one.
 //!
-//! This module lands the §D.1 Step 6 *masking-function* `vf` and the
-//! §D.1 Step 7 *global-masking-threshold* `LTg` primitives — pure
-//! functions of the (masker SPL, masker Bark position, target Bark
-//! position) tuple that compose into the per-target-line individual
-//! masking threshold `LT` and the per-target-line global threshold
-//! `LTg`. Steps 1..5 of Model 1 (the 1024-sample FFT, the
-//! SPL-conversion, the tonality classifier, the decimation /
-//! reorganisation, and the masker-selection passes) read the
-//! PNG-only inner rows of Annex D Tables D.1 / D.2 / D.3 / D.4 and
-//! are not landed yet — they are tracked under the docs-collaborator
-//! Tables D.1a–f / D.3a–c / D.4a–c PNG → text extraction gap (note
-//! `#1262`).
+//! This module lands the spec-text-only halves of §D.1 Model 1:
+//!
+//! * **Step 1 Hann window** ([`hann_window_layer2`]) — the verbatim
+//!   spec equation `h(i) = sqrt(8/3) * 0.5 * (1 - cos(2 * pi * i /
+//!   N))` for the Layer II 1024-sample FFT (`N == 1024`); no table.
+//! * **Step 4(a) local-maxima labelling** ([`is_local_maximum`]) —
+//!   the verbatim spec rule `X(k) > X(k - 1) AND X(k) >= X(k + 1)`.
+//! * **Step 4(b) Layer II tonality test** ([`is_tonal_layer2`]) — the
+//!   verbatim spec rule `X(k) - X(k + j) >= 7 dB` for every `j` in
+//!   the per-`k` neighbourhood ([`tonal_neighbourhood_layer2`]); the
+//!   neighbourhood widths are the verbatim spec table at PDF p.117
+//!   (printed 111).
+//! * **Step 4(b) tonal-component SPL** ([`tonal_spl_db`]) — the
+//!   three-line power sum `X_tm = 10 * log10(10^(X(k-1)/10) +
+//!   10^(X(k)/10) + 10^(X(k+1)/10))`.
+//! * **Step 6 masker indices and masking function `vf`**
+//!   ([`masking_index_tonal`], [`masking_index_non_tonal`],
+//!   [`masking_function_vf`]) and the per-masker individual masking
+//!   threshold ([`individual_masking_threshold_db`]).
+//! * **Step 7 global masking threshold `LTg`**
+//!   ([`global_masking_threshold_db`]).
+//!
+//! Steps 2 / 3 / 5 still depend on the PNG-only inner rows of Annex
+//! D Tables D.1 / D.3 / D.4 (the LTq threshold-in-quiet rows for
+//! Layer II at 32 / 44.1 / 48 kHz, Step 2's per-subband range
+//! mapping, and Step 5's masker-decimation pass against the
+//! D.5 / D.2 coder partition table). They are tracked under the
+//! docs-collaborator Tables D.1a–f / D.3a–c / D.4a–c PNG → text
+//! extraction gap (note `#1262`).
 //!
 //! ## Spec context (clause D.1, ISO/IEC 11172-3:1993, informative)
 //!
@@ -86,6 +103,178 @@
 //! `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` is the upstream
 //! authority. The PNG-only Annex D table rows are not read this
 //! round.
+
+/// Length of the §D.1 Step 1 Layer II FFT window — verbatim from the
+/// "Technical data of the FFT" table on PDF page 116 (printed 110):
+/// the Layer II FFT is 1024 samples (the Layer I FFT is 512).
+pub const LAYER2_FFT_LEN: usize = 1024;
+
+/// Number of FFT bins produced by the §D.1 Step 1 Layer II FFT that
+/// the psychoacoustic-model passes look at: `k = 0 .. N / 2` per the
+/// `X(k)` definition, i.e. the DC bin through the Nyquist bin
+/// inclusive. The downstream §D.1 Step 4 prose runs `2 < k <= 500`
+/// for Layer II, so the working range is comfortably inside this.
+pub const LAYER2_FFT_BINS: usize = LAYER2_FFT_LEN / 2 + 1;
+
+/// §D.1 Step 4(b) tonality test threshold: `X(k) - X(k+j) >= 7 dB`
+/// for every `j` in the per-`k` neighbourhood. The 7 dB value is the
+/// verbatim spec constant — a local maximum is classified as tonal
+/// (sinusoid-like) only if it stands at least 7 dB above every
+/// surrounding bin in the windowed neighbourhood.
+pub const TONALITY_THRESHOLD_DB: f64 = 7.0;
+
+/// §D.1 Step 1 Hann window for the Layer II 1024-sample FFT. The
+/// verbatim spec equation (PDF page 116, printed 110):
+///
+/// ```text
+/// h(i) = sqrt(8/3) * 0.5 * (1 - cos(2 * pi * i / N))   for 0 <= i <= N - 1
+/// ```
+///
+/// where `N == LAYER2_FFT_LEN == 1024`. The `sqrt(8/3) ≈ 1.6329932`
+/// front coefficient is the spec's normalization for the Hann
+/// window's power gain — the windowed power-density estimate
+/// matches the unwindowed signal's RMS power on broadband input.
+///
+/// The slot at `i = 0` is `0.0` exactly (because `1 - cos(0) = 0`);
+/// the slot at `i = N - 1` is `0.5 * sqrt(8/3) * (1 - cos(2 * pi *
+/// (N - 1) / N))`, which is non-zero — the window is **not**
+/// periodic in the DFT sense (the spec writes `cos[2 * pi * i / N]`
+/// and the index range is `0 <= i <= N - 1`, so the window does not
+/// reach the next-period zero crossing).
+#[must_use]
+pub fn hann_window_layer2() -> [f64; LAYER2_FFT_LEN] {
+    let mut window = [0.0_f64; LAYER2_FFT_LEN];
+    // sqrt(8/3) — the spec's front coefficient. Computed inline so
+    // the constant is derived from the spec equation rather than a
+    // baked-in numeric literal.
+    let coeff = (8.0_f64 / 3.0).sqrt() * 0.5;
+    let two_pi_over_n = 2.0 * core::f64::consts::PI / (LAYER2_FFT_LEN as f64);
+    let mut i = 0;
+    while i < LAYER2_FFT_LEN {
+        window[i] = coeff * (1.0 - (two_pi_over_n * i as f64).cos());
+        i += 1;
+    }
+    window
+}
+
+/// §D.1 Step 4(a) local-maximum test for the SPL spectrum `X(k)`.
+/// Verbatim spec rule (PDF page 117, printed 111):
+///
+/// ```text
+/// A spectral line X(k) is labelled as a local maximum if
+///     X(k) > X(k - 1) and X(k) >= X(k + 1)
+/// ```
+///
+/// Note the asymmetry: strict `>` on the lower side, non-strict
+/// `>=` on the upper side. This deterministically picks the
+/// left-most index when a plateau spans several adjacent bins.
+///
+/// `k` outside the open interval `0 < k < spl_db.len() - 1` returns
+/// `false` — the edges of the spectrum have no defined neighbour.
+#[must_use]
+pub fn is_local_maximum(spl_db: &[f64], k: usize) -> bool {
+    if k == 0 || k + 1 >= spl_db.len() {
+        return false;
+    }
+    spl_db[k] > spl_db[k - 1] && spl_db[k] >= spl_db[k + 1]
+}
+
+/// §D.1 Step 4(b) Layer II tonality-neighbourhood widths. Verbatim
+/// spec table for the 1024-point Layer II FFT (PDF page 117,
+/// printed 111):
+///
+/// ```text
+/// j = -2, +2                       for   2 < k <  63
+/// j = -3, -2, +2, +3               for  63 <= k < 127
+/// j = -6, ..., -2, +2, ..., +6     for 127 <= k < 255
+/// j = -12, ..., -2, +2, ..., +12   for 255 <= k <= 500
+/// ```
+///
+/// Returns `None` for `k <= 2` or `k > 500` (the spec leaves
+/// tonality undefined at the spectrum's edges). The returned slice
+/// is the set of strictly-non-zero offsets — `j = 0` (the line
+/// itself) is excluded by construction.
+#[must_use]
+pub fn tonal_neighbourhood_layer2(k: usize) -> Option<&'static [i32]> {
+    // Static neighbourhood slices, one per spec row.
+    static N_TWO: &[i32] = &[-2, 2];
+    static N_THREE: &[i32] = &[-3, -2, 2, 3];
+    static N_SIX: &[i32] = &[-6, -5, -4, -3, -2, 2, 3, 4, 5, 6];
+    static N_TWELVE: &[i32] = &[
+        -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ];
+    if k <= 2 {
+        None
+    } else if k < 63 {
+        Some(N_TWO)
+    } else if k < 127 {
+        Some(N_THREE)
+    } else if k < 255 {
+        Some(N_SIX)
+    } else if k <= 500 {
+        Some(N_TWELVE)
+    } else {
+        None
+    }
+}
+
+/// §D.1 Step 4(b) tonality test. A local maximum `X(k)` is tonal
+/// iff for **every** `j` in the per-`k` neighbourhood returned by
+/// [`tonal_neighbourhood_layer2`],
+///
+/// ```text
+/// X(k) - X(k + j) >= 7 dB
+/// ```
+///
+/// (verbatim spec inequality, [`TONALITY_THRESHOLD_DB`] is the spec
+/// constant). Returns `false` for `k` outside the tonality-defined
+/// range and for any `k + j` that would fall outside `spl_db`.
+#[must_use]
+pub fn is_tonal_layer2(spl_db: &[f64], k: usize) -> bool {
+    let Some(neighbourhood) = tonal_neighbourhood_layer2(k) else {
+        return false;
+    };
+    // The X(k) reference must itself be a local maximum per the
+    // spec's two-step procedure — Step 4(a) labels then Step 4(b)
+    // tests. Enforce the precondition here so callers that drive
+    // `is_tonal_layer2` directly without going through Step 4(a)
+    // still get the spec-defined classification.
+    if !is_local_maximum(spl_db, k) {
+        return false;
+    }
+    for &j in neighbourhood {
+        // i32 arithmetic to safely handle negative j around small k.
+        let probe = k as i32 + j;
+        if probe < 0 || (probe as usize) >= spl_db.len() {
+            return false;
+        }
+        if spl_db[k] - spl_db[probe as usize] < TONALITY_THRESHOLD_DB {
+            return false;
+        }
+    }
+    true
+}
+
+/// §D.1 Step 4(b) tonal-component SPL aggregation. After a `(k, X(k))`
+/// has been classified as tonal, the spec replaces the bin's SPL with
+/// the three-line power sum centered on `k`:
+///
+/// ```text
+/// X_tm(k) = 10 * log10( 10^(X(k-1)/10) + 10^(X(k)/10) + 10^(X(k+1)/10) )
+/// ```
+///
+/// Returns `None` when `k` is at an edge (no `X(k - 1)` or
+/// `X(k + 1)` is defined).
+#[must_use]
+pub fn tonal_spl_db(spl_db: &[f64], k: usize) -> Option<f64> {
+    if k == 0 || k + 1 >= spl_db.len() {
+        return None;
+    }
+    let p_lo = (10.0_f64).powf(spl_db[k - 1] / 10.0);
+    let p_at = (10.0_f64).powf(spl_db[k] / 10.0);
+    let p_hi = (10.0_f64).powf(spl_db[k + 1] / 10.0);
+    Some(10.0 * (p_lo + p_at + p_hi).log10())
+}
 
 /// Classification of a Model 1 masker per ISO/IEC 11172-3:1993 §D.1
 /// Step 4 (tonal vs non-tonal). The two carry different
@@ -558,6 +747,253 @@ mod tests {
             ltg_both > ltg_m2,
             "LTg both {ltg_both} should be > LTg m2 alone {ltg_m2}",
         );
+    }
+
+    #[test]
+    fn hann_window_layer2_endpoints() {
+        // h(0) = sqrt(8/3) * 0.5 * (1 - cos(0)) = sqrt(8/3) * 0.5 * 0
+        //      = 0 exactly.
+        let w = hann_window_layer2();
+        assert!(w[0].abs() < 1.0e-15, "h(0) = {} should be 0", w[0]);
+        // h(N/2) = sqrt(8/3) * 0.5 * (1 - cos(pi))
+        //        = sqrt(8/3) * 0.5 * 2
+        //        = sqrt(8/3).
+        let expected_mid = (8.0_f64 / 3.0).sqrt();
+        let mid = w[LAYER2_FFT_LEN / 2];
+        assert!(
+            (mid - expected_mid).abs() < 1.0e-12,
+            "h(N/2) = {mid}, expected {expected_mid}",
+        );
+    }
+
+    #[test]
+    fn hann_window_layer2_symmetry() {
+        // The spec window h(i) = sqrt(8/3) * 0.5 * (1 - cos(2 pi i /
+        // N)) is symmetric around i = N/2: h(N/2 - k) = h(N/2 + k)
+        // for every k in [1, N/2 - 1]. Verify for a sampling of k.
+        let w = hann_window_layer2();
+        for k in [1_usize, 17, 64, 128, 256, 480] {
+            let lo = w[LAYER2_FFT_LEN / 2 - k];
+            let hi = w[LAYER2_FFT_LEN / 2 + k];
+            assert!(
+                (lo - hi).abs() < 1.0e-12,
+                "asymmetry at k = {k}: h({}) = {lo}, h({}) = {hi}",
+                LAYER2_FFT_LEN / 2 - k,
+                LAYER2_FFT_LEN / 2 + k,
+            );
+        }
+    }
+
+    #[test]
+    fn hann_window_layer2_bounded_in_zero_to_sqrt8over3() {
+        // h(i) = sqrt(8/3) * 0.5 * (1 - cos(theta)) ranges over
+        // [0, sqrt(8/3)] since (1 - cos) ranges over [0, 2].
+        let w = hann_window_layer2();
+        let upper = (8.0_f64 / 3.0).sqrt();
+        for (i, &h) in w.iter().enumerate() {
+            assert!(
+                h >= 0.0 && h <= upper + 1.0e-12,
+                "h({i}) = {h} outside [0, sqrt(8/3) ≈ {upper}]",
+            );
+        }
+    }
+
+    #[test]
+    fn is_local_maximum_basic_peak() {
+        // Simple peak at index 2.
+        let x = [0.0, 5.0, 10.0, 5.0, 0.0];
+        assert!(is_local_maximum(&x, 2));
+        // Index 1 is not (X(1) = 5, X(2) = 10 ⇒ X(1) < X(2)).
+        assert!(!is_local_maximum(&x, 1));
+        // Index 3 is not.
+        assert!(!is_local_maximum(&x, 3));
+    }
+
+    #[test]
+    fn is_local_maximum_left_strict_right_non_strict() {
+        // Spec rule: X(k) > X(k-1) AND X(k) >= X(k+1).
+        // A two-bin equal plateau: index 2 IS a maximum (>= on
+        // the right), index 3 is NOT (left side is equal, not <).
+        let x = [0.0, 5.0, 10.0, 10.0, 5.0];
+        assert!(is_local_maximum(&x, 2));
+        assert!(!is_local_maximum(&x, 3));
+    }
+
+    #[test]
+    fn is_local_maximum_edge_indices_are_false() {
+        // The spec leaves the spectrum edges undefined for
+        // local-maximum labelling — there is no X(-1) or X(N).
+        let x = [10.0, 5.0, 0.0];
+        assert!(!is_local_maximum(&x, 0));
+        assert!(!is_local_maximum(&x, 2));
+        // Empty slice as a degenerate edge case.
+        let empty: [f64; 0] = [];
+        assert!(!is_local_maximum(&empty, 0));
+    }
+
+    #[test]
+    fn tonal_neighbourhood_layer2_spec_rows() {
+        // Spec rows for Layer II (1024-point FFT):
+        //   2 < k <  63           j = -2, +2
+        //  63 <= k < 127           j = -3, -2, +2, +3
+        // 127 <= k < 255           j = -6 ... -2, +2 ... +6
+        // 255 <= k <= 500          j = -12 ... -2, +2 ... +12
+        // Sample one k in each row's interior and one at each
+        // boundary to confirm the dispatch.
+        assert_eq!(tonal_neighbourhood_layer2(2), None); // 2 NOT in (2, 63)
+        assert_eq!(tonal_neighbourhood_layer2(3).unwrap().len(), 2);
+        assert_eq!(tonal_neighbourhood_layer2(62).unwrap().len(), 2);
+        assert_eq!(tonal_neighbourhood_layer2(63).unwrap().len(), 4);
+        assert_eq!(tonal_neighbourhood_layer2(126).unwrap().len(), 4);
+        assert_eq!(tonal_neighbourhood_layer2(127).unwrap().len(), 10);
+        assert_eq!(tonal_neighbourhood_layer2(254).unwrap().len(), 10);
+        assert_eq!(tonal_neighbourhood_layer2(255).unwrap().len(), 22);
+        assert_eq!(tonal_neighbourhood_layer2(500).unwrap().len(), 22);
+        assert_eq!(tonal_neighbourhood_layer2(501), None);
+        // The j = 0 offset is never present (the X(k) bin itself
+        // is not tested against itself).
+        for k in [3_usize, 63, 127, 255, 500] {
+            for &j in tonal_neighbourhood_layer2(k).unwrap() {
+                assert_ne!(j, 0, "k = {k}: neighbourhood includes j = 0");
+            }
+        }
+    }
+
+    #[test]
+    fn tonal_neighbourhood_layer2_symmetric() {
+        // Every row's neighbourhood is symmetric around 0
+        // (excluding 0 itself).
+        for k in [3_usize, 63, 127, 255, 500] {
+            let nb = tonal_neighbourhood_layer2(k).unwrap();
+            for &j in nb {
+                assert!(nb.contains(&-j), "k = {k}: j = {j} present but -{j} absent",);
+            }
+        }
+    }
+
+    #[test]
+    fn is_tonal_layer2_clear_peak_above_threshold() {
+        // Build a spectrum where bin k = 10 is 50 dB and every
+        // other bin is 0 dB. Then X(k) - X(k+j) = 50 dB > 7 dB
+        // for every neighbour, so the line is tonal.
+        let mut x = vec![0.0_f64; LAYER2_FFT_BINS];
+        x[10] = 50.0;
+        assert!(is_local_maximum(&x, 10));
+        assert!(is_tonal_layer2(&x, 10));
+    }
+
+    #[test]
+    fn is_tonal_layer2_below_threshold_rejected() {
+        // Build a spectrum where the central bin only just
+        // exceeds its neighbours — below the 7 dB tonality
+        // threshold. The peak is a local maximum but not tonal.
+        let mut x = vec![0.0_f64; LAYER2_FFT_BINS];
+        x[10] = 6.5; // central
+        x[8] = 0.5; // X(k) - X(k+j=-2) = 6.0 dB < 7.0 dB
+        x[12] = 0.5; // X(k) - X(k+j=+2) = 6.0 dB < 7.0 dB
+        x[9] = 0.0;
+        x[11] = 0.0;
+        assert!(is_local_maximum(&x, 10));
+        assert!(!is_tonal_layer2(&x, 10));
+    }
+
+    #[test]
+    fn is_tonal_layer2_one_neighbour_below_threshold_rejected() {
+        // The spec requires X(k) - X(k+j) >= 7 dB for EVERY j in
+        // the neighbourhood. A single failing neighbour disqualifies
+        // the line. Verify with k = 100 (row j = -3, -2, +2, +3):
+        // make X(100) = 50, every j neighbour 0 dB EXCEPT j = +3
+        // which is 45 dB (50 - 45 = 5 < 7).
+        let mut x = vec![0.0_f64; LAYER2_FFT_BINS];
+        x[100] = 50.0;
+        x[103] = 45.0; // j = +3 boundary breaker
+                       // Local-maximum precondition: X(100) > X(99) AND >= X(101).
+                       // x[99] = x[101] = 0.0 (default), so it holds.
+        assert!(is_local_maximum(&x, 100));
+        // Tonality fails because of j = +3.
+        assert!(!is_tonal_layer2(&x, 100));
+    }
+
+    #[test]
+    fn is_tonal_layer2_not_a_local_maximum_rejected() {
+        // The spec dispatches tonality only after Step 4(a) labels
+        // local maxima. A non-local-maximum bin must not be flagged
+        // as tonal even if the surrounding bins are quiet. Verify
+        // by making X(10) = X(11) = 50 — neither is a local maximum
+        // under the spec's `X(k) > X(k-1)` rule for both, and only
+        // the strict-left one passes (`>= X(k+1)` is `50 >= 50`).
+        let mut x = vec![0.0_f64; LAYER2_FFT_BINS];
+        x[10] = 50.0;
+        x[11] = 50.0;
+        // X(10): X(9) = 0, X(11) = 50 ⇒ 50 > 0 AND 50 >= 50 ⇒ maximum.
+        assert!(is_local_maximum(&x, 10));
+        // X(11): X(10) = 50, X(12) = 0 ⇒ 50 > 50 is FALSE ⇒ not max.
+        assert!(!is_local_maximum(&x, 11));
+        assert!(!is_tonal_layer2(&x, 11));
+    }
+
+    #[test]
+    fn is_tonal_layer2_outside_window_rejected() {
+        // k <= 2 and k > 500 are outside the tonality window.
+        let x = vec![100.0_f64; LAYER2_FFT_BINS];
+        assert!(!is_tonal_layer2(&x, 0));
+        assert!(!is_tonal_layer2(&x, 2));
+        assert!(!is_tonal_layer2(&x, 501));
+    }
+
+    #[test]
+    fn tonal_spl_db_three_line_power_sum() {
+        // Pin the formula: X_tm = 10 * log10(10^(X(k-1)/10) +
+        // 10^(X(k)/10) + 10^(X(k+1)/10)).
+        // Use X(k-1) = X(k) = X(k+1) = 60 dB: three equal powers
+        // sum to 60 + 10*log10(3) ≈ 60 + 4.7712 = 64.7712 dB.
+        let x = [60.0_f64, 60.0, 60.0];
+        let got = tonal_spl_db(&x, 1).unwrap();
+        let expected = 60.0 + 10.0 * 3.0_f64.log10();
+        assert!(
+            (got - expected).abs() < 1.0e-12,
+            "X_tm = {got}, expected {expected}",
+        );
+    }
+
+    #[test]
+    fn tonal_spl_db_dominated_by_centre() {
+        // Centre 80 dB dominates a pair of 0 dB shoulders:
+        // 10*log10(10^0 + 10^8 + 10^0) ≈ 10*log10(10^8 + 2)
+        // ≈ 80.0000000868… ≈ 80 dB.
+        let x = [0.0_f64, 80.0, 0.0];
+        let got = tonal_spl_db(&x, 1).unwrap();
+        assert!((got - 80.0).abs() < 1.0e-4, "X_tm = {got}, expected ≈ 80",);
+    }
+
+    #[test]
+    fn tonal_spl_db_edge_returns_none() {
+        let x = [60.0_f64, 60.0, 60.0];
+        assert!(tonal_spl_db(&x, 0).is_none());
+        assert!(tonal_spl_db(&x, 2).is_none());
+        let empty: [f64; 0] = [];
+        assert!(tonal_spl_db(&empty, 0).is_none());
+    }
+
+    #[test]
+    fn tonal_spl_db_ge_centre_value() {
+        // Power addition is monotone: the three-line sum is always
+        // at least as large as the centre bin alone (and strictly
+        // larger when either shoulder is finite).
+        let cases = [
+            [-100.0_f64, 80.0, -100.0],
+            [50.0, 50.0, 50.0],
+            [0.0, 60.0, 0.0],
+            [40.0, 60.0, 30.0],
+        ];
+        for x in cases {
+            let got = tonal_spl_db(&x, 1).unwrap();
+            assert!(
+                got >= x[1],
+                "X_tm {got} should be >= X(k) {} for {x:?}",
+                x[1],
+            );
+        }
     }
 
     #[test]

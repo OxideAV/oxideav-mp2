@@ -263,9 +263,11 @@ pub use header::{
     ModeExtension, SYNCWORD,
 };
 pub use psy::{
-    global_masking_threshold_db, individual_masking_threshold_db, masking_function_vf,
-    masking_index_non_tonal, masking_index_tonal, Masker, MaskerKind, MASKING_FUNCTION_DZ_HI,
-    MASKING_FUNCTION_DZ_LO,
+    global_masking_threshold_db, hann_window_layer2, individual_masking_threshold_db,
+    is_local_maximum, is_tonal_layer2, masking_function_vf, masking_index_non_tonal,
+    masking_index_tonal, tonal_neighbourhood_layer2, tonal_spl_db, Masker, MaskerKind,
+    LAYER2_FFT_BINS, LAYER2_FFT_LEN, MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO,
+    TONALITY_THRESHOLD_DB,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};

@@ -8,6 +8,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 1 Hann window and §D.1 Step 4 tonality
+  classifier primitives (`psy` module). Five new spec-text-only
+  pure functions land the FFT-windowing and tonal/non-tonal labelling
+  halves of Model 1:
+  * `hann_window_layer2() -> [f64; 1024]` reproduces the verbatim
+    spec equation `h(i) = sqrt(8/3) * 0.5 * (1 - cos(2 * pi * i /
+    N))` for the Layer II 1024-sample FFT.
+  * `is_local_maximum(spl_db, k) -> bool` runs the verbatim
+    Step 4(a) rule `X(k) > X(k-1) AND X(k) >= X(k+1)` (strict
+    on the lower side, non-strict on the upper side).
+  * `tonal_neighbourhood_layer2(k) -> Option<&'static [i32]>`
+    returns the per-`k` Layer II `j` neighbourhood: `{-2, +2}`
+    for `2 < k < 63`, `{-3, -2, +2, +3}` for `63 <= k < 127`,
+    `{-6, ..., -2, +2, ..., +6}` for `127 <= k < 255`, `{-12,
+    ..., -2, +2, ..., +12}` for `255 <= k <= 500`.
+  * `is_tonal_layer2(spl_db, k) -> bool` runs the verbatim
+    Step 4(b) inequality `X(k) - X(k+j) >= 7 dB` for every `j`
+    in the neighbourhood, with the Step 4(a) local-maximum
+    precondition checked first.
+  * `tonal_spl_db(spl_db, k) -> Option<f64>` is the three-line
+    power sum `X_tm = 10 * log10(10^(X(k-1)/10) + 10^(X(k)/10)
+    + 10^(X(k+1)/10))` the spec applies to a confirmed tonal
+    line.
+  Two new public constants: `LAYER2_FFT_LEN = 1024` (Layer II
+  FFT length per PDF page 116) and `LAYER2_FFT_BINS = 513`
+  (working range `k = 0..N/2` inclusive), plus
+  `TONALITY_THRESHOLD_DB = 7.0` (the spec inequality constant).
+  Total lib tests 254 → 271 (+17).
+
 - Annex D Model 1 §D.1 Step 6 masking-function `vf` and §D.1 Step 7
   global-masking-threshold `LTg` primitives (`psy` module). Annex D
   is informative; the encoder's §C.1.5.2.7 iterative bit-allocator
