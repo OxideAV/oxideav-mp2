@@ -264,12 +264,14 @@ pub use header::{
     ModeExtension, SYNCWORD,
 };
 pub use psy::{
-    global_masking_threshold_db, hann_window_layer2, individual_masking_threshold_db,
-    is_local_maximum, is_tonal_layer2, list_non_tonal_layer2, masking_function_vf,
-    masking_index_non_tonal, masking_index_tonal, non_tonal_band_index, non_tonal_spl_db,
-    tonal_neighbourhood_layer2, tonal_spl_db, zero_tonal_neighbourhood_layer2, Masker, MaskerKind,
-    LAYER2_FFT_BINS, LAYER2_FFT_LEN, MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO,
-    TONALITY_THRESHOLD_DB,
+    decimate_tonal_maskers, global_masking_threshold_db, hann_window_layer2,
+    individual_masking_threshold_db, is_local_maximum, is_tonal_layer2, list_non_tonal_layer2,
+    masking_function_vf, masking_index_non_tonal, masking_index_tonal,
+    minimum_masking_threshold_subband, non_tonal_band_index, non_tonal_spl_db,
+    signal_to_mask_ratio_subband, tonal_neighbourhood_layer2, tonal_spl_db,
+    zero_tonal_neighbourhood_layer2, Masker, MaskerKind, LAYER2_FFT_BINS, LAYER2_FFT_LEN,
+    MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO, NUM_SUBBANDS_LAYER2, TONALITY_THRESHOLD_DB,
+    TONAL_DECIMATION_WINDOW_BARK,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};

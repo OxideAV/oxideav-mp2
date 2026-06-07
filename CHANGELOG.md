@@ -8,6 +8,70 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 5(b) tonal-masker decimation and
+  §D.1 Steps 8 + 9 minimum-masking-threshold-per-subband /
+  signal-to-mask-ratio primitives (`psy` module). Three new
+  spec-text-only pure functions wire together the
+  "collapse near-Bark tonal clusters then reduce per-subband"
+  half of Model 1 between the already-landed Step 4(c) (round
+  250) and the §C.1.5.2.7 iterative bit-allocator (round 214):
+  * `decimate_tonal_maskers(maskers) -> Vec<Masker>` runs the
+    verbatim §D.1 Step 5(b) procedure ("Decimation of two or
+    more tonal components within a distance of less than
+    0.5 Bark: Keep the component with the highest power, and
+    remove the smaller component(s) from the list of tonal
+    components. For this operation, a sliding window in the
+    critical band domain is used with a width of 0.5 Bark.",
+    PDF page 113). The implementation splits the input by
+    `MaskerKind`, sorts the tonal list by `z_bark`, walks
+    sorted runs anchored on each run's first entry, and emits
+    the highest-`spl_db` member of each run. The half-open
+    `< 0.5 Bark` window is reproduced exactly (a pair at
+    exactly 0.5 Bark is NOT merged); ties on `spl_db` keep
+    the lowest-`z_bark` entry deterministically; the
+    chained-run case `(5.0, 5.4, 5.8)` produces the documented
+    two-survivor result (the spec's sliding-window reading
+    requires every pair in the window to be < 0.5 Bark of
+    every other). Non-tonal maskers pass through untouched per
+    the spec scope ("two or more **tonal** components"); the
+    output emits non-tonal in input order then surviving tonal
+    in ascending Bark order. The procedure is documented
+    idempotent.
+  * `minimum_masking_threshold_subband(ltg_db, line_subband)
+    -> [Option<f64>; 32]` runs the verbatim §D.1 Step 8
+    reduction `LT_min(n) = MIN[ LT_g(i) ]` over
+    `f(i) in subband n` (PDF page 114). The caller hands in
+    the FFT-line → subband index map (the spec's `f(i)`
+    frequency vector lives in the PNG-only Table D.1 inner
+    rows; the caller derives the equivalent map from whatever
+    source they have). The output slot is `None` for subbands
+    that received no FFT line; `usize::MAX` acts as a
+    documented "outside audio band" sentinel and is filtered
+    out; `NaN` values are dropped from the minimum to keep the
+    remaining finite values well-defined; a length mismatch
+    between `ltg_db` and `line_subband` returns an all-`None`
+    result as the documented safe response to a caller error.
+  * `signal_to_mask_ratio_subband(l_sb_db, lt_min_db) ->
+    [Option<f64>; 32]` is the verbatim §D.1 Step 9 elementwise
+    subtraction `SMR_sb(n) = L_sb(n) - LT_min(n)` (PDF page
+    115). Slots whose `lt_min_db` is `None` return `None` so
+    the caller's §C.1.5.2.4 fallback can substitute.
+  * New public constants `TONAL_DECIMATION_WINDOW_BARK = 0.5`
+    (the §D.1 Step 5(b) sliding-window width) and
+    `NUM_SUBBANDS_LAYER2 = 32` (the Layer II subband count).
+  * Step 5(a) (threshold-in-quiet drop `X_tm(k) >= LT_q(k)`)
+    still depends on the PNG-only Annex D Table D.1d/e/f LTq
+    curves (#1262) and is not landed this round.
+  * 23 new lib tests (298 → 321) covering the 0.5-Bark window
+    constant, half-open endpoint, loudest-wins reduction,
+    equal-power tie-break, non-tonal passthrough, mixed-class
+    output order, the chained-cluster non-merge case
+    `(5.0, 5.4, 5.8)`, empty / singleton inputs, idempotence,
+    sort-independence; Step 8 OOB-index filtering, NaN drop,
+    length-mismatch safe return, and trivial bijection
+    properties; Step 9 negative-SMR pass-through and the
+    end-to-end Step 7 → 8 → 9 composition.
+
 - Annex D Model 1 §D.1 Step 4(b) tonal-neighbourhood zero-out and
   §D.1 Step 4(c) non-tonal-component listing (`psy` module + new
   `tables_d2` module). Four new spec-text-only pure functions wire

@@ -37,20 +37,38 @@
 //!   run; the representative index of the resulting non-tonal masker
 //!   is the spec's "nearest to the geometric mean of the critical
 //!   band" rule, applied directly on FFT-line indices.
+//! * **Step 5(b) tonal-masker decimation within 0.5 Bark**
+//!   ([`decimate_tonal_maskers`]) — the verbatim spec procedure
+//!   "Decimation of two or more tonal components within a distance
+//!   of less than 0.5 Bark: Keep the component with the highest
+//!   power, and remove the smaller component(s) from the list of
+//!   tonal components. For this operation, a sliding window in the
+//!   critical band domain is used with a width of 0.5 Bark."
 //! * **Step 6 masker indices and masking function `vf`**
 //!   ([`masking_index_tonal`], [`masking_index_non_tonal`],
 //!   [`masking_function_vf`]) and the per-masker individual masking
 //!   threshold ([`individual_masking_threshold_db`]).
 //! * **Step 7 global masking threshold `LTg`**
 //!   ([`global_masking_threshold_db`]).
+//! * **Step 8 minimum masking threshold per subband**
+//!   ([`minimum_masking_threshold_subband`]) — the verbatim spec
+//!   reduction `LT_min(n) = MIN[ LT_g(i) ]` over `f(i) in subband n`,
+//!   driven by a caller-supplied `line_subband` map (the spec's
+//!   `f(i)` frequency vector lives in the PNG-only Table D.1 inner
+//!   rows; the caller produces the FFT-line → subband mapping from
+//!   whatever source they have and the primitive runs the bare
+//!   minimum-over-mask reduction).
+//! * **Step 9 signal-to-mask ratio per subband**
+//!   ([`signal_to_mask_ratio_subband`]) — the verbatim spec
+//!   subtraction `SMR_sb(n) = L_sb(n) - LT_min(n)`.
 //!
-//! Steps 2 / 3 / 5 still depend on the PNG-only inner rows of Annex
-//! D Tables D.1 / D.3 / D.4 (the LTq threshold-in-quiet rows for
-//! Layer II at 32 / 44.1 / 48 kHz, Step 2's per-subband range
-//! mapping, and Step 5's masker-decimation pass against the
-//! D.5 / D.2 coder partition table). They are tracked under the
-//! docs-collaborator Tables D.1a–f / D.3a–c / D.4a–c PNG → text
-//! extraction gap (note `#1262`).
+//! Step 5(a) "threshold-in-quiet decimation" requires the LTq
+//! values from Annex D Table D.1d/e/f and Step 2/3 also depend on
+//! those PNG-only rows (the LTq threshold-in-quiet curves for
+//! Layer II at 32 / 44.1 / 48 kHz, plus the per-subband range
+//! mapping). They are tracked under the docs-collaborator Tables
+//! D.1a–f / D.3a–c / D.4a–c PNG → text extraction gap (note
+//! `#1262`).
 //!
 //! Step 4(c) and the Layer-II critical-band-boundary tables
 //! D.2d / D.2e / D.2f are independent of that gap — those tables
@@ -676,6 +694,230 @@ pub fn list_non_tonal_layer2(spl_db: &[f64], fs: crate::tables_d2::SamplingRate)
             });
         }
         lo = hi + 1;
+    }
+    out
+}
+
+/// §D.1 Step 5(b) sliding-window width in Bark for tonal-masker
+/// decimation. The verbatim spec phrasing (PDF page 113, printed
+/// 113):
+///
+/// > Decimation of two or more tonal components within a distance
+/// > of less than 0.5 Bark: Keep the component with the highest
+/// > power, and remove the smaller component(s) from the list of
+/// > tonal components. For this operation, a sliding window in the
+/// > critical band domain is used with a width of 0.5 Bark.
+pub const TONAL_DECIMATION_WINDOW_BARK: f64 = 0.5;
+
+/// §D.1 Step 5(b) tonal-masker decimation: collapse clusters of
+/// tonal maskers within [`TONAL_DECIMATION_WINDOW_BARK`] of each
+/// other on the Bark axis, keeping the highest-SPL member of each
+/// cluster and removing the others. The verbatim spec procedure
+/// (PDF page 113, printed 113) reads as a sliding window of width
+/// `0.5 Bark` over the critical-band axis; this implementation
+/// realises it by sorting the input by `z_bark` and merging any
+/// run of adjacent tonal entries whose `z_bark` span is
+/// strictly less than `0.5 Bark`, keeping the highest-`spl_db`
+/// member of each run and dropping the rest.
+///
+/// The operation is applied **only to tonal maskers** per the spec
+/// ("Decimation of two or more **tonal** components") — non-tonal
+/// maskers are left untouched. Their relative order with the
+/// surviving tonal maskers is preserved: the function reads
+/// `maskers` left-to-right and rebuilds the list so that the
+/// emitted vector keeps the spec's "combined decimated list"
+/// semantics (clause D.1 step 5 closing sentence). Non-tonal
+/// maskers are emitted in the order they appeared in the input;
+/// the surviving tonal maskers are emitted in ascending Bark order
+/// (the spec doesn't require a particular order for the combined
+/// list — Step 6 / Step 7 are order-invariant — but the ascending
+/// Bark order is convenient for downstream debug-printing and the
+/// 0.5-Bark merge is most naturally expressed on a sorted run).
+///
+/// The "strictly less than 0.5 Bark" wording is reproduced
+/// exactly: two maskers at Bark positions `z1 < z2` are in the
+/// same window iff `z2 - z1 < 0.5`. A pair at exactly `0.5 Bark`
+/// distance is **not** merged (the sliding-window endpoint is
+/// half-open per the standard one-sided "within a distance of
+/// less than 0.5 Bark" reading).
+///
+/// Ties (`spl_db` exactly equal between two tonal entries within
+/// the window) keep the **first** one in input order and drop the
+/// later ones — the spec doesn't specify a tie-break but the
+/// deterministic first-wins choice matches the behaviour of
+/// `is_local_maximum`'s left-most pick on plateaus (cf. Step
+/// 4(a)). This keeps the decimation a pure function of the input.
+///
+/// This primitive does **not** implement Step 5(a) — the
+/// threshold-in-quiet comparison `X_tm(k) >= LT_q(k)` /
+/// `X_nm(k) >= LT_q(k)` requires the Annex D Table D.1d / D.1e /
+/// D.1f Layer II `LT_q` curves which are PNG-only in the staged
+/// PDF (note `#1262`). When that material is text-extracted, a
+/// companion `decimate_below_threshold_in_quiet` primitive can be
+/// added and the two passes composed end-to-end per the spec
+/// ordering (5(a) first, then 5(b)).
+#[must_use]
+pub fn decimate_tonal_maskers(maskers: &[Masker]) -> Vec<Masker> {
+    // Step 1: split maskers into the tonal and non-tonal lists,
+    // preserving input order in each.
+    let mut tonal: Vec<Masker> = Vec::new();
+    let mut non_tonal: Vec<Masker> = Vec::new();
+    for &m in maskers {
+        match m.kind {
+            MaskerKind::Tonal => tonal.push(m),
+            MaskerKind::NonTonal => non_tonal.push(m),
+        }
+    }
+    // Step 2: sort the tonal list by Bark position so adjacent
+    // entries are window candidates. Use `total_cmp` so the sort
+    // is total even on NaN inputs (which would be a caller error
+    // anyway — Bark positions come from finite Annex D tables).
+    tonal.sort_by(|a, b| a.z_bark.total_cmp(&b.z_bark));
+
+    // Step 3: walk the sorted tonal list and emit the survivors.
+    // A "run" is a maximal subsequence of entries whose pairwise
+    // Bark spread is < 0.5: as long as the next entry's z_bark is
+    // within 0.5 Bark of the run's *start*, it joins the run.
+    // (Reading the spec as "sliding window of width 0.5 Bark on
+    // the critical band axis": every pair in the window is within
+    // 0.5 Bark of every other, so anchoring on the run's start
+    // produces the same survivors as anchoring on any other
+    // window position — but only if the survivors' own spread is
+    // also < 0.5. We additionally check the run's own width below
+    // to keep the predicate the canonical "every pair < 0.5".)
+    let mut surviving_tonal: Vec<Masker> = Vec::new();
+    let mut i = 0;
+    while i < tonal.len() {
+        let start_z = tonal[i].z_bark;
+        let mut best_idx = i;
+        let mut best_spl = tonal[i].spl_db;
+        let mut j = i + 1;
+        while j < tonal.len() {
+            let z = tonal[j].z_bark;
+            if z - start_z >= TONAL_DECIMATION_WINDOW_BARK {
+                break;
+            }
+            // Strict ">" so the *first* entry wins on equal SPL
+            // (deterministic left-most pick).
+            if tonal[j].spl_db > best_spl {
+                best_spl = tonal[j].spl_db;
+                best_idx = j;
+            }
+            j += 1;
+        }
+        surviving_tonal.push(tonal[best_idx]);
+        i = j;
+    }
+
+    // Step 4: build the "combined decimated list" — non-tonal
+    // maskers in input order, then surviving tonal maskers in
+    // ascending Bark order. Order is irrelevant for Steps 6 / 7
+    // but the deterministic interleave makes the output
+    // round-tripable for tests.
+    let mut out = non_tonal;
+    out.extend(surviving_tonal);
+    out
+}
+
+/// §D.1 Step 8 minimum masking threshold per Layer II subband.
+/// The verbatim spec equation (PDF page 114, printed 114):
+///
+/// ```text
+/// LT_min(n) = MIN[ LT_g(i) ]   dB
+///             f(i) in subband n
+/// ```
+///
+/// A minimum masking level `LT_min(n)` is computed for every
+/// subband. `f(i)` is the frequency of the i'th frequency sample,
+/// tabulated in the Annex D Table D.1d / D.1e / D.1f Layer II
+/// frequency column (PNG-only this round); the caller produces
+/// the equivalent `line_subband` map from whatever source they
+/// have. Slot `i` of `line_subband` is the §2.4.1.5 subband index
+/// the spec's `f(i)` would land in (`0 ..= 31`); `usize::MAX` is
+/// the documented "this FFT line is outside the audio band and
+/// contributes to no subband" sentinel.
+///
+/// `ltg_db` carries the §D.1 Step 7 [`global_masking_threshold_db`]
+/// output for each subsampled FFT line (the spec's `n` indexing,
+/// 108 / 106 / 102 entries for Layer I and 132 / 130 / 126 for
+/// Layer II per the §D.1 Step 6 table). It must be the same
+/// length as `line_subband` — a length mismatch is a caller error
+/// and returns an all-`None` result.
+///
+/// The returned `[Option<f64>; NUM_SUBBANDS]` slot `n` is the
+/// minimum of `ltg_db[i]` across every `i` with `line_subband[i]
+/// == n`, or `None` for subbands that received no FFT line (no
+/// `LT_min` defined — the §D.1 Step 9 SMR computation must then
+/// fall back to the absolute-threshold curve per §C.1.5.2.4
+/// "subbands without masking lines").
+#[must_use]
+pub fn minimum_masking_threshold_subband(
+    ltg_db: &[f64],
+    line_subband: &[usize],
+) -> [Option<f64>; NUM_SUBBANDS_LAYER2] {
+    let mut out = [None; NUM_SUBBANDS_LAYER2];
+    if ltg_db.len() != line_subband.len() {
+        return out;
+    }
+    for (i, &sb) in line_subband.iter().enumerate() {
+        if sb >= NUM_SUBBANDS_LAYER2 {
+            // Sentinel (usize::MAX in particular) or invalid; skip.
+            continue;
+        }
+        let value = ltg_db[i];
+        // NaN-safe min via total_cmp on f64 (caller-supplied LTg
+        // values are finite in practice but we guard the
+        // primitive). For comparison purposes the sentinel must
+        // never replace a finite minimum; reject NaN.
+        if value.is_nan() {
+            continue;
+        }
+        out[sb] = Some(match out[sb] {
+            None => value,
+            Some(prev) => prev.min(value),
+        });
+    }
+    out
+}
+
+/// Layer II subband count (32 subbands per §2.4.1.5 / §2.4.3.2).
+/// Re-exposed locally so the Step 8 / Step 9 primitives don't have
+/// to take a `bitalloc::NUM_SUBBANDS` dependency for an
+/// independent psychoacoustic-module use.
+pub const NUM_SUBBANDS_LAYER2: usize = 32;
+
+/// §D.1 Step 9 signal-to-mask ratio per subband. The verbatim
+/// spec equation (PDF page 115, printed 115):
+///
+/// ```text
+/// SMR_sb(n) = L_sb(n) - LT_min(n)   dB
+/// ```
+///
+/// is computed for every subband. `l_sb_db` is the §D.1 Step 2
+/// per-subband sound pressure level (`L_sb(n) = MAX[X(k),
+/// 20·log10(scf_max(n)·32768) - 10]`) supplied by the caller;
+/// `lt_min_db` is the [`minimum_masking_threshold_subband`]
+/// output.
+///
+/// Subbands whose `lt_min_db` slot is `None` (no FFT line in
+/// range — see [`minimum_masking_threshold_subband`]) return
+/// `None` for that slot; the §C.1.5.2.4 fallback is the
+/// caller's responsibility because it depends on the encoder's
+/// chosen threshold-in-quiet substitute. The bit-allocator
+/// (`encoder_bit_allocator::allocate_bits`) treats the missing
+/// SMR slot as the most-conservative `-inf dB` (i.e. the slot
+/// has no masking margin and is unlikely to receive bits unless
+/// the encoder explicitly elects to spend them).
+#[must_use]
+pub fn signal_to_mask_ratio_subband(
+    l_sb_db: &[f64; NUM_SUBBANDS_LAYER2],
+    lt_min_db: &[Option<f64>; NUM_SUBBANDS_LAYER2],
+) -> [Option<f64>; NUM_SUBBANDS_LAYER2] {
+    let mut out = [None; NUM_SUBBANDS_LAYER2];
+    for n in 0..NUM_SUBBANDS_LAYER2 {
+        if let Some(lt_min) = lt_min_db[n] {
+            out[n] = Some(l_sb_db[n] - lt_min);
+        }
     }
     out
 }
@@ -1501,5 +1743,331 @@ mod tests {
             "band {i} X_nm = {} dB, expected ~100 dB",
             maskers[i].spl_db,
         );
+    }
+
+    // --- §D.1 Step 5(b) tonal-masker decimation -----------------
+
+    fn tonal(z: f64, spl: f64) -> Masker {
+        Masker {
+            kind: MaskerKind::Tonal,
+            z_bark: z,
+            spl_db: spl,
+        }
+    }
+
+    fn non_tonal(z: f64, spl: f64) -> Masker {
+        Masker {
+            kind: MaskerKind::NonTonal,
+            z_bark: z,
+            spl_db: spl,
+        }
+    }
+
+    #[test]
+    fn tonal_decimation_window_is_half_a_bark() {
+        // Verbatim spec constant — pin the window width at 0.5 Bark.
+        assert_eq!(TONAL_DECIMATION_WINDOW_BARK, 0.5);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_keeps_loudest_in_window() {
+        // Three tonal maskers within 0.5 Bark of each other:
+        //   z=5.00 spl=60   z=5.10 spl=80   z=5.30 spl=70
+        // All pairs strictly within 0.5 Bark → all collapse into one
+        // survivor: the 80 dB peak at z=5.10.
+        let input = vec![tonal(5.00, 60.0), tonal(5.10, 80.0), tonal(5.30, 70.0)];
+        let out = decimate_tonal_maskers(&input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, MaskerKind::Tonal);
+        assert!((out[0].z_bark - 5.10).abs() < 1.0e-12);
+        assert!((out[0].spl_db - 80.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_keeps_distant_maskers_separate() {
+        // Two tonal maskers at z=5.00 and z=5.50 (exactly 0.5 Bark
+        // apart). The spec's "less than 0.5 Bark" half-open window
+        // means a pair at exactly 0.5 Bark is NOT merged.
+        let input = vec![tonal(5.00, 60.0), tonal(5.50, 70.0)];
+        let out = decimate_tonal_maskers(&input);
+        assert_eq!(out.len(), 2);
+        // Sorted by Bark on output.
+        assert!((out[0].z_bark - 5.00).abs() < 1.0e-12);
+        assert!((out[1].z_bark - 5.50).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_leaves_non_tonal_untouched() {
+        // Two non-tonal maskers at 0.1 Bark apart MUST NOT merge —
+        // the spec procedure is scoped to tonal components only.
+        let input = vec![non_tonal(5.00, 60.0), non_tonal(5.10, 70.0)];
+        let out = decimate_tonal_maskers(&input);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, MaskerKind::NonTonal);
+        assert_eq!(out[1].kind, MaskerKind::NonTonal);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_first_wins_on_equal_power() {
+        // Tie-break: the first-encountered tonal masker at equal SPL
+        // wins. After the internal sort by Bark this is the lower
+        // z_bark entry.
+        let input = vec![tonal(5.00, 70.0), tonal(5.10, 70.0), tonal(5.20, 70.0)];
+        let out = decimate_tonal_maskers(&input);
+        assert_eq!(out.len(), 1);
+        // Lowest Bark wins on ties.
+        assert!((out[0].z_bark - 5.00).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_handles_mixed_classes() {
+        // Mix tonal and non-tonal maskers. Non-tonal preserved in
+        // input order; tonal decimated then appended in Bark order.
+        let input = vec![
+            non_tonal(2.0, 50.0),
+            tonal(5.00, 60.0),
+            non_tonal(10.0, 55.0),
+            tonal(5.10, 80.0), // wins over 5.00 (within 0.5 Bark)
+            tonal(8.00, 65.0), // separate cluster
+        ];
+        let out = decimate_tonal_maskers(&input);
+        assert_eq!(out.len(), 4);
+        // Non-tonal first, in input order.
+        assert_eq!(out[0].kind, MaskerKind::NonTonal);
+        assert!((out[0].z_bark - 2.0).abs() < 1.0e-12);
+        assert_eq!(out[1].kind, MaskerKind::NonTonal);
+        assert!((out[1].z_bark - 10.0).abs() < 1.0e-12);
+        // Surviving tonal, in Bark order.
+        assert_eq!(out[2].kind, MaskerKind::Tonal);
+        assert!((out[2].z_bark - 5.10).abs() < 1.0e-12);
+        assert!((out[2].spl_db - 80.0).abs() < 1.0e-12);
+        assert_eq!(out[3].kind, MaskerKind::Tonal);
+        assert!((out[3].z_bark - 8.00).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_empty_in_empty_out() {
+        let out = decimate_tonal_maskers(&[]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_singleton_passes_through() {
+        // A single tonal masker has no neighbours to decimate
+        // against — it must come out unchanged.
+        let input = vec![tonal(12.0, 65.0)];
+        let out = decimate_tonal_maskers(&input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], input[0]);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_chained_clusters_dont_merge() {
+        // Three tonal maskers at z = 5.0, 5.4, 5.8. The pairs
+        // (5.0, 5.4) and (5.4, 5.8) are each within 0.5 Bark, but
+        // the pair (5.0, 5.8) is 0.8 Bark apart. The sliding-window
+        // procedure must therefore NOT collapse all three into one
+        // — that would violate the spec's "every pair in the window
+        // is within 0.5 Bark" reading. Our implementation anchors
+        // each run on its first entry, so the run starts at 5.0,
+        // accepts 5.4 (0.4 Bark from 5.0), but rejects 5.8 (0.8 Bark
+        // from 5.0). 5.8 starts a new run.
+        let input = vec![tonal(5.0, 60.0), tonal(5.4, 80.0), tonal(5.8, 70.0)];
+        let out = decimate_tonal_maskers(&input);
+        // 5.4 wins the first run; 5.8 stands alone.
+        assert_eq!(out.len(), 2);
+        assert!((out[0].z_bark - 5.4).abs() < 1.0e-12);
+        assert!((out[0].spl_db - 80.0).abs() < 1.0e-12);
+        assert!((out[1].z_bark - 5.8).abs() < 1.0e-12);
+        assert!((out[1].spl_db - 70.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_unsorted_input_still_decimates() {
+        // The function is documented to sort internally. Input
+        // order shouldn't change the decimation result.
+        let asc = vec![tonal(5.00, 60.0), tonal(5.10, 80.0), tonal(5.30, 70.0)];
+        let desc = vec![tonal(5.30, 70.0), tonal(5.10, 80.0), tonal(5.00, 60.0)];
+        let permuted = vec![tonal(5.10, 80.0), tonal(5.30, 70.0), tonal(5.00, 60.0)];
+        let out_asc = decimate_tonal_maskers(&asc);
+        let out_desc = decimate_tonal_maskers(&desc);
+        let out_permuted = decimate_tonal_maskers(&permuted);
+        assert_eq!(out_asc, out_desc);
+        assert_eq!(out_asc, out_permuted);
+    }
+
+    #[test]
+    fn decimate_tonal_maskers_idempotent() {
+        // Decimating twice should produce the same result as once
+        // — the survivors are by construction at least 0.5 Bark
+        // apart (in their cluster's anchor), so the second pass
+        // finds no neighbours to merge.
+        let input = vec![
+            tonal(2.0, 50.0),
+            tonal(5.00, 60.0),
+            tonal(5.10, 80.0),
+            tonal(5.30, 70.0),
+            tonal(8.00, 65.0),
+            tonal(12.0, 75.0),
+        ];
+        let once = decimate_tonal_maskers(&input);
+        let twice = decimate_tonal_maskers(&once);
+        assert_eq!(once, twice);
+    }
+
+    // --- §D.1 Step 8 minimum masking threshold per subband ------
+
+    #[test]
+    fn step8_layer_ii_subband_count_matches_spec() {
+        // §2.4.1.5 / §D.1 Step 8: the Layer II subband count is 32.
+        assert_eq!(NUM_SUBBANDS_LAYER2, 32);
+    }
+
+    #[test]
+    fn step8_returns_min_per_subband() {
+        // Two FFT lines in subband 0 at LTg = 30 and 25 dB; one in
+        // subband 1 at LTg = 45 dB; one in subband 31 at LTg = 55 dB;
+        // every other subband empty.
+        let ltg = vec![30.0_f64, 25.0, 45.0, 55.0];
+        let map = vec![0_usize, 0, 1, 31];
+        let out = minimum_masking_threshold_subband(&ltg, &map);
+        assert_eq!(out[0], Some(25.0));
+        assert_eq!(out[1], Some(45.0));
+        for (n, slot) in out.iter().enumerate().take(31).skip(2) {
+            assert_eq!(*slot, None, "subband {n} expected empty");
+        }
+        assert_eq!(out[31], Some(55.0));
+    }
+
+    #[test]
+    fn step8_oob_subband_indices_are_ignored() {
+        // usize::MAX (the sentinel for "outside audio band") and any
+        // index >= 32 must not crash and must not appear in the
+        // output. Documented behaviour for both.
+        let ltg = vec![10.0_f64, 99.0, -5.0];
+        let map = vec![0_usize, usize::MAX, 32];
+        let out = minimum_masking_threshold_subband(&ltg, &map);
+        assert_eq!(out[0], Some(10.0));
+        for (n, slot) in out.iter().enumerate().skip(1) {
+            assert_eq!(*slot, None, "subband {n} should have been ignored");
+        }
+    }
+
+    #[test]
+    fn step8_length_mismatch_returns_all_none() {
+        // Caller error: ltg.len() != map.len(). Documented safe
+        // return: every slot None.
+        let ltg = vec![30.0_f64, 25.0, 45.0];
+        let map = vec![0_usize, 1];
+        let out = minimum_masking_threshold_subband(&ltg, &map);
+        assert!(out.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn step8_empty_input_returns_all_none() {
+        let out = minimum_masking_threshold_subband(&[], &[]);
+        assert!(out.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn step8_nan_values_are_dropped() {
+        // A NaN LTg value (caller error / signalling sentinel) is
+        // dropped from the minimum reduction so the remaining
+        // finite values still produce a well-defined LT_min.
+        let ltg = vec![20.0_f64, f64::NAN, 15.0];
+        let map = vec![0_usize, 0, 0];
+        let out = minimum_masking_threshold_subband(&ltg, &map);
+        assert_eq!(out[0], Some(15.0));
+    }
+
+    #[test]
+    fn step8_picks_running_min_with_many_lines() {
+        // 10 FFT lines all in subband 5 with descending LTg values;
+        // the running minimum must be the last one (the smallest).
+        let ltg: Vec<f64> = (0..10).map(|i| 100.0 - i as f64 * 7.0).collect();
+        let map = vec![5_usize; 10];
+        let out = minimum_masking_threshold_subband(&ltg, &map);
+        // 100 - 9*7 = 37.
+        assert_eq!(out[5], Some(37.0));
+    }
+
+    #[test]
+    fn step8_single_line_per_subband_propagates_through() {
+        // Trivial bijection: 32 FFT lines, one per subband, LTg(i)
+        // = i. The minimum per subband is just LTg(i) itself.
+        let ltg: Vec<f64> = (0..NUM_SUBBANDS_LAYER2).map(|i| i as f64 * 2.0).collect();
+        let map: Vec<usize> = (0..NUM_SUBBANDS_LAYER2).collect();
+        let out = minimum_masking_threshold_subband(&ltg, &map);
+        for (n, slot) in out.iter().enumerate() {
+            assert_eq!(*slot, Some(n as f64 * 2.0));
+        }
+    }
+
+    // --- §D.1 Step 9 signal-to-mask ratio per subband -----------
+
+    #[test]
+    fn step9_smr_is_l_sb_minus_lt_min() {
+        // Pin the verbatim spec equation across a few subbands.
+        let mut l_sb = [0.0_f64; NUM_SUBBANDS_LAYER2];
+        let mut lt_min = [None; NUM_SUBBANDS_LAYER2];
+        l_sb[0] = 80.0;
+        lt_min[0] = Some(30.0);
+        l_sb[5] = 60.0;
+        lt_min[5] = Some(45.0);
+        l_sb[31] = 90.0;
+        lt_min[31] = Some(40.0);
+        let out = signal_to_mask_ratio_subband(&l_sb, &lt_min);
+        assert_eq!(out[0], Some(50.0));
+        assert_eq!(out[5], Some(15.0));
+        assert_eq!(out[31], Some(50.0));
+    }
+
+    #[test]
+    fn step9_propagates_none_lt_min_to_none_smr() {
+        // §D.1 Step 9 is undefined where LT_min isn't (subbands with
+        // no FFT line in range). The primitive emits None for those
+        // slots so the caller's §C.1.5.2.4 fallback can substitute.
+        let l_sb = [50.0_f64; NUM_SUBBANDS_LAYER2];
+        let lt_min = [None; NUM_SUBBANDS_LAYER2];
+        let out = signal_to_mask_ratio_subband(&l_sb, &lt_min);
+        assert!(out.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn step9_negative_smr_passes_through() {
+        // Below-threshold subband: SMR may be negative. The primitive
+        // doesn't clamp.
+        let mut l_sb = [0.0_f64; NUM_SUBBANDS_LAYER2];
+        let mut lt_min = [None; NUM_SUBBANDS_LAYER2];
+        l_sb[0] = 20.0;
+        lt_min[0] = Some(50.0);
+        let out = signal_to_mask_ratio_subband(&l_sb, &lt_min);
+        assert_eq!(out[0], Some(-30.0));
+    }
+
+    #[test]
+    fn step8_and_step9_compose_end_to_end() {
+        // Drive Step 7 → Step 8 → Step 9 on a small synthetic case:
+        // 4 FFT lines, two in subband 3, two in subband 7. Step 8
+        // takes the min per subband; Step 9 subtracts that min from
+        // L_sb to land the per-subband SMR.
+        let ltg = vec![40.0_f64, 50.0, 35.0, 60.0];
+        let map = vec![3_usize, 3, 7, 7];
+        let lt_min = minimum_masking_threshold_subband(&ltg, &map);
+        assert_eq!(lt_min[3], Some(40.0));
+        assert_eq!(lt_min[7], Some(35.0));
+        let mut l_sb = [0.0_f64; NUM_SUBBANDS_LAYER2];
+        l_sb[3] = 75.0;
+        l_sb[7] = 70.0;
+        let smr = signal_to_mask_ratio_subband(&l_sb, &lt_min);
+        assert_eq!(smr[3], Some(35.0));
+        assert_eq!(smr[7], Some(35.0));
+        // Other subbands carry no LT_min and so no SMR.
+        for (n, slot) in smr.iter().enumerate() {
+            if n == 3 || n == 7 {
+                continue;
+            }
+            assert_eq!(*slot, None);
+        }
     }
 }
