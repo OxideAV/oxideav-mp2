@@ -360,6 +360,63 @@ is rate-driven only. The masker → masking-threshold half of
 Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
 module — see **Round 238** below.
 
+**Round 250 (2026-06-07)** added Annex D Model 1 §D.1 Step 4(b)
+tonal-neighbourhood zero-out and §D.1 Step 4(c) non-tonal listing
+(`psy` module + new `tables_d2` module). Four new spec-text-only
+entry points wire the "set the tonal neighbourhood to −∞ dB then
+power-sum the remaining lines per critical band" half of Step 4:
+`zero_tonal_neighbourhood_layer2(spl_db, k)` walks the same per-`k`
+`j`-neighbourhood used by Step 4(b) tonality testing and sets every
+line within it (plus the centre `k`) to `f64::NEG_INFINITY`,
+reproducing the verbatim spec sentence "all spectral lines within
+the examined frequency range are set to −∞ dB" (PDF page 112);
+`non_tonal_spl_db(spl_db, lo, hi) -> Option<f64>` is the
+per-critical-band power sum
+`X_nm = 10·log10(Sum 10^(X(k)/10))` over `k in [lo, hi]`,
+ignoring `-inf` lines exactly (`10^(-inf/10) = 0`) and returning
+`None` for empty or fully-zeroed bands; `non_tonal_band_index(lo,
+hi) -> Option<usize>` picks the FFT line "nearest to the geometric
+mean of the critical band" per the spec phrasing (PDF page 113) on
+the integer band `[lo, hi]` (with `lo = 0` substituted as `1` to
+avoid `sqrt(0)` collapse), returning the nearest integer with ties
+rounded down; `list_non_tonal_layer2(spl_db, fs) -> Vec<Masker>`
+is the per-sampling-rate Step 4(c) sweep — it walks the Annex D
+Table D.2d / D.2e / D.2f boundaries in order, calls
+`non_tonal_spl_db` on each `(prev_top + 1, top]` band, and emits
+one `Masker { kind: NonTonal, z_bark, spl_db }` per non-empty band
+with `z_bark` taken from the boundary's top-line Bark column. A
+new `tables_d2` module carries the Layer-II critical-band
+boundary tables verbatim from the Annex D PDF: 25 entries
+(`TABLE_D_2D_LAYER_II_32KHZ`), 27 entries
+(`TABLE_D_2E_LAYER_II_44K1HZ`), 27 entries
+(`TABLE_D_2F_LAYER_II_48KHZ`); one illegible-digit cell at D.2e
+band 17 (Bark `16,11[illegible]` in the staged PDF) is reproduced
+as best-fit `16.116` and the gap is documented in the constant's
+doc comment. A new `SamplingRate { Fs32kHz, Fs44k1Hz, Fs48kHz }`
+enumeration (re-exported as `PsyAnnexDSamplingRate`) lets the
+`list_non_tonal_layer2` caller pick the right boundary table.
+Steps 2 / 3 / 5 still depend on the PNG-only inner rows of Annex D
+Tables D.1 / D.3 / D.4 (#1262) and remain DOCS-BLOCKED. 27 new
+lib tests (271 → 298): boundary monotonicity in all three
+dimensions (top-line index, frequency, Bark) for D.2d/D.2e/D.2f
+and row-count parity with the spec column headings; tonality
+zero-out on a `{-2, +2}` row and on the widest `{-12, …, +12}`
+row, with the immediately-adjacent out-of-window lines verified
+unchanged and the no-op behaviour for k ≤ 2 / k > 500; non-tonal
+power-sum identity for three equal-power lines
+(`60 + 10·log10(3) ≈ 64.7712`), `-inf` line exclusion (two finite
+60 dB lines power-sum to `60 + 10·log10(2)`), all-`-inf` band
+returns `None`, dominant-line band anchors `X_nm` to the dominant
+line within 1 mdB, and the empty-band rejection cases; geometric
+mean nearest-integer pick on the simple `sqrt(64) = 8`,
+`sqrt(9) = 3`, `sqrt(225) = 15` cases plus the singleton, DC-bin,
+and fractional rounding rules; per-sampling-rate sweep returns
+one masker per band on a flat spectrum, drops all bands on a
+fully-zeroed spectrum, propagates `z_bark` from the Table D.2
+boundary verbatim, sums equal-width bands to identical `X_nm`,
+and locates a single 100 dB line in the correct band's masker
+within 1 mdB.
+
 **Round 248 (2026-06-07)** added Annex D Model 1 §D.1 Step 1 Hann
 window and §D.1 Step 4 tonality classifier primitives (`psy` module).
 Five new spec-text-only entry points land the FFT-windowing and the

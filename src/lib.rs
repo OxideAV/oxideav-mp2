@@ -216,6 +216,7 @@ pub mod requant;
 pub mod synthesis;
 pub mod tables;
 pub mod tables_analysis;
+pub mod tables_d2;
 pub mod tables_synthesis;
 
 pub use analysis::{AnalysisFilterbank, NUM_SUBBANDS as ANALYSIS_NUM_SUBBANDS, X_BUF_LEN};
@@ -264,8 +265,9 @@ pub use header::{
 };
 pub use psy::{
     global_masking_threshold_db, hann_window_layer2, individual_masking_threshold_db,
-    is_local_maximum, is_tonal_layer2, masking_function_vf, masking_index_non_tonal,
-    masking_index_tonal, tonal_neighbourhood_layer2, tonal_spl_db, Masker, MaskerKind,
+    is_local_maximum, is_tonal_layer2, list_non_tonal_layer2, masking_function_vf,
+    masking_index_non_tonal, masking_index_tonal, non_tonal_band_index, non_tonal_spl_db,
+    tonal_neighbourhood_layer2, tonal_spl_db, zero_tonal_neighbourhood_layer2, Masker, MaskerKind,
     LAYER2_FFT_BINS, LAYER2_FFT_LEN, MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO,
     TONALITY_THRESHOLD_DB,
 };
@@ -273,6 +275,10 @@ pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, Req
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
 pub use tables_analysis::{C as ANALYSIS_WINDOW, C_LEN as ANALYSIS_WINDOW_LEN};
+pub use tables_d2::{
+    CriticalBandBoundary, SamplingRate as PsyAnnexDSamplingRate, TABLE_D_2D_LAYER_II_32KHZ,
+    TABLE_D_2E_LAYER_II_44K1HZ, TABLE_D_2F_LAYER_II_48KHZ,
+};
 pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 
 /// Crate-local error type. The frame-level decode path is wired up via

@@ -8,6 +8,48 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 4(b) tonal-neighbourhood zero-out and
+  §D.1 Step 4(c) non-tonal-component listing (`psy` module + new
+  `tables_d2` module). Four new spec-text-only pure functions wire
+  together the "set the tonal neighbourhood to −∞ dB then power-sum
+  the remaining lines per critical band" half of Step 4 the spec
+  prose calls out:
+  * `zero_tonal_neighbourhood_layer2(spl_db, k)` walks the same
+    per-`k` `j`-neighbourhood used by Step 4(b) tonality testing and
+    sets every line within it (plus the centre `k` itself) to
+    `f64::NEG_INFINITY`, reproducing the verbatim spec sentence
+    "all spectral lines within the examined frequency range are set
+    to −∞ dB" (PDF page 112).
+  * `non_tonal_spl_db(spl_db, lo, hi) -> Option<f64>` is the
+    per-critical-band power sum `X_nm = 10 * log10(Sum 10^(X(k)/10))`
+    over `k in [lo, hi]`, ignoring `-inf` lines exactly (since
+    `10^(-inf/10) = 0`); returns `None` for empty or fully-zeroed
+    bands.
+  * `non_tonal_band_index(lo, hi) -> Option<usize>` picks the FFT
+    line "nearest to the geometric mean of the critical band" per
+    the spec phrasing (PDF page 113). The geometric mean is computed
+    on the integer band `[lo, hi]` (with `lo = 0` substituted as
+    `1` to avoid `sqrt(0)` collapse) and the nearest integer in
+    `[lo, hi]` is returned; ties round down.
+  * `list_non_tonal_layer2(spl_db, fs) -> Vec<Masker>` is the
+    per-sampling-rate Step 4(c) sweep — it iterates the Annex D
+    Table D.2d / D.2e / D.2f boundaries in order, calls
+    `non_tonal_spl_db` on each `(prev_top + 1, top]` band, and
+    produces one `Masker { kind: NonTonal, z_bark, spl_db }` per
+    non-empty band. The masker's `z_bark` is set to the boundary's
+    top-line Bark column.
+  * New module `tables_d2` carries the Layer-II critical-band
+    boundary tables verbatim: `TABLE_D_2D_LAYER_II_32KHZ` (25
+    entries), `TABLE_D_2E_LAYER_II_44K1HZ` (27 entries),
+    `TABLE_D_2F_LAYER_II_48KHZ` (27 entries). One illegible-digit
+    cell in the staged PDF (D.2e band 17, Bark `16,11[illegible]`)
+    is reproduced as the best-fit `16.116` and the gap is
+    documented in the constant's doc comment. A new
+    `SamplingRate { Fs32kHz, Fs44k1Hz, Fs48kHz }` enumeration
+    (re-exported as `PsyAnnexDSamplingRate`) lets the
+    `list_non_tonal_layer2` caller pick the right boundary table.
+  Total lib tests 271 → 298 (+27).
+
 - Annex D Model 1 §D.1 Step 1 Hann window and §D.1 Step 4 tonality
   classifier primitives (`psy` module). Five new spec-text-only
   pure functions land the FFT-windowing and tonal/non-tonal labelling

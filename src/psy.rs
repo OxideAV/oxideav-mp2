@@ -24,6 +24,19 @@
 //! * **Step 4(b) tonal-component SPL** ([`tonal_spl_db`]) — the
 //!   three-line power sum `X_tm = 10 * log10(10^(X(k-1)/10) +
 //!   10^(X(k)/10) + 10^(X(k+1)/10))`.
+//! * **Step 4(b) zero-out of the examined frequency range**
+//!   ([`zero_tonal_neighbourhood_layer2`]) — the spec sentence "all
+//!   spectral lines within the examined frequency range are set to
+//!   −∞ dB" applied to the tonality-test neighbourhood around a
+//!   confirmed tonal line.
+//! * **Step 4(c) listing of non-tonal components**
+//!   ([`non_tonal_spl_db`] for a single critical band;
+//!   [`list_non_tonal_layer2`] for the per-sampling-rate sweep
+//!   using the text-extracted Annex D Tables D.2d / D.2e / D.2f).
+//!   Each band is power-summed across its `(prev_top, top]` FFT-line
+//!   run; the representative index of the resulting non-tonal masker
+//!   is the spec's "nearest to the geometric mean of the critical
+//!   band" rule, applied directly on FFT-line indices.
 //! * **Step 6 masker indices and masking function `vf`**
 //!   ([`masking_index_tonal`], [`masking_index_non_tonal`],
 //!   [`masking_function_vf`]) and the per-masker individual masking
@@ -38,6 +51,15 @@
 //! D.5 / D.2 coder partition table). They are tracked under the
 //! docs-collaborator Tables D.1a–f / D.3a–c / D.4a–c PNG → text
 //! extraction gap (note `#1262`).
+//!
+//! Step 4(c) and the Layer-II critical-band-boundary tables
+//! D.2d / D.2e / D.2f are independent of that gap — those tables
+//! survive `pdftotext` cleanly and are transcribed verbatim in
+//! [`crate::tables_d2`]. The Layer-II band-count discrepancy noted
+//! there (D.1 Step 4(c) prose "24 / 26 / 26" vs. the published
+//! 25 / 27 / 27-row tables) is left unresolved at this layer; the
+//! primitive iterates every published row and a future round will
+//! decide whether downstream callers trim the topmost entry.
 //!
 //! ## Spec context (clause D.1, ISO/IEC 11172-3:1993, informative)
 //!
@@ -461,9 +483,207 @@ pub fn global_masking_threshold_db(maskers: &[Masker], z_i_bark: f64, ltq_db: f6
     10.0 * energy_sum.log10()
 }
 
+/// §D.1 Step 4(b) zero-out of the **examined frequency range** for a
+/// confirmed tonal line.
+///
+/// The spec phrasing (PDF page 112, printed 112):
+///
+/// > Next, all spectral lines within the examined frequency range
+/// > are set to −∞ dB.
+///
+/// The "examined frequency range" is the neighbourhood used by the
+/// Step 4(b) tonality test — for FFT-line `k` at Layer II this is
+/// `[k + j_min, k + j_max]` where `j_min`, `j_max` are the spec's
+/// per-`k` `j` table (cf. [`tonal_neighbourhood_layer2`]). The line
+/// itself (`j = 0`) is also included; the tonal masker's SPL has
+/// already been folded into `X_tm(k)` by [`tonal_spl_db`] and the
+/// raw FFT line is no longer used downstream.
+///
+/// The "set to −∞ dB" sentinel is represented here as
+/// [`f64::NEG_INFINITY`]; the Step 4(c) power sum
+/// (`10^(X(k)/10)`) then evaluates `10^(-inf / 10) = 0` and the
+/// zeroed lines contribute nothing.
+///
+/// Out-of-range `k` (no tonality neighbourhood defined for `k <= 2`
+/// or `k > 500`) is a no-op — the spec only zeroes the neighbourhood
+/// of a confirmed tonal component and confirmed components live
+/// inside the `tonal_neighbourhood_layer2` definition domain.
+pub fn zero_tonal_neighbourhood_layer2(spl_db: &mut [f64], k: usize) {
+    let Some(neighbourhood) = tonal_neighbourhood_layer2(k) else {
+        return;
+    };
+    // Zero the line itself first; downstream Step 4(c) reads
+    // `spl_db[k]` and must see the −∞ sentinel.
+    if k < spl_db.len() {
+        spl_db[k] = f64::NEG_INFINITY;
+    }
+    for &j in neighbourhood {
+        let probe = k as i32 + j;
+        if probe < 0 {
+            continue;
+        }
+        let idx = probe as usize;
+        if idx < spl_db.len() {
+            spl_db[idx] = f64::NEG_INFINITY;
+        }
+    }
+}
+
+/// §D.1 Step 4(c) non-tonal SPL `X_nm(k)` for a single critical band.
+///
+/// The spec phrasing (PDF page 112, printed 112):
+///
+/// > Within each critical band, the power of the spectral lines
+/// > (remaining after the tonal components have been zeroed) are
+/// > summed to form the sound pressure level of the new non-tonal
+/// > component X_nm(k) corresponding to that critical band.
+///
+/// `spl_db` carries the post-Step-4(b)-zero-out spectrum in dB.
+/// `lo` is the first FFT-line index of the critical band (inclusive)
+/// and `hi` is the top FFT-line index (inclusive) — the Annex D
+/// Table D.2 `index F&CB` column. A pair from successive D.2
+/// rows defines one critical band as
+/// `[prev_top + 1, top]` (the very first band of the table runs
+/// from FFT-line 0 to the first table row's `top_line_index`).
+///
+/// The aggregation is the same power-sum-then-log used in
+/// [`tonal_spl_db`] and [`global_masking_threshold_db`]:
+///
+/// ```text
+/// X_nm = 10 * log10( Sum 10^(X(k)/10) )      dB
+///        k in [lo, hi]
+/// ```
+///
+/// Returns `None` when the band is empty (`lo > hi` or `lo` past the
+/// spectrum end) or every line in the band is `-inf dB` (the
+/// band carried only tonal-zeroed content; `10^(-inf/10) = 0` and
+/// `log10(0)` is `-inf`, which the caller usually wants to skip
+/// rather than carry as a finite masker — represent this as
+/// `None`).
+#[must_use]
+pub fn non_tonal_spl_db(spl_db: &[f64], lo: usize, hi: usize) -> Option<f64> {
+    if lo > hi || lo >= spl_db.len() {
+        return None;
+    }
+    let upper = hi.min(spl_db.len() - 1);
+    let mut energy_sum = 0.0_f64;
+    let mut any_finite = false;
+    for &x in &spl_db[lo..=upper] {
+        if x.is_finite() {
+            energy_sum += (10.0_f64).powf(x / 10.0);
+            any_finite = true;
+        }
+    }
+    if !any_finite || energy_sum <= 0.0 {
+        return None;
+    }
+    Some(10.0 * energy_sum.log10())
+}
+
+/// §D.1 Step 4(c) **representative FFT-line index** for a critical
+/// band, picked as the line **nearest to the geometric mean** of the
+/// band's FFT-line index range.
+///
+/// The spec phrasing (PDF page 113, printed 113):
+///
+/// > Index number k of the spectral line nearest to the geometric
+/// > mean of the critical band.
+///
+/// The geometric mean of `[lo, hi]` is `sqrt(lo * hi)` (with `lo == 0`
+/// special-cased to `1` — the DC bin is excluded from the geometric
+/// mean because `sqrt(0 * hi) = 0` collapses to band lo regardless of
+/// hi). The returned index is the integer in `[lo, hi]` closest to
+/// that mean — ties round down (the lower index wins) because the
+/// spec doesn't define a tie-break and the lower-index choice is
+/// stable under floating-point rounding.
+///
+/// Returns `None` when the band is empty (`lo > hi`) — the caller is
+/// then expected to skip this band entirely.
+#[must_use]
+pub fn non_tonal_band_index(lo: usize, hi: usize) -> Option<usize> {
+    if lo > hi {
+        return None;
+    }
+    if lo == hi {
+        return Some(lo);
+    }
+    // Geometric mean. The DC bin (lo == 0) is excluded — the
+    // geometric mean of [0, hi] is identically 0, which collapses
+    // the representative line to the band's lower edge regardless
+    // of how wide the band actually is. Substitute lo = 1 for
+    // this single case (the spec treats DC as below the tonality
+    // domain, cf. `2 < k` in Step 4(b)).
+    let lo_eff = if lo == 0 { 1 } else { lo };
+    let geo = ((lo_eff as f64) * (hi as f64)).sqrt();
+    // Pick the integer index in [lo, hi] closest to `geo`. Tie
+    // breaks downward (round-half-down) — at fractional 0.5 the
+    // lower index is returned.
+    let floor = geo.floor() as usize;
+    let ceil = (floor + 1).min(hi);
+    let d_floor = (geo - floor as f64).abs();
+    let d_ceil = (geo - ceil as f64).abs();
+    let picked = if d_ceil < d_floor { ceil } else { floor };
+    Some(picked.clamp(lo, hi))
+}
+
+/// §D.1 Step 4(c) non-tonal listing pass for Layer II, sweeping
+/// every critical band of the supplied sampling rate using the
+/// text-extracted Annex D Tables D.2d / D.2e / D.2f (see
+/// [`crate::tables_d2`]).
+///
+/// `spl_db` is the post-Step-4(b)-zero-out spectrum in dB; the
+/// function reads it without mutating it. For each critical band
+/// `[prev_top + 1, top]` (the first band runs `[0, first_top]`) the
+/// pass produces one [`Masker`] of [`MaskerKind::NonTonal`] kind:
+///
+/// * `spl_db` = [`non_tonal_spl_db`] across the band's FFT lines,
+/// * `z_bark` = the Annex D Table D.2 `Bark [z]` column of the
+///   band's top line (the spec doesn't tabulate Bark at every line
+///   index, so the boundary's Bark is the convention used here for
+///   the Bark-axis placement consumed by Step 6 `vf`),
+/// * The representative FFT-line index (per
+///   [`non_tonal_band_index`]) is not carried on `Masker` directly —
+///   it lives only inside Step 4(c) and is dropped before Step 6.
+///   For callers that need the line index alongside the masker,
+///   use [`non_tonal_band_index`] separately on the same `(lo, hi)`
+///   pair.
+///
+/// Bands that carry only `-inf dB` lines (the whole band was
+/// tonal-zeroed) are silently dropped — `non_tonal_spl_db` returns
+/// `None` and that band contributes no entry. The returned vector
+/// therefore has at most `boundaries.len()` entries (typically all
+/// of them; a clean tonal-zero-out only removes one band when the
+/// entire critical band is occupied by a single tonal neighbourhood,
+/// which is rare in practice).
+///
+/// The output vector is allocated by the function; no scratch buffer
+/// argument is needed because the per-call allocation is bounded by
+/// the small Layer II band count (25 / 27 / 27).
+#[must_use]
+pub fn list_non_tonal_layer2(spl_db: &[f64], fs: crate::tables_d2::SamplingRate) -> Vec<Masker> {
+    let boundaries = fs.critical_band_boundaries();
+    let mut out = Vec::with_capacity(boundaries.len());
+    // First band: FFT lines [0, boundaries[0].top_line_index].
+    // Subsequent bands: [prev_top + 1, top].
+    let mut lo = 0_usize;
+    for boundary in boundaries {
+        let hi = boundary.top_line_index as usize;
+        if let Some(x_nm) = non_tonal_spl_db(spl_db, lo, hi) {
+            out.push(Masker {
+                kind: MaskerKind::NonTonal,
+                z_bark: boundary.top_bark,
+                spl_db: x_nm,
+            });
+        }
+        lo = hi + 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables_d2::SamplingRate;
 
     #[test]
     fn masking_index_tonal_recovers_spec_formula() {
@@ -1016,6 +1236,270 @@ mod tests {
             (double - expected).abs() < 1.0e-9,
             "double {double} - single {single} = {} dB, expected +3.0103",
             double - single,
+        );
+    }
+
+    #[test]
+    fn zero_tonal_neighbourhood_layer2_zeroes_centre_and_neighbours() {
+        // Pick a centre line in the {-2, +2} neighbourhood row.
+        // The spec sentence: "all spectral lines within the
+        // examined frequency range are set to −∞ dB".
+        let mut spectrum = vec![10.0_f64; 64];
+        zero_tonal_neighbourhood_layer2(&mut spectrum, 30);
+        // Centre.
+        assert!(spectrum[30].is_infinite() && spectrum[30].is_sign_negative());
+        // {-2, +2} neighbourhood (j = -2, +2 for 2 < k < 63).
+        assert!(spectrum[28].is_infinite() && spectrum[28].is_sign_negative());
+        assert!(spectrum[32].is_infinite() && spectrum[32].is_sign_negative());
+        // Lines outside the neighbourhood are untouched.
+        assert_eq!(spectrum[27], 10.0);
+        assert_eq!(spectrum[29], 10.0);
+        assert_eq!(spectrum[31], 10.0);
+        assert_eq!(spectrum[33], 10.0);
+    }
+
+    #[test]
+    fn zero_tonal_neighbourhood_layer2_wider_row() {
+        // Step into the {-12, ..., -2, +2, ..., +12} row at k = 300.
+        // Verify the inner symmetric pair {-2, +2} and the outer
+        // pair {-12, +12} are both zeroed, and lines just outside
+        // (j = ±13) are not.
+        let mut spectrum = vec![5.0_f64; 513];
+        zero_tonal_neighbourhood_layer2(&mut spectrum, 300);
+        assert!(spectrum[300].is_infinite());
+        assert!(spectrum[298].is_infinite()); // j = -2
+        assert!(spectrum[302].is_infinite()); // j = +2
+        assert!(spectrum[288].is_infinite()); // j = -12
+        assert!(spectrum[312].is_infinite()); // j = +12
+        assert_eq!(spectrum[287], 5.0); // j = -13 out of neighbourhood
+        assert_eq!(spectrum[313], 5.0); // j = +13 out of neighbourhood
+    }
+
+    #[test]
+    fn zero_tonal_neighbourhood_layer2_skips_out_of_range_k() {
+        // k = 1 has no tonality neighbourhood (the spec leaves
+        // it undefined for k <= 2) — the operation must be a no-op.
+        let mut spectrum = vec![7.0_f64; 16];
+        zero_tonal_neighbourhood_layer2(&mut spectrum, 1);
+        for (i, &x) in spectrum.iter().enumerate() {
+            assert_eq!(x, 7.0, "spectrum[{i}] modified by no-op call");
+        }
+        // k = 501 likewise.
+        let mut spectrum2 = vec![7.0_f64; 600];
+        zero_tonal_neighbourhood_layer2(&mut spectrum2, 501);
+        for (i, &x) in spectrum2.iter().enumerate() {
+            assert_eq!(x, 7.0, "spectrum2[{i}] modified by no-op call");
+        }
+    }
+
+    #[test]
+    fn non_tonal_spl_db_three_equal_lines_sums_in_power_domain() {
+        // Three 60 dB lines power-sum to 60 + 10·log10(3) ≈ 64.7712 dB.
+        let spectrum = [60.0_f64; 8];
+        let got = non_tonal_spl_db(&spectrum, 2, 4).expect("non-empty band");
+        let expected = 60.0 + 10.0 * 3.0_f64.log10();
+        assert!(
+            (got - expected).abs() < 1.0e-9,
+            "X_nm = {got}, expected {expected}",
+        );
+    }
+
+    #[test]
+    fn non_tonal_spl_db_ignores_neg_inf_zeroed_lines() {
+        // After Step 4(b) zeroing, lines marked -inf must drop out
+        // of the Step 4(c) power sum exactly (10^(-inf/10) = 0).
+        let spectrum = [
+            f64::NEG_INFINITY,
+            60.0,
+            f64::NEG_INFINITY,
+            60.0,
+            f64::NEG_INFINITY,
+        ];
+        let got = non_tonal_spl_db(&spectrum, 0, 4).expect("two finite lines");
+        let expected = 60.0 + 10.0 * 2.0_f64.log10();
+        assert!(
+            (got - expected).abs() < 1.0e-9,
+            "X_nm = {got}, expected {expected} (two finite lines @ 60 dB)",
+        );
+    }
+
+    #[test]
+    fn non_tonal_spl_db_all_neg_inf_returns_none() {
+        // A fully-zeroed band carries no non-tonal energy; the
+        // primitive returns None so the caller can drop the band
+        // rather than carry a -inf-dB masker.
+        let spectrum = [f64::NEG_INFINITY; 10];
+        assert_eq!(non_tonal_spl_db(&spectrum, 1, 5), None);
+    }
+
+    #[test]
+    fn non_tonal_spl_db_rejects_empty_band() {
+        let spectrum = [40.0_f64; 10];
+        // lo > hi.
+        assert_eq!(non_tonal_spl_db(&spectrum, 5, 4), None);
+        // lo past the spectrum end.
+        assert_eq!(non_tonal_spl_db(&spectrum, 11, 12), None);
+    }
+
+    #[test]
+    fn non_tonal_spl_db_dominant_line_anchors_sum() {
+        // One 100 dB line with shoulders 60 dB lower contributes
+        // ~all of the band power — the result is within tens of mdB
+        // of the dominant line.
+        let spectrum = [40.0_f64, 40.0, 100.0, 40.0, 40.0];
+        let got = non_tonal_spl_db(&spectrum, 0, 4).expect("non-empty band");
+        assert!(
+            (got - 100.0).abs() < 0.001,
+            "dominant 100 dB line yielded X_nm = {got}",
+        );
+    }
+
+    #[test]
+    fn non_tonal_band_index_geometric_mean_simple() {
+        // [4, 16]: geometric mean sqrt(64) = 8 exactly.
+        assert_eq!(non_tonal_band_index(4, 16), Some(8));
+        // [1, 9]: sqrt(9) = 3.
+        assert_eq!(non_tonal_band_index(1, 9), Some(3));
+        // [9, 25]: sqrt(225) = 15.
+        assert_eq!(non_tonal_band_index(9, 25), Some(15));
+    }
+
+    #[test]
+    fn non_tonal_band_index_singleton_band() {
+        // Single-line band returns its single index regardless of
+        // value.
+        assert_eq!(non_tonal_band_index(7, 7), Some(7));
+    }
+
+    #[test]
+    fn non_tonal_band_index_dc_excluded_from_geomean() {
+        // [0, 10]: naïve sqrt(0) = 0, but the spec's "geometric
+        // mean" only makes sense over [1, hi]. The primitive
+        // substitutes lo = 1, giving sqrt(10) ≈ 3.162 — closest
+        // integer = 3.
+        assert_eq!(non_tonal_band_index(0, 10), Some(3));
+    }
+
+    #[test]
+    fn non_tonal_band_index_picks_nearest_integer() {
+        // [2, 5]: sqrt(10) ≈ 3.162 — closest int = 3.
+        assert_eq!(non_tonal_band_index(2, 5), Some(3));
+        // [3, 8]: sqrt(24) ≈ 4.899 — closest int = 5.
+        assert_eq!(non_tonal_band_index(3, 8), Some(5));
+    }
+
+    #[test]
+    fn non_tonal_band_index_empty_band_returns_none() {
+        assert_eq!(non_tonal_band_index(5, 4), None);
+    }
+
+    #[test]
+    fn list_non_tonal_layer2_returns_one_masker_per_band_on_flat_spectrum() {
+        // Drive a flat 30 dB spectrum through the Layer II 32 kHz
+        // (25-band) sweep. Every band carries finite content so the
+        // output has 25 maskers, all NonTonal.
+        let spectrum = vec![30.0_f64; LAYER2_FFT_BINS];
+        let maskers = list_non_tonal_layer2(&spectrum, SamplingRate::Fs32kHz);
+        assert_eq!(maskers.len(), 25);
+        for m in &maskers {
+            assert_eq!(m.kind, MaskerKind::NonTonal);
+        }
+    }
+
+    #[test]
+    fn list_non_tonal_layer2_skips_fully_zeroed_bands() {
+        // Zero out every line: no non-tonal maskers.
+        let spectrum = vec![f64::NEG_INFINITY; LAYER2_FFT_BINS];
+        let maskers = list_non_tonal_layer2(&spectrum, SamplingRate::Fs44k1Hz);
+        assert!(
+            maskers.is_empty(),
+            "fully-zeroed spectrum produced {} maskers",
+            maskers.len(),
+        );
+    }
+
+    #[test]
+    fn list_non_tonal_layer2_bark_matches_d2_table() {
+        // The masker's z_bark must come straight from the Annex D
+        // Table D.2 boundary's top-line Bark column.
+        let spectrum = vec![20.0_f64; LAYER2_FFT_BINS];
+        let maskers = list_non_tonal_layer2(&spectrum, SamplingRate::Fs48kHz);
+        let table = SamplingRate::Fs48kHz.critical_band_boundaries();
+        assert_eq!(maskers.len(), table.len());
+        for (m, boundary) in maskers.iter().zip(table.iter()) {
+            assert!(
+                (m.z_bark - boundary.top_bark).abs() < 1.0e-12,
+                "masker z_bark {} mismatches boundary top_bark {}",
+                m.z_bark,
+                boundary.top_bark,
+            );
+        }
+    }
+
+    #[test]
+    fn list_non_tonal_layer2_two_equal_bands_sum_equally() {
+        // Drive a flat 40 dB spectrum at 32 kHz; the per-band power
+        // of band b is 40 + 10·log10(width_b). Verify that two
+        // bands with identical width get identical X_nm.
+        let spectrum = vec![40.0_f64; LAYER2_FFT_BINS];
+        let maskers = list_non_tonal_layer2(&spectrum, SamplingRate::Fs32kHz);
+        let table = SamplingRate::Fs32kHz.critical_band_boundaries();
+        // Find two equal-width bands; if any exist, their X_nm must
+        // match exactly.
+        let mut widths = Vec::with_capacity(table.len());
+        let mut prev_top: i64 = -1;
+        for boundary in table {
+            let top = boundary.top_line_index as i64;
+            widths.push(top - prev_top);
+            prev_top = top;
+        }
+        for i in 0..widths.len() {
+            for j in (i + 1)..widths.len() {
+                if widths[i] == widths[j] {
+                    assert!(
+                        (maskers[i].spl_db - maskers[j].spl_db).abs() < 1.0e-9,
+                        "bands {i} ({} wide) and {j} ({} wide) — equal width but X_nm differs: {} vs {}",
+                        widths[i],
+                        widths[j],
+                        maskers[i].spl_db,
+                        maskers[j].spl_db,
+                    );
+                    return;
+                }
+            }
+        }
+        // If no equal-width pair exists in the table the test
+        // assertion is vacuous — still pass.
+    }
+
+    #[test]
+    fn list_non_tonal_layer2_one_loud_line_dominates_its_band() {
+        // Build a spectrum with one 100 dB line at FFT index 30,
+        // everything else 0 dB. The Layer II 32 kHz band containing
+        // index 30 has top_line_index = 30 (cf. D.2d row 8). That
+        // band's X_nm must round to ~100 dB.
+        let mut spectrum = vec![0.0_f64; LAYER2_FFT_BINS];
+        spectrum[30] = 100.0;
+        let maskers = list_non_tonal_layer2(&spectrum, SamplingRate::Fs32kHz);
+        // Find the band whose top_line_index >= 30 and whose
+        // previous top_line_index < 30 — that's the band containing
+        // index 30.
+        let table = SamplingRate::Fs32kHz.critical_band_boundaries();
+        let mut hit_band = None;
+        let mut prev_top: i64 = -1;
+        for (i, boundary) in table.iter().enumerate() {
+            let top = boundary.top_line_index as i64;
+            if prev_top < 30 && top >= 30 {
+                hit_band = Some(i);
+                break;
+            }
+            prev_top = top;
+        }
+        let i = hit_band.expect("index 30 must land in some Layer II 32 kHz band");
+        assert!(
+            (maskers[i].spl_db - 100.0).abs() < 0.001,
+            "band {i} X_nm = {} dB, expected ~100 dB",
+            maskers[i].spl_db,
         );
     }
 }
