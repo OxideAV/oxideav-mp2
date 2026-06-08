@@ -8,6 +8,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 7 masker-range pre-filter (`psy`
+  module). Two new spec-text-only primitives implementing the
+  verbatim "For a given `i` the range of `j` may be reduced to
+  maskers within `-8…+3` Bark of `i`" optimisation sentence
+  (PDF p.120, printed 114):
+  * `masker_in_target_window(z_j_bark, z_i_bark) -> bool` is the
+    pointwise predicate: returns `true` iff
+    `dz = z(i) - z(j) ∈ [-3, 8)`, the identical window
+    `masking_function_vf` uses. The half-open / half-closed
+    asymmetry is reproduced from the spec — a masker at
+    `z(j) = z(i) - 8` is excluded (dz = 8) and one at
+    `z(j) = z(i) + 3` is included (dz = -3). `NaN` on either
+    argument returns `false`.
+  * `relevant_maskers_for_target_line(maskers, z_i_bark) ->
+    Vec<Masker>` filters a masker list to just the entries the
+    predicate accepts, preserving input order. Pre-filtering is
+    purely a performance optimisation —
+    `global_masking_threshold_db` already drops out-of-window
+    entries via `masking_function_vf` returning `None`. The
+    equivalence is pinned by a unit test that sweeps the target
+    Bark axis and checks `LTg(filtered) == LTg(unfiltered)`
+    bit-for-bit on a 5-masker / 7-target mix.
+  * 7 new unit tests pin: window endpoint inclusion/exclusion at
+    `dz = -3` and `dz = 8`, predicate-`individual_masking_threshold_db`
+    agreement across a 12-sample Bark sweep, `NaN` handling on
+    both arguments, in-window survivor extraction with input-order
+    preservation, all-out-of-window collapse to empty, `LTg`
+    invariance under pre-filtering, and idempotence under double
+    filtering at the same target.
 - Annex D Model 1 §D.1 Step 4(b) tonal-component listing sweep
   (`psy` module). One new spec-text-only function that drives the
   per-FFT-line Step 4(b) loop already factored across the existing

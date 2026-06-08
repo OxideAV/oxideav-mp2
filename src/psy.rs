@@ -60,7 +60,14 @@
 //!   [`masking_function_vf`]) and the per-masker individual masking
 //!   threshold ([`individual_masking_threshold_db`]).
 //! * **Step 7 global masking threshold `LTg`**
-//!   ([`global_masking_threshold_db`]).
+//!   ([`global_masking_threshold_db`]) plus the spec optimisation
+//!   pre-filter ([`masker_in_target_window`] /
+//!   [`relevant_maskers_for_target_line`]) implementing the
+//!   verbatim "For a given `i` the range of `j` may be reduced to
+//!   maskers within `-8…+3` Bark of `i`" sentence (PDF p.120,
+//!   printed 114). The pre-filter is equivalence-preserving on
+//!   `LTg`; it only trims maskers that `masking_function_vf` would
+//!   have collapsed to `-inf` anyway.
 //! * **Step 8 minimum masking threshold per subband**
 //!   ([`minimum_masking_threshold_subband`]) — the verbatim spec
 //!   reduction `LT_min(n) = MIN[ LT_g(i) ]` over `f(i) in subband n`,
@@ -510,6 +517,81 @@ pub fn global_masking_threshold_db(maskers: &[Masker], z_i_bark: f64, ltq_db: f6
         }
     }
     10.0 * energy_sum.log10()
+}
+
+/// §D.1 Step 7 spec optimisation predicate: does masker `z(j)`
+/// contribute a non-`-inf` individual masking threshold to the target
+/// line at `z(i)`?
+///
+/// The spec phrasing (PDF page 120, printed 114):
+///
+/// > For a given `i` the range of `j` may be reduced to maskers
+/// > within `-8…+3` Bark of `i`.
+///
+/// This is the symmetric read of the §D.1 Step 6 masking-function
+/// window. The piecewise `vf(dz, X)` (cf. [`masking_function_vf`])
+/// is defined for `dz = z(i) - z(j) ∈ [-3, 8)`, so equivalently the
+/// masker at `z(j)` only contributes to lines in
+/// `[z(j) - 3, z(j) + 8)`, equivalently a target line at `z(i)` is
+/// only influenced by maskers in `(z(i) - 8, z(i) + 3]`.
+///
+/// The predicate exactly mirrors the half-open / half-closed pattern
+/// of `vf`'s `[-3, 8)` reading — a masker at `z(j) = z(i) - 8` is
+/// **excluded** (it would correspond to `dz = 8` which `vf` rejects)
+/// and a masker at `z(j) = z(i) + 3` is **included** (corresponds to
+/// `dz = -3` which `vf` accepts as its lower endpoint). The
+/// half-open / half-closed asymmetry preserves the spec wording
+/// without modification.
+///
+/// `NaN` `z_j_bark` returns `false` — a `NaN` masker is treated as
+/// "outside the window" rather than propagating into the energy sum.
+/// This matches the semantics of [`masking_function_vf`], whose
+/// `Range::contains` guard rejects `NaN` inputs.
+#[inline]
+#[must_use]
+pub fn masker_in_target_window(z_j_bark: f64, z_i_bark: f64) -> bool {
+    // The window in `z(j)` is `(z(i) - 8, z(i) + 3]`. Rewriting in
+    // terms of `dz = z(i) - z(j)` gives `dz ∈ [-3, 8)` — the
+    // identical predicate `masking_function_vf` applies to its `dz`
+    // argument. Reuse that wording exactly to keep both spellings in
+    // lock-step.
+    let dz = z_i_bark - z_j_bark;
+    (MASKING_FUNCTION_DZ_LO..MASKING_FUNCTION_DZ_HI).contains(&dz)
+}
+
+/// §D.1 Step 7 spec optimisation: filter a masker list to just
+/// the entries that lie within the `-8…+3` Bark window around the
+/// target line `z(i)`. The returned entries are exactly the maskers
+/// that produce a non-`-inf` individual masking threshold at `z(i)`
+/// per [`individual_masking_threshold_db`], i.e. the ones whose
+/// power contribution `10^(LT / 10)` is non-zero in the
+/// [`global_masking_threshold_db`] energy sum.
+///
+/// The spec phrasing (PDF page 120, printed 114):
+///
+/// > For a given `i` the range of `j` may be reduced to maskers
+/// > within `-8…+3` Bark of `i`.
+///
+/// Pre-filtering is purely an optimisation — the unfiltered
+/// [`global_masking_threshold_db`] sum already drops out-of-window
+/// maskers via [`masking_function_vf`] returning `None`. The
+/// invariant tested by [`tests::pre_filter_preserves_global_masking_threshold_db`]
+/// holds: feeding the filtered list to `global_masking_threshold_db`
+/// produces the same `LTg(i)` (to within `f64::EPSILON`) as feeding
+/// the full list.
+///
+/// The returned vector preserves input order: maskers are emitted
+/// left-to-right in the same order they appear in `maskers`. No
+/// implicit sort or deduplication is applied — the predicate is
+/// stateless and pointwise. Callers that need an unallocated path
+/// can use [`masker_in_target_window`] directly.
+#[must_use]
+pub fn relevant_maskers_for_target_line(maskers: &[Masker], z_i_bark: f64) -> Vec<Masker> {
+    maskers
+        .iter()
+        .copied()
+        .filter(|m| masker_in_target_window(m.z_bark, z_i_bark))
+        .collect()
 }
 
 /// §D.1 Step 4(b) zero-out of the **examined frequency range** for a
@@ -1344,6 +1426,200 @@ mod tests {
             ltg_both > ltg_m2,
             "LTg both {ltg_both} should be > LTg m2 alone {ltg_m2}",
         );
+    }
+
+    #[test]
+    fn masker_in_target_window_matches_vf_window_endpoints() {
+        // The window in `z(j)` is `(z(i) - 8, z(i) + 3]`. Pick a
+        // target `z(i) = 10` for arithmetic convenience.
+        let z_i = 10.0;
+        // Interior: dz = 0 (masker at target) is inside.
+        assert!(masker_in_target_window(z_i, z_i));
+        // Upper-closed endpoint: z(j) = z(i) + 3 -> dz = -3, included.
+        assert!(masker_in_target_window(z_i + 3.0, z_i));
+        // Lower-open endpoint: z(j) = z(i) - 8 -> dz = 8, excluded.
+        assert!(!masker_in_target_window(z_i - 8.0, z_i));
+        // Just inside the lower-open end: z(j) = z(i) - 8 + eps -> dz < 8.
+        assert!(masker_in_target_window(z_i - 8.0 + 1.0e-6, z_i));
+        // Just outside the upper-closed end: z(j) = z(i) + 3 + eps -> dz = -3 - eps.
+        assert!(!masker_in_target_window(z_i + 3.0 + 1.0e-6, z_i));
+    }
+
+    #[test]
+    fn masker_in_target_window_agrees_with_individual_masking_threshold_db() {
+        // Predicate-level invariant: for every masker, the window
+        // predicate returns `true` iff
+        // `individual_masking_threshold_db` returns `Some(_)` (the
+        // masker contributes a finite individual threshold) and
+        // `false` iff it returns `None` (out of `vf` window).
+        let z_i = 12.0;
+        for z_j in [
+            // Below the lower-open endpoint (excluded).
+            z_i - 9.0,
+            z_i - 8.5,
+            z_i - 8.0,
+            // Inside the window.
+            z_i - 7.99,
+            z_i - 5.0,
+            z_i - 1.0,
+            z_i,
+            z_i + 1.0,
+            z_i + 2.99,
+            z_i + 3.0,
+            // Above the upper-closed endpoint (excluded).
+            z_i + 3.001,
+            z_i + 5.0,
+        ] {
+            let masker = Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: z_j,
+                spl_db: 50.0,
+            };
+            let pred = masker_in_target_window(z_j, z_i);
+            let lt = individual_masking_threshold_db(&masker, z_i);
+            assert_eq!(
+                pred,
+                lt.is_some(),
+                "z(j) = {z_j}, z(i) = {z_i}: pred = {pred}, LT = {lt:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn masker_in_target_window_rejects_nan() {
+        // A `NaN` masker is treated as "outside the window" per the
+        // doc-comment guarantee: `Range::contains` rejects `NaN`.
+        assert!(!masker_in_target_window(f64::NAN, 10.0));
+        // Symmetrically a `NaN` target line excludes any masker.
+        assert!(!masker_in_target_window(10.0, f64::NAN));
+    }
+
+    #[test]
+    fn relevant_maskers_for_target_line_drops_out_of_window_entries() {
+        // Mix four maskers: two inside the window of z(i) = 10 (at
+        // z(j) = 8 and 12, dz = 2 and -2), two outside (z(j) = 1 and
+        // 20). The filter keeps the two inside ones, in input order.
+        let inside_lo = Masker {
+            kind: MaskerKind::Tonal,
+            z_bark: 8.0,
+            spl_db: 40.0,
+        };
+        let outside_lo = Masker {
+            kind: MaskerKind::Tonal,
+            z_bark: 1.0,
+            spl_db: 80.0,
+        };
+        let inside_hi = Masker {
+            kind: MaskerKind::NonTonal,
+            z_bark: 12.0,
+            spl_db: 45.0,
+        };
+        let outside_hi = Masker {
+            kind: MaskerKind::NonTonal,
+            z_bark: 20.0,
+            spl_db: 90.0,
+        };
+        let input = [outside_lo, inside_lo, outside_hi, inside_hi];
+        let kept = relevant_maskers_for_target_line(&input, 10.0);
+        assert_eq!(kept.len(), 2);
+        // Input-order preservation: inside_lo came before inside_hi
+        // in the input vector and must come first in the output.
+        assert_eq!(kept[0], inside_lo);
+        assert_eq!(kept[1], inside_hi);
+    }
+
+    #[test]
+    fn relevant_maskers_for_target_line_empty_when_nothing_in_window() {
+        // All maskers far below the window of z(i) = 25.
+        let m1 = Masker {
+            kind: MaskerKind::Tonal,
+            z_bark: 5.0,
+            spl_db: 80.0,
+        };
+        let m2 = Masker {
+            kind: MaskerKind::NonTonal,
+            z_bark: 10.0,
+            spl_db: 80.0,
+        };
+        assert!(relevant_maskers_for_target_line(&[m1, m2], 25.0).is_empty());
+    }
+
+    #[test]
+    fn pre_filter_preserves_global_masking_threshold_db() {
+        // Spec invariant: pre-filtering the masker list to the
+        // `-8…+3` Bark window is purely a performance optimisation —
+        // `global_masking_threshold_db` already drops out-of-window
+        // entries via `masking_function_vf` returning `None`. So
+        // `LTg(filtered)` must match `LTg(unfiltered)` bit-for-bit.
+        let maskers = [
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: 2.5,
+                spl_db: 70.0,
+            },
+            Masker {
+                kind: MaskerKind::NonTonal,
+                z_bark: 9.0,
+                spl_db: 55.0,
+            },
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: 10.0,
+                spl_db: 80.0,
+            },
+            Masker {
+                kind: MaskerKind::NonTonal,
+                z_bark: 11.5,
+                spl_db: 60.0,
+            },
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: 20.0,
+                spl_db: 75.0,
+            },
+        ];
+        // Sweep target Bark across a range that exercises in-window,
+        // edge, and out-of-window mixes for the masker list above.
+        for z_i in [2.0_f64, 6.0, 10.0, 12.0, 15.0, 18.0, 22.0] {
+            let ltq = -5.0_f64;
+            let full = global_masking_threshold_db(&maskers, z_i, ltq);
+            let filtered = relevant_maskers_for_target_line(&maskers, z_i);
+            let pruned = global_masking_threshold_db(&filtered, z_i, ltq);
+            assert!(
+                (full - pruned).abs() < 1.0e-12,
+                "LTg mismatch at z(i) = {z_i}: full = {full}, filtered ({} of {}) = {pruned}",
+                filtered.len(),
+                maskers.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn pre_filter_idempotent_under_double_application() {
+        // Filtering an already-filtered list at the same `z(i)` must
+        // be a no-op: every surviving masker was already in the
+        // window and the predicate is pointwise.
+        let maskers = [
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: 9.0,
+                spl_db: 70.0,
+            },
+            Masker {
+                kind: MaskerKind::NonTonal,
+                z_bark: 12.0,
+                spl_db: 55.0,
+            },
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: 20.0,
+                spl_db: 80.0,
+            },
+        ];
+        let z_i = 11.0;
+        let once = relevant_maskers_for_target_line(&maskers, z_i);
+        let twice = relevant_maskers_for_target_line(&once, z_i);
+        assert_eq!(once, twice);
     }
 
     #[test]

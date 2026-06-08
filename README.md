@@ -360,6 +360,33 @@ is rate-driven only. The masker → masking-threshold half of
 Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
 module — see **Round 238** below.
 
+**Round 261 (2026-06-08)** added the Annex D Model 1 §D.1 Step 7
+**masker-range pre-filter** (`psy` module). Two new spec-text-only
+primitives implement the verbatim "For a given `i` the range of `j`
+may be reduced to maskers within `-8…+3` Bark of `i`" optimisation
+sentence (PDF p.120, printed 114): `masker_in_target_window(z_j_bark,
+z_i_bark) -> bool` is the pointwise predicate, returning `true` iff
+`dz = z(i) - z(j) ∈ [-3, 8)` — the identical half-open window
+`masking_function_vf` already applies to its `dz` argument. The
+half-open / half-closed asymmetry is reproduced exactly: a masker at
+`z(j) = z(i) - 8` is excluded (corresponds to `dz = 8`) and one at
+`z(j) = z(i) + 3` is included (corresponds to `dz = -3`); `NaN` on
+either argument returns `false`. `relevant_maskers_for_target_line(
+maskers, z_i_bark) -> Vec<Masker>` filters a masker list to the
+entries the predicate accepts, preserving input order. The
+pre-filter is purely a performance optimisation —
+`global_masking_threshold_db` already drops out-of-window entries
+via `masking_function_vf` returning `None` — and the equivalence is
+pinned by a sweep test that walks the target Bark axis across a 5-
+masker / 7-target mix and asserts `LTg(filtered) == LTg(unfiltered)`
+to 1e-12. Seven new lib tests (330 → 337, all green) cover the
+window endpoint inclusion/exclusion at `dz = -3` and `dz = 8`, the
+predicate ↔ `individual_masking_threshold_db` agreement across a
+12-sample Bark sweep, `NaN` rejection on both arguments,
+in-window survivor extraction with input-order preservation,
+all-out-of-window collapse to empty, the `LTg` invariance under
+pre-filtering, and idempotence under double filtering.
+
 **Round 256 (2026-06-08)** added the Annex D Model 1 §D.1 Step 4(b)
 **tonal-component listing sweep** (`psy` module). One new
 spec-text-only entry point drives the per-FFT-line Step 4(b) loop
