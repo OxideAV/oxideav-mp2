@@ -360,6 +360,45 @@ is rate-driven only. The masker → masking-threshold half of
 Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
 module — see **Round 238** below.
 
+**Round 256 (2026-06-08)** added the Annex D Model 1 §D.1 Step 4(b)
+**tonal-component listing sweep** (`psy` module). One new
+spec-text-only entry point drives the per-FFT-line Step 4(b) loop
+across the already-landed `is_tonal_layer2` / `tonal_spl_db` /
+`zero_tonal_neighbourhood_layer2` primitives:
+`list_tonal_layer2(spl_db: &mut [f64]) -> Vec<TonalCandidate>`
+visits `k` in ascending order from 3 up to `min(500, spl_db.len() -
+2)` (the §D.1 Step 4(b) tonality-defined range `2 < k <= 500`
+intersected with the spectrum length), runs the tonality test at
+each `k`, and on a positive classification appends a
+`TonalCandidate { k, spl_db }` carrier and applies the spec's
+"all spectral lines within the examined frequency range are set
+to −∞ dB" zero-out in place. Subsequent `k`s that fall inside an
+already-claimed neighbourhood naturally cannot satisfy either the
+local-maximum rule or the 7 dB inequality against the now-`-inf`
+bins, so the spec's exclusion rule "examined frequency range …
+set to −∞ dB" is honoured without a separate skip list. The new
+`TonalCandidate` carrier intentionally omits the Bark position —
+the FFT-line → Bark mapping lives in the PNG-only Annex D
+Table D.1d / D.1e / D.1f Layer II columns (note `#1262`); when
+that material lands the caller may promote each candidate to a
+full `Masker { kind: Tonal, z_bark, spl_db }` via the table
+lookup. The sweep + zero-out composes cleanly with the
+already-landed `list_non_tonal_layer2` Step 4(c) pass — bands
+fully zeroed by the tonal sweep drop out of the non-tonal listing
+via `non_tonal_spl_db == None`. 9 new lib tests (321 → 330) pin:
+single-isolated-peak detection plus the `X_tm` three-line
+power-sum value, neighbourhood zero-out coverage (centre + both
+`j = ±2` neighbours at −∞, outside lines untouched), subthreshold
+rejection at 5 dB below the 7 dB inequality, within-prior-
+neighbourhood suppression (two peaks 2 bins apart → one
+survivor), well-separated multi-peak emission at `k = 30` /
+`k = 80` (densest-row j=±2 and second-row j ∈ {-3,-2,+2,+3}
+neighbourhoods both consumed), ascending-`k` output ordering on
+four peaks, edge-of-domain candidates ignored (k=1, k=600 in a
+1024-bin spectrum), end-to-end composition with
+`list_non_tonal_layer2`, and the short-spectrum (`len < 4`)
+no-op guard.
+
 **Round 253 (2026-06-08)** added Annex D Model 1 §D.1 Step 5(b)
 tonal-masker decimation and §D.1 Steps 8 + 9 minimum-masking-
 threshold-per-subband / signal-to-mask-ratio primitives (`psy`

@@ -29,6 +29,17 @@
 //!   spectral lines within the examined frequency range are set to
 //!   −∞ dB" applied to the tonality-test neighbourhood around a
 //!   confirmed tonal line.
+//! * **Step 4(b) tonal-component listing sweep**
+//!   ([`list_tonal_layer2`]) — the per-spectrum loop that combines
+//!   [`is_tonal_layer2`] + [`tonal_spl_db`] +
+//!   [`zero_tonal_neighbourhood_layer2`] across `2 < k <= 500`,
+//!   emitting a [`TonalCandidate`] for every confirmed line and
+//!   leaving the input spectrum with each confirmed tonal's
+//!   "examined frequency range" set to −∞ dB ready for Step 4(c).
+//!   The carrier intentionally omits the masker Bark position; the
+//!   FFT-line → Bark mapping is part of the §D.1 Step 6 input
+//!   transformation and is gated on the PNG-only D.1 tables (cf.
+//!   `#1262`).
 //! * **Step 4(c) listing of non-tonal components**
 //!   ([`non_tonal_spl_db`] for a single critical band;
 //!   [`list_non_tonal_layer2`] for the per-sampling-rate sweep
@@ -545,6 +556,130 @@ pub fn zero_tonal_neighbourhood_layer2(spl_db: &mut [f64], k: usize) {
             spl_db[idx] = f64::NEG_INFINITY;
         }
     }
+}
+
+/// A single Step 4(b) tonal candidate: the FFT-line index `k` at
+/// which a tonal masker was detected, and the three-line power-sum
+/// SPL `X_tm(k)` (in dB) computed at that line.
+///
+/// This carrier does **not** include the masker's Bark position
+/// `z(j)` — the FFT-line → Bark mapping lives in the PNG-only
+/// Annex D Table D.1d / D.1e / D.1f Layer II columns and is not
+/// available in the staged text extracts this round (note `#1262`).
+/// When that material lands, the caller may convert each
+/// [`TonalCandidate`] into a [`Masker`] of [`MaskerKind::Tonal`]
+/// kind by looking up `z(j) = z[k]` from the table and using
+/// `spl_db = candidate.spl_db`.
+///
+/// The two-stage carrier (line-index now, Bark later) keeps the
+/// Step 4(b) sweep self-contained: every primitive it depends on
+/// (`is_local_maximum`, `is_tonal_layer2`, `tonal_spl_db`,
+/// `zero_tonal_neighbourhood_layer2`) is spec-text-only, and the
+/// Bark assignment that *would* be PNG-blocked is pushed to the
+/// Step 6 input transformation where it belongs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TonalCandidate {
+    /// FFT-line index at which the tonal masker was detected
+    /// (the `k` of [`is_tonal_layer2`]). Always satisfies
+    /// `2 < k <= 500` per the §D.1 Step 4(b) tonality-defined
+    /// range (cf. [`tonal_neighbourhood_layer2`]).
+    pub k: usize,
+    /// Three-line tonal-component power sum `X_tm(k) = 10 * log10(
+    /// 10^(X(k-1)/10) + 10^(X(k)/10) + 10^(X(k+1)/10) )` in dB
+    /// (the result of [`tonal_spl_db`] at this `k`).
+    pub spl_db: f64,
+}
+
+/// §D.1 Step 4(b) tonal-component listing sweep for Layer II.
+///
+/// The spec phrasing (PDF page 112, printed 112) describes the
+/// per-FFT-line procedure: "A spectral line `X(k)` is labelled
+/// as tonal if it is a local maximum [Step 4(a)] and …
+/// `X(k) - X(k + j) >= 7 dB` for every `j` in the per-`k`
+/// neighbourhood [Step 4(b) inequality table]. When `X(k)` is
+/// tonal the SPL is computed by `X_tm(k) = 10 * log10( … )` …
+/// Next, all spectral lines within the examined frequency range
+/// are set to −∞ dB." This sweep is the loop that drives those
+/// per-`k` primitives across the spectrum.
+///
+/// `spl_db` is the §D.1 Step 1 windowed-FFT SPL spectrum in dB,
+/// passed by mutable reference. On return:
+///
+/// * The output `Vec<TonalCandidate>` lists every confirmed tonal
+///   line in ascending `k` order (`2 < k <= 500`), carrying the
+///   FFT-line index and the three-line tonal SPL `X_tm(k)`.
+/// * The `spl_db` slice has had each confirmed tonal line's
+///   neighbourhood (per [`zero_tonal_neighbourhood_layer2`]) set
+///   to `f64::NEG_INFINITY` — the post-zero-out spectrum suitable
+///   for the §D.1 Step 4(c) non-tonal listing
+///   ([`list_non_tonal_layer2`]).
+///
+/// The sweep visits `k` in ascending order from 3 (the lowest
+/// tonality-defined index — `2 < k` per the spec inequality) up
+/// to `min(500, spl_db.len() - 1)` inclusive. At each `k`:
+///
+/// 1. The §D.1 Step 4(b) tonality test ([`is_tonal_layer2`]) is
+///    invoked. Because that primitive precondition-checks the
+///    Step 4(a) local-maximum rule itself, no separate
+///    [`is_local_maximum`] call is needed here.
+/// 2. On a positive classification, [`tonal_spl_db`] computes the
+///    three-line `X_tm(k)`; the `(k, X_tm)` pair is pushed onto
+///    the output list.
+/// 3. [`zero_tonal_neighbourhood_layer2`] then sets the
+///    neighbourhood (including `k` itself) to −∞ dB. The sweep
+///    continues at `k + 1` against the now-modified `spl_db`.
+///
+/// Subsequent `k`s that fell within an earlier confirmed tonal's
+/// neighbourhood see those bins at −∞ dB. They cannot satisfy
+/// either the local-maximum rule (the line at −∞ cannot exceed
+/// its −∞ neighbours by 7 dB) or the tonality inequality. This
+/// matches the spec's "examined frequency range … set to −∞ dB"
+/// instruction: the sweep naturally skips lines inside an
+/// already-claimed neighbourhood without an explicit "skip" list.
+///
+/// Edge handling:
+/// * `spl_db.len() < 4` returns an empty list with no mutation
+///   (the spec's `2 < k` precondition is unreachable).
+/// * `k > 500` is silently skipped per
+///   [`tonal_neighbourhood_layer2`]'s definition domain.
+/// * The very first and very last entries of `spl_db` are never
+///   classified as tonal (the local-maximum rule needs both
+///   neighbours; `k = 0` and `k == spl_db.len() - 1` fail
+///   [`is_local_maximum`] by construction).
+///
+/// The output capacity is bounded by the per-neighbourhood width
+/// of the spec table: the densest region (`2 < k < 63`) places
+/// neighbourhood ends two bins apart, so an upper bound of
+/// `spl_db.len() / 3` is sufficient for any input.
+pub fn list_tonal_layer2(spl_db: &mut [f64]) -> Vec<TonalCandidate> {
+    let mut out: Vec<TonalCandidate> = Vec::new();
+    if spl_db.len() < 4 {
+        return out;
+    }
+    // The §D.1 Step 4(b) tonality test is defined on `2 < k <= 500`
+    // (cf. `tonal_neighbourhood_layer2`). Iterate the intersection
+    // of that domain with the spectrum length; the inclusive upper
+    // bound is `spl_db.len() - 2` because `is_local_maximum`
+    // requires both `k - 1` and `k + 1` to exist.
+    let k_end = core::cmp::min(500usize, spl_db.len() - 2);
+    let mut k = 3_usize;
+    while k <= k_end {
+        // `is_tonal_layer2` enforces Step 4(a) internally; on a
+        // positive result the three-line SPL is well-defined.
+        if is_tonal_layer2(spl_db, k) {
+            if let Some(x_tm) = tonal_spl_db(spl_db, k) {
+                out.push(TonalCandidate { k, spl_db: x_tm });
+                // Apply the spec's "set to −∞ dB" instruction
+                // before advancing — the next-step lines inside
+                // this neighbourhood are now ineligible for their
+                // own tonal classification, matching the spec's
+                // "examined frequency range" exclusion rule.
+                zero_tonal_neighbourhood_layer2(spl_db, k);
+            }
+        }
+        k += 1;
+    }
+    out
 }
 
 /// §D.1 Step 4(c) non-tonal SPL `X_nm(k)` for a single critical band.
@@ -2043,6 +2178,185 @@ mod tests {
         lt_min[0] = Some(50.0);
         let out = signal_to_mask_ratio_subband(&l_sb, &lt_min);
         assert_eq!(out[0], Some(-30.0));
+    }
+
+    // --- §D.1 Step 4(b) tonal listing sweep --------------------
+
+    /// Build a synthetic SPL spectrum that's all `floor_db` except for
+    /// the requested local-maximum line indices. Each peak is `peak_db`
+    /// at index `k`, with the neighbours `k ± 1` left at `floor_db`
+    /// so the strict `>` / non-strict `>=` local-maximum rule passes.
+    fn synthetic_spectrum(len: usize, floor_db: f64, peaks: &[usize], peak_db: f64) -> Vec<f64> {
+        let mut spec = vec![floor_db; len];
+        for &k in peaks {
+            if k < len {
+                spec[k] = peak_db;
+            }
+        }
+        spec
+    }
+
+    #[test]
+    fn list_tonal_layer2_short_spectrum_returns_empty() {
+        // The spec's `2 < k` precondition is unreachable below
+        // `spl_db.len() == 4`; the sweep must not panic and must
+        // leave the spectrum untouched.
+        let mut spec = vec![10.0_f64, 20.0, 30.0];
+        let snapshot = spec.clone();
+        let got = list_tonal_layer2(&mut spec);
+        assert!(got.is_empty());
+        assert_eq!(spec, snapshot);
+    }
+
+    #[test]
+    fn list_tonal_layer2_finds_single_isolated_peak() {
+        // Place a 50 dB peak at k = 30 against a 0 dB floor in a
+        // 1024-bin spectrum. The tonality test `X(k) - X(k+j) >= 7 dB`
+        // is satisfied (50 - 0 = 50 dB) for every j in `[-2, 2]`
+        // (the 2 < k < 63 neighbourhood).
+        let mut spec = synthetic_spectrum(1024, 0.0, &[30], 50.0);
+        let got = list_tonal_layer2(&mut spec);
+        assert_eq!(got.len(), 1, "expected exactly one tonal: {got:?}");
+        assert_eq!(got[0].k, 30);
+        // X_tm = 10 * log10( 10^0 + 10^5 + 10^0 ) = 10 * log10(100002)
+        //      ≈ 50.0000087 dB.
+        let expected = 10.0_f64 * (1.0 + 10.0_f64.powi(5) + 1.0).log10();
+        assert!(
+            (got[0].spl_db - expected).abs() < 1.0e-9,
+            "X_tm({}) = {}, expected {}",
+            got[0].k,
+            got[0].spl_db,
+            expected,
+        );
+    }
+
+    #[test]
+    fn list_tonal_layer2_zeroes_neighbourhood_after_detection() {
+        // After detection at k = 30, every index in `tonal_neighbourhood_layer2(30)`
+        // (j ∈ {-2, +2} for 2 < k < 63) plus `k` itself must be set
+        // to NEG_INFINITY in the mutated spectrum.
+        let mut spec = synthetic_spectrum(1024, 0.0, &[30], 50.0);
+        let _ = list_tonal_layer2(&mut spec);
+        assert_eq!(spec[30], f64::NEG_INFINITY, "centre line {}", spec[30]);
+        assert_eq!(spec[28], f64::NEG_INFINITY, "lower neighbour {}", spec[28]);
+        assert_eq!(spec[32], f64::NEG_INFINITY, "upper neighbour {}", spec[32]);
+        // Lines outside the neighbourhood are untouched.
+        assert_eq!(spec[27], 0.0);
+        assert_eq!(spec[33], 0.0);
+    }
+
+    #[test]
+    fn list_tonal_layer2_rejects_subthreshold_local_max() {
+        // A local maximum that's only 5 dB above its neighbours fails
+        // the 7 dB tonality inequality and must be dropped.
+        let mut spec = vec![0.0_f64; 1024];
+        spec[30] = 5.0; // local max, but `5 - 0 = 5 < 7`.
+        let got = list_tonal_layer2(&mut spec);
+        assert!(got.is_empty(), "subthreshold should not list: {got:?}");
+        // Spectrum untouched.
+        assert_eq!(spec[30], 5.0);
+        assert_eq!(spec[28], 0.0);
+    }
+
+    #[test]
+    fn list_tonal_layer2_skips_lines_within_prior_neighbourhood() {
+        // Two peaks 2 bins apart: k = 30 (50 dB) and k = 32 (40 dB)
+        // against a 0 dB floor. The k = 30 detection zeroes the
+        // neighbourhood `{28, 30, 32}` (j ∈ {-2, +2}), so the
+        // k = 32 candidate cannot be classified tonal afterwards
+        // (its centre is now -inf dB).
+        let mut spec = synthetic_spectrum(1024, 0.0, &[30, 32], 50.0);
+        spec[32] = 40.0; // distinct SPL so detection order matters
+        let got = list_tonal_layer2(&mut spec);
+        assert_eq!(got.len(), 1, "second peak should be suppressed: {got:?}");
+        assert_eq!(got[0].k, 30);
+        // k = 32 is in the k = 30 neighbourhood and is therefore now
+        // -inf dB.
+        assert_eq!(spec[32], f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn list_tonal_layer2_emits_multiple_well_separated_peaks() {
+        // Two peaks far enough apart that neither lies inside the
+        // other's neighbourhood at any per-k width row (the densest
+        // row `2 < k < 63` uses j ∈ {-2, +2}; spacing 6 bins is safe
+        // for it and the other rows have wider j's at correspondingly
+        // higher k). Pick `k = 30` (j ∈ {-2, +2}, neighbourhood
+        // {28, 30, 32}) and `k = 80` (63 <= k < 127, j ∈ {-3, -2, +2,
+        // +3}, neighbourhood {77, 78, 80, 82, 83}). Both pass the
+        // tonality test against the 0 dB floor.
+        let mut spec = synthetic_spectrum(1024, 0.0, &[30, 80], 50.0);
+        let got = list_tonal_layer2(&mut spec);
+        assert_eq!(got.len(), 2, "expected two tonals: {got:?}");
+        assert_eq!(got[0].k, 30);
+        assert_eq!(got[1].k, 80);
+        // Both neighbourhoods zeroed.
+        assert_eq!(spec[30], f64::NEG_INFINITY);
+        assert_eq!(spec[80], f64::NEG_INFINITY);
+        assert_eq!(spec[28], f64::NEG_INFINITY);
+        assert_eq!(spec[82], f64::NEG_INFINITY);
+        assert_eq!(spec[78], f64::NEG_INFINITY);
+        assert_eq!(spec[83], f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn list_tonal_layer2_emits_ascending_k_order() {
+        // Sweep visits in ascending `k`, so the output list is
+        // monotonically increasing on `k`.
+        let mut spec = synthetic_spectrum(1024, 0.0, &[30, 80, 200, 400], 50.0);
+        let got = list_tonal_layer2(&mut spec);
+        for win in got.windows(2) {
+            assert!(
+                win[0].k < win[1].k,
+                "non-ascending k: {} then {}",
+                win[0].k,
+                win[1].k,
+            );
+        }
+    }
+
+    #[test]
+    fn list_tonal_layer2_ignores_edges_outside_tonality_domain() {
+        // The tonality test is `2 < k <= 500`; a peak at k = 1 or
+        // k = 700 in a 1024-bin spectrum must not list. Use spacing
+        // safe for whichever neighbourhood applies.
+        let mut spec = synthetic_spectrum(1024, 0.0, &[1, 600], 50.0);
+        let got = list_tonal_layer2(&mut spec);
+        assert!(got.is_empty(), "edge candidates should not list: {got:?}");
+        // Both untouched (no zero-out applied).
+        assert_eq!(spec[1], 50.0);
+        assert_eq!(spec[600], 50.0);
+    }
+
+    #[test]
+    fn list_tonal_layer2_composes_with_list_non_tonal_layer2() {
+        // End-to-end sanity: drive Step 4(b) then Step 4(c) and
+        // confirm the resulting non-tonal masker list has no entry
+        // sitting on the tonal peak's neighbourhood (the bands that
+        // contain only zeroed lines should drop out via
+        // `non_tonal_spl_db == None`).
+        let mut spec = synthetic_spectrum(1024, -20.0, &[100], 60.0);
+        let tonal = list_tonal_layer2(&mut spec);
+        assert_eq!(tonal.len(), 1);
+        assert_eq!(tonal[0].k, 100);
+        // Non-tonal listing at 44.1 kHz Layer II should still emit
+        // entries — the spectrum's other bands carry finite floor
+        // power and produce normal X_nm values.
+        let non_tonal = list_non_tonal_layer2(&spec, SamplingRate::Fs44k1Hz);
+        assert!(
+            !non_tonal.is_empty(),
+            "non-tonal sweep should still emit bands"
+        );
+        // Every non-tonal masker has finite SPL (no `NaN` / `-inf`
+        // leaked from the zeroed lines).
+        for m in &non_tonal {
+            assert!(
+                m.spl_db.is_finite(),
+                "non-tonal at z={} has non-finite SPL {}",
+                m.z_bark,
+                m.spl_db,
+            );
+        }
     }
 
     #[test]

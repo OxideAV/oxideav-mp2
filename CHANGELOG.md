@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 4(b) tonal-component listing sweep
+  (`psy` module). One new spec-text-only function that drives the
+  per-FFT-line Step 4(b) loop already factored across the existing
+  `is_tonal_layer2` / `tonal_spl_db` /
+  `zero_tonal_neighbourhood_layer2` primitives:
+  * `list_tonal_layer2(spl_db: &mut [f64]) -> Vec<TonalCandidate>`
+    visits `k` in ascending order from 3 up to `min(500,
+    spl_db.len() - 2)`, runs the §D.1 Step 4(b) tonality test at
+    each `k`, and on a positive classification appends a
+    `TonalCandidate { k, spl_db }` carrier and applies the spec's
+    "all spectral lines within the examined frequency range are
+    set to −∞ dB" zero-out in place (per
+    `tonal_neighbourhood_layer2`'s per-`k` width row). The
+    in-place zero-out naturally suppresses subsequent `k`s that
+    fall inside an already-claimed neighbourhood — they cannot
+    satisfy either the local-maximum rule or the 7 dB inequality
+    against the now-`−∞` bins.
+  * `TonalCandidate { k, spl_db }` is a new carrier — it
+    intentionally omits the masker's Bark position because the
+    FFT-line → Bark mapping lives in the PNG-only Annex D
+    Table D.1d / D.1e / D.1f Layer II columns gated by note
+    `#1262`. When that material lands the caller may promote each
+    candidate to a full `Masker { kind: Tonal, z_bark, spl_db }`
+    via the table lookup.
+  * The sweep + zero-out output composes cleanly with the existing
+    `list_non_tonal_layer2` Step 4(c) pass — bands fully zeroed by
+    the tonal sweep drop out of the non-tonal listing via
+    `non_tonal_spl_db == None`.
+  * 9 new unit tests pin: single-isolated-peak detection +
+    `X_tm` math, neighbourhood zero-out coverage, subthreshold
+    rejection (5 dB below the 7 dB inequality), within-prior-
+    neighbourhood suppression (two peaks 2 bins apart →
+    one survivor), well-separated multi-peak emission, ascending-`k`
+    output ordering, edge-of-domain candidates ignored (k=1, k>500),
+    end-to-end composition with `list_non_tonal_layer2`, and the
+    short-spectrum (`len < 4`) no-op guard.
 - Annex D Model 1 §D.1 Step 5(b) tonal-masker decimation and
   §D.1 Steps 8 + 9 minimum-masking-threshold-per-subband /
   signal-to-mask-ratio primitives (`psy` module). Three new
