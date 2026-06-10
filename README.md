@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-349 lib tests + 6 LSF integration tests + 14 malformed-input
+357 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -356,9 +356,54 @@ encoder accepts a caller-supplied `SmrTable` (per-(channel,
 sub-band) signal-to-mask ratio in dB) so a real perceptual model
 can be slotted in later; a constant 0 dB table produces a
 syntactically-valid bit-allocated frame whose subjective quality
-is rate-driven only. The masker → masking-threshold half of
-Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
-module — see **Round 238** below.
+is rate-driven only. Model 1's prose-only steps now compose
+end-to-end from raw PCM (Steps 1 → 2 → 4 → 5(b) → 6 → 7 → 8 → 9 in
+the `psy` module); what still blocks an automatic `SmrTable` is the
+PNG-only Annex D table material — see the per-round notes below.
+
+**Round 277 (2026-06-11)** added the Annex D Model 1 §D.1 Step 1
+**power-density spectrum + 96 dB SPL normalisation** (`psy`
+module), completing every prose-only Step 1 item.
+`power_density_spectrum_layer2(s: &[f64; 1024])` is the verbatim
+spec equation `X(k) = 10·log10 |(1/N)·Σ h(l)·s(l)·e^(−j·k·l·2π/N)|²
+dB` for `k = 0…N/2` (PDF p.116, printed 110), with `h(l)` the
+round-238 Hann window and `N = LAYER2_FFT_LEN = 1024`; the
+transform is an in-crate textbook radix-2 decimation-in-time FFT
+(private `fft_radix2_in_place`) cross-checked bin-for-bin against a
+literal O(N²) evaluation of the spec sum. The output's 513 entries
+(`LAYER2_FFT_BINS`, DC through Nyquist inclusive) yield `−inf` dB
+on zero-energy bins, consistent with the Step 4(b) zero-out
+representation. `normalize_to_spl_reference(spl_db)` implements the
+verbatim "normalization to the reference level of 96 dB SPL … in
+such a way that the maximum value corresponds to 96 dB" sentence —
+it adds `96 − max(X)` to every entry (returning the offset),
+anchoring the finite maximum at the new `SPL_REFERENCE_LEVEL_DB =
+96.0` while preserving all pairwise dB differences; `−inf` bins
+stay `−inf`, `NaN` is skipped for the max, and an all-`−inf`
+(silent) spectrum is the documented no-op. The Step 1 window-shift
+prose lands as `FFT_DELAY_COMPENSATION_SHIFT_SAMPLES = 256` (the
+"window shift of 256 samples … to compensate for the delay in the
+analysis subband filter") and
+`LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES = −64` ("for Layer II
+an additional window shift of minus 64 samples is required") — net
+Layer II shift 192 samples. 8 new lib tests (349 → 357, all
+green): the unit-DC anchor `X(0) = 20·log10(sqrt(8/3)·0.5)` with
+the window's own ±1-bin leakage at `20·log10(C/2)` and sub-−200 dB
+noise floor, the bin-centred-sinusoid anchors (`X(m) =
+20·log10(C/2)`, `X(m±1) = 20·log10(C/4)`, local-maximum property,
+exact `+20·log10(2)` amplitude-doubling gain), the radix-2 ↔
+naive-DFT cross-check on a deterministic xorshift64* broadband
+signal (all 513 bins within 1e-6 dB), the zero-signal all-`−inf`
+degenerate, max-anchored-at-96 normalisation with offset /
+difference preservation and `−inf` passthrough, NaN-skip +
+all-`−inf` + empty-slice safe responses, the window-shift constants
+(256 / −64 / net 192), and the Step 1 → Step 2 composition (a
+`k = 100` sinusoid normalises to 96 dB and produces `L_sb(6) =
+96 dB` through `sound_pressure_level_subband`). Remaining §D.1
+gaps are now all table-gated: Steps 3 and 5(a) stay DOCS-BLOCKED
+on the PNG-only Table D.1d/e/f threshold-in-quiet inner rows, and
+the FFT-line → Bark mapping for promoting Step 4(b) tonal
+candidates to full maskers waits on the same material (#1262).
 
 **Round 269 (2026-06-10)** added the Annex D Model 1 §D.1 Step 2
 **sound-pressure-level determination** (`psy` module). Three new

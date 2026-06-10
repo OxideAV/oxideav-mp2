@@ -8,6 +8,55 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 1 power-density spectrum + 96 dB SPL
+  normalisation (`psy` module). With these, every prose-only Step 1
+  item is in place and Model 1's Steps 1 → 2 → 8 → 9 compose
+  end-to-end from raw PCM:
+  * `power_density_spectrum_layer2(s: &[f64; 1024]) -> Vec<f64>` is
+    the verbatim spec equation `X(k) = 10·log10 |(1/N)·Σ h(l)·s(l)·
+    e^(-j·k·l·2π/N)|² dB` for `k = 0…N/2` (PDF p.116, printed 110),
+    with `h(l)` the already-landed `hann_window_layer2` window and
+    `N = LAYER2_FFT_LEN = 1024` (the spec's Layer II transform
+    length). The transform is an in-crate textbook radix-2
+    decimation-in-time FFT (private `fft_radix2_in_place`),
+    cross-checked against a literal O(N²) evaluation of the spec
+    sum. Output has `LAYER2_FFT_BINS = 513` entries (DC through
+    Nyquist inclusive); zero-energy bins yield `-inf` dB,
+    consistent with the Step 4(b) zero-out representation.
+  * `normalize_to_spl_reference(spl_db: &mut [f64]) -> f64`
+    implements the verbatim "A normalization to the reference
+    level of 96 dB SPL (Sound Pressure Level) has to be done in
+    such a way that the maximum value corresponds to 96 dB"
+    sentence: adds `96 - max(X)` to every entry (returning the
+    offset), anchoring the finite maximum at the new
+    `SPL_REFERENCE_LEVEL_DB = 96.0` constant while preserving all
+    pairwise dB differences. `-inf` bins stay `-inf`; `NaN`
+    entries are skipped for the max determination; an all-`-inf`
+    (silent) spectrum is the documented no-op safe response.
+  * The §D.1 Step 1 window-shift prose lands as two documented
+    constants: `FFT_DELAY_COMPENSATION_SHIFT_SAMPLES = 256` (item
+    (a): "A window shift of 256 samples is required to compensate
+    for the delay in the analysis subband filter") and
+    `LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES = -64` (item (b):
+    "For Layer II an additional window shift of minus 64 samples
+    is required") — net Layer II shift 192 samples.
+
+  8 new lib tests (349 → 357): the unit-DC anchor
+  `X(0) = 20·log10(sqrt(8/3)·0.5)` with the window's own ±1-bin
+  leakage at `20·log10(C/2)` and noise-floor bins below −200 dB;
+  the bin-centred-sinusoid anchor (`X(m) = 20·log10(C/2)`,
+  `X(m±1) = 20·log10(C/4)`, local-maximum property, exact
+  `+20·log10(2)` gain under amplitude doubling); the radix-2 ↔
+  naive-DFT cross-check on a deterministic xorshift64* broadband
+  signal (all 513 bins within 1e-6 dB); the zero-signal all-`-inf`
+  degenerate; max-anchored-at-96 normalisation with offset /
+  difference preservation and `-inf` passthrough; NaN-skip +
+  all-`-inf` + empty-slice safe responses; the window-shift
+  constants (256, −64, net 192); and the Step 1 → Step 2
+  composition (a k = 100 sinusoid normalises to exactly 96 dB and
+  produces `L_sb(6) = 96 dB` through
+  `sound_pressure_level_subband`).
+
 - Annex D Model 1 §D.1 Step 2 sound-pressure-level determination
   (`psy` module). Three new spec-text-only primitives produce the
   per-subband `L_sb(n)` array the §D.1 Step 9

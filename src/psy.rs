@@ -14,6 +14,16 @@
 //! * **Step 1 Hann window** ([`hann_window_layer2`]) — the verbatim
 //!   spec equation `h(i) = sqrt(8/3) * 0.5 * (1 - cos(2 * pi * i /
 //!   N))` for the Layer II 1024-sample FFT (`N == 1024`); no table.
+//! * **Step 1 power density spectrum**
+//!   ([`power_density_spectrum_layer2`]) — the verbatim spec
+//!   equation `X(k) = 10·log10 |(1/N)·Σ h(l)·s(l)·e^(-j·k·l·2π/N)|²
+//!   dB` for `k = 0…N/2`, computed with an in-crate radix-2 FFT —
+//!   plus the "normalization to the reference level of 96 dB SPL …
+//!   in such a way that the maximum value corresponds to 96 dB"
+//!   sentence ([`normalize_to_spl_reference`] /
+//!   [`SPL_REFERENCE_LEVEL_DB`]) and the two window-shift values
+//!   from the same page ([`FFT_DELAY_COMPENSATION_SHIFT_SAMPLES`] /
+//!   [`LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES`]).
 //! * **Step 4(a) local-maxima labelling** ([`is_local_maximum`]) —
 //!   the verbatim spec rule `X(k) > X(k - 1) AND X(k) >= X(k + 1)`.
 //! * **Step 4(b) Layer II tonality test** ([`is_tonal_layer2`]) — the
@@ -156,11 +166,11 @@
 //! ## Source
 //!
 //! Only the textually-transcribed equations from
-//! `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md` were
-//! consulted; the staged ISO PDF
-//! `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` is the upstream
-//! authority. The PNG-only Annex D table rows are not read this
-//! round.
+//! `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md` and the
+//! §D.1 Step 1 prose/equations read directly from the staged ISO
+//! PDF `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` (Annex D, PDF
+//! pages 115–117) were consulted. The PNG-only Annex D table rows
+//! are not read.
 
 /// Length of the §D.1 Step 1 Layer II FFT window — verbatim from the
 /// "Technical data of the FFT" table on PDF page 116 (printed 110):
@@ -213,6 +223,155 @@ pub fn hann_window_layer2() -> [f64; LAYER2_FFT_LEN] {
         i += 1;
     }
     window
+}
+
+/// §D.1 Step 1 reference level for the power-density-spectrum
+/// normalisation. Verbatim spec sentence (PDF page 116, printed
+/// 110): "A normalization to the reference level of 96 dB SPL
+/// (Sound Pressure Level) has to be done in such a way that the
+/// maximum value corresponds to 96 dB." See
+/// [`normalize_to_spl_reference`].
+pub const SPL_REFERENCE_LEVEL_DB: f64 = 96.0;
+
+/// §D.1 Step 1 window-shift item (a): "The delay of the analysis
+/// subband filter is 256 samples, corresponding to 5,3 ms at the
+/// 48 kHz sampling rate. A window shift of 256 samples is required
+/// to compensate for the delay in the analysis subband filter"
+/// (PDF page 116, printed 110). The PCM samples entering the FFT
+/// must be advanced by this many samples relative to the subband
+/// samples being allocated, so that the masking estimate and the
+/// bit allocation coincide in time.
+pub const FFT_DELAY_COMPENSATION_SHIFT_SAMPLES: usize = 256;
+
+/// §D.1 Step 1 window-shift item (b) for Layer II: "The Hann window
+/// must coincide with the subband samples of the frame. … For
+/// Layer II an additional window shift of minus 64 samples is
+/// required" (PDF page 116, printed 110; the Layer I value is plus
+/// 64). Applied on top of
+/// [`FFT_DELAY_COMPENSATION_SHIFT_SAMPLES`], the net Layer II
+/// window shift is `256 - 64 = 192` samples.
+pub const LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES: i32 = -64;
+
+/// In-place radix-2 decimation-in-time complex FFT,
+/// `X(k) = Σ_{l=0}^{N-1} x(l) · e^(-j·k·l·2π/N)` — the exact
+/// exponent convention of the §D.1 Step 1 `X(k)` equation.
+/// `re.len() == im.len()` must be a power of two (the §D.1 Layer II
+/// transform length 1024 is). Textbook Cooley–Tukey: bit-reversal
+/// permutation followed by log2(N) butterfly passes.
+fn fft_radix2_in_place(re: &mut [f64], im: &mut [f64]) {
+    let n = re.len();
+    debug_assert!(n.is_power_of_two());
+    debug_assert_eq!(n, im.len());
+    if n < 2 {
+        return;
+    }
+    // Bit-reversal permutation.
+    let bits = n.trailing_zeros();
+    for i in 0..n {
+        let j = i.reverse_bits() >> (usize::BITS - bits);
+        if j > i {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+    }
+    // Butterfly passes: span doubles each pass.
+    let mut len = 2;
+    while len <= n {
+        let half = len / 2;
+        let angle_step = -2.0 * core::f64::consts::PI / len as f64;
+        for start in (0..n).step_by(len) {
+            for off in 0..half {
+                let angle = angle_step * off as f64;
+                let (w_im, w_re) = angle.sin_cos();
+                let a = start + off;
+                let b = a + half;
+                let t_re = re[b] * w_re - im[b] * w_im;
+                let t_im = re[b] * w_im + im[b] * w_re;
+                re[b] = re[a] - t_re;
+                im[b] = im[a] - t_im;
+                re[a] += t_re;
+                im[a] += t_im;
+            }
+        }
+        len *= 2;
+    }
+}
+
+/// §D.1 Step 1 Layer II power density spectrum. The verbatim spec
+/// equation (PDF page 116, printed 110):
+///
+/// ```text
+///                |  1  N-1                                  | 2
+/// X(k) = 10·log10| ―――  Σ  h(l) · s(l) · e^(-j·k·l·2π/N)    |   dB
+///                |  N  l=0                                  |
+///
+///                                            k = 0 … N/2
+/// ```
+///
+/// where `s(l)` is the input signal, `h(l)` is the
+/// [`hann_window_layer2`] Hann window and `N == LAYER2_FFT_LEN ==
+/// 1024` (the spec's Layer II transform length; frequency
+/// resolution `sampling_frequency / 1024`). The returned vector has
+/// [`LAYER2_FFT_BINS`] (= 513) entries covering the DC bin through
+/// the Nyquist bin inclusive, per the `k = 0…N/2` range.
+///
+/// A bin with zero magnitude yields `-inf` dB (`log10(0)`), the
+/// same "no energy" representation the Step 4(b) zero-out and the
+/// Step 2 empty-subband degenerate already use. The output is NOT
+/// yet normalised to the 96 dB SPL reference — apply
+/// [`normalize_to_spl_reference`] before feeding the Step 2/4
+/// passes, per the spec's normalisation sentence.
+#[must_use]
+pub fn power_density_spectrum_layer2(s: &[f64; LAYER2_FFT_LEN]) -> Vec<f64> {
+    let window = hann_window_layer2();
+    let n = LAYER2_FFT_LEN as f64;
+    // The 1/N factor sits inside the |·|² in the spec equation;
+    // it is linear, so fold it into the windowed input.
+    let mut re: Vec<f64> = (0..LAYER2_FFT_LEN).map(|l| window[l] * s[l] / n).collect();
+    let mut im = vec![0.0_f64; LAYER2_FFT_LEN];
+    fft_radix2_in_place(&mut re, &mut im);
+    (0..LAYER2_FFT_BINS)
+        .map(|k| {
+            // 10·log10(|·|²): squared magnitude straight into log10.
+            let power = re[k] * re[k] + im[k] * im[k];
+            10.0 * power.log10()
+        })
+        .collect()
+}
+
+/// §D.1 Step 1 normalisation to the 96 dB SPL reference level.
+/// Verbatim spec sentence (PDF page 116, printed 110): "A
+/// normalization to the reference level of 96 dB SPL (Sound
+/// Pressure Level) has to be done in such a way that the maximum
+/// value corresponds to 96 dB."
+///
+/// Adds the constant offset `96 - max(X)` to every entry, so the
+/// spectrum's maximum lands exactly on
+/// [`SPL_REFERENCE_LEVEL_DB`] while all pairwise dB differences
+/// are preserved. Returns the offset applied.
+///
+/// The maximum is taken over the finite entries only: `-inf`
+/// (zero-energy) bins cannot anchor the normalisation and stay
+/// `-inf` after the shift; `NaN` entries are skipped for the max
+/// determination and propagate as `NaN`. If no finite entry exists
+/// (all-zero signal), the spectrum carries no level information to
+/// normalise — the documented safe response leaves the input
+/// unchanged and returns an offset of `0.0`.
+pub fn normalize_to_spl_reference(spl_db: &mut [f64]) -> f64 {
+    let mut max = f64::NEG_INFINITY;
+    for &x in spl_db.iter() {
+        if x.is_finite() && x > max {
+            max = x;
+        }
+    }
+    if !max.is_finite() {
+        return 0.0;
+    }
+    let offset = SPL_REFERENCE_LEVEL_DB - max;
+    for x in spl_db.iter_mut() {
+        *x += offset;
+    }
+    offset
 }
 
 /// §D.1 Step 4(a) local-maximum test for the SPL spectrum `X(k)`.
@@ -2996,5 +3155,199 @@ mod tests {
         assert_eq!(lt_min[1], Some(60.0));
         let smr1 = smr[1].expect("subband 1 carries an SMR");
         assert!((smr1 - 35.0).abs() < 1e-12);
+    }
+
+    /// Naive O(N²) DFT power-density reference for cross-checking
+    /// the radix-2 path — the spec equation evaluated literally.
+    fn naive_power_density_db(s: &[f64; LAYER2_FFT_LEN]) -> Vec<f64> {
+        let window = hann_window_layer2();
+        let n = LAYER2_FFT_LEN as f64;
+        (0..LAYER2_FFT_BINS)
+            .map(|k| {
+                let mut re = 0.0_f64;
+                let mut im = 0.0_f64;
+                for (l, &sl) in s.iter().enumerate() {
+                    let angle = -2.0 * core::f64::consts::PI * (k * l) as f64 / n;
+                    let x = window[l] * sl / n;
+                    re += x * angle.cos();
+                    im += x * angle.sin();
+                }
+                10.0 * (re * re + im * im).log10()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn power_density_spectrum_dc_anchor() {
+        // Unit DC input: h(l)·1 averages to the window mean. The
+        // Hann window h(l) = C·(1 - cos(2πl/N)) with C =
+        // sqrt(8/3)·0.5 has mean exactly C (the cosine sums to zero
+        // over the index range 0..N), so X(0) = 20·log10(C). The
+        // window's own (1 - cos) shape puts its ±1-bin component at
+        // magnitude C/2, so X(1) = 20·log10(C/2); bins ≥ 2 carry
+        // only numeric noise.
+        let s = [1.0_f64; LAYER2_FFT_LEN];
+        let x = power_density_spectrum_layer2(&s);
+        assert_eq!(x.len(), LAYER2_FFT_BINS);
+        let c = (8.0_f64 / 3.0).sqrt() * 0.5;
+        assert!((x[0] - 20.0 * c.log10()).abs() < 1e-9, "X(0) = {}", x[0]);
+        assert!(
+            (x[1] - 20.0 * (c / 2.0).log10()).abs() < 1e-9,
+            "X(1) = {}",
+            x[1]
+        );
+        for (k, &xk) in x.iter().enumerate().skip(2) {
+            assert!(xk < -200.0, "X({k}) = {xk} should be numeric noise");
+        }
+    }
+
+    #[test]
+    fn power_density_spectrum_bin_centred_sinusoid() {
+        // s(l) = sin(2π·m·l/N) lands exactly on bin m. Through the
+        // (1 - cos) window the main line keeps magnitude C/2 (C =
+        // sqrt(8/3)·0.5, sine amplitude 1 → spectral magnitude 1/2)
+        // and the window's cosine term leaks magnitude C/4 into
+        // m ± 1; everything else is numeric noise. Doubling the
+        // amplitude adds exactly 20·log10(2) dB.
+        let m = 100_usize;
+        let mut s = [0.0_f64; LAYER2_FFT_LEN];
+        let mut s2 = [0.0_f64; LAYER2_FFT_LEN];
+        for (l, (a, b)) in s.iter_mut().zip(s2.iter_mut()).enumerate() {
+            let v = (2.0 * core::f64::consts::PI * (m * l) as f64 / LAYER2_FFT_LEN as f64).sin();
+            *a = v;
+            *b = 2.0 * v;
+        }
+        let x = power_density_spectrum_layer2(&s);
+        let c = (8.0_f64 / 3.0).sqrt() * 0.5;
+        assert!(
+            (x[m] - 20.0 * (c / 2.0).log10()).abs() < 1e-9,
+            "X(m) = {}",
+            x[m]
+        );
+        for k in [m - 1, m + 1] {
+            assert!(
+                (x[k] - 20.0 * (c / 4.0).log10()).abs() < 1e-9,
+                "X({k}) = {}",
+                x[k]
+            );
+        }
+        assert!(is_local_maximum(&x, m));
+        for (k, &xk) in x.iter().enumerate() {
+            if k.abs_diff(m) > 1 {
+                assert!(xk < -200.0, "X({k}) = {xk} should be numeric noise");
+            }
+        }
+        let x2 = power_density_spectrum_layer2(&s2);
+        let gain = 20.0 * 2.0_f64.log10();
+        assert!((x2[m] - x[m] - gain).abs() < 1e-9);
+    }
+
+    #[test]
+    fn power_density_spectrum_matches_naive_dft() {
+        // Cross-check the radix-2 FFT path against the literal
+        // O(N²) evaluation of the spec equation on a deterministic
+        // broadband signal (every bin energised, so the dB
+        // comparison is numerically meaningful everywhere).
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut s = [0.0_f64; LAYER2_FFT_LEN];
+        for slot in s.iter_mut() {
+            // xorshift64* — deterministic pseudo-random in [-1, 1).
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let r = state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            *slot = (r >> 11) as f64 / (1_u64 << 52) as f64 - 1.0;
+        }
+        let fast = power_density_spectrum_layer2(&s);
+        let naive = naive_power_density_db(&s);
+        for (k, (f, n)) in fast.iter().zip(naive.iter()).enumerate() {
+            assert!((f - n).abs() < 1e-6, "bin {k}: fft {f} vs dft {n}");
+        }
+    }
+
+    #[test]
+    fn power_density_spectrum_zero_signal_all_neg_inf() {
+        let s = [0.0_f64; LAYER2_FFT_LEN];
+        let x = power_density_spectrum_layer2(&s);
+        assert_eq!(x.len(), LAYER2_FFT_BINS);
+        assert!(x.iter().all(|v| *v == f64::NEG_INFINITY));
+    }
+
+    #[test]
+    fn normalize_to_spl_reference_anchors_max_at_96() {
+        // Max lands exactly on 96 dB; pairwise differences are
+        // preserved; the returned offset is 96 - old max.
+        let mut x = vec![-30.0_f64, -10.0, -52.5, f64::NEG_INFINITY];
+        let offset = normalize_to_spl_reference(&mut x);
+        assert_eq!(offset, SPL_REFERENCE_LEVEL_DB - (-10.0));
+        assert_eq!(x[1], SPL_REFERENCE_LEVEL_DB);
+        assert!((x[0] - (SPL_REFERENCE_LEVEL_DB - 20.0)).abs() < 1e-12);
+        assert!((x[2] - (SPL_REFERENCE_LEVEL_DB - 42.5)).abs() < 1e-12);
+        // -inf (zero-energy) bins stay -inf through the shift.
+        assert_eq!(x[3], f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn normalize_to_spl_reference_skips_nan_and_handles_empty_max() {
+        // NaN must not anchor the max; it propagates as NaN.
+        let mut x = vec![f64::NAN, 5.0_f64, -1.0];
+        let offset = normalize_to_spl_reference(&mut x);
+        assert_eq!(offset, SPL_REFERENCE_LEVEL_DB - 5.0);
+        assert!(x[0].is_nan());
+        assert_eq!(x[1], SPL_REFERENCE_LEVEL_DB);
+        // No finite entry: documented safe response is a no-op.
+        let mut silent = vec![f64::NEG_INFINITY; 8];
+        assert_eq!(normalize_to_spl_reference(&mut silent), 0.0);
+        assert!(silent.iter().all(|v| *v == f64::NEG_INFINITY));
+        let mut empty: Vec<f64> = vec![];
+        assert_eq!(normalize_to_spl_reference(&mut empty), 0.0);
+    }
+
+    #[test]
+    fn step1_window_shift_constants_match_spec_prose() {
+        // §D.1 Step 1 items (a)/(b): 256-sample delay compensation,
+        // minus 64 additional for Layer II → net 192.
+        assert_eq!(FFT_DELAY_COMPENSATION_SHIFT_SAMPLES, 256);
+        assert_eq!(LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES, -64);
+        assert_eq!(
+            FFT_DELAY_COMPENSATION_SHIFT_SAMPLES as i32
+                + LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES,
+            192
+        );
+    }
+
+    #[test]
+    fn step1_feeds_step2_sound_pressure_level() {
+        // Step 1 → Step 2 composition: a bin-centred sinusoid at
+        // k = 100 (subband 6 via the 16-lines-per-subband map),
+        // normalised so the peak is exactly 96 dB, dominates the
+        // tiny scalefactor term → L_sb(6) == 96 dB.
+        let m = 100_usize;
+        let mut s = [0.0_f64; LAYER2_FFT_LEN];
+        for (l, slot) in s.iter_mut().enumerate() {
+            *slot = (2.0 * core::f64::consts::PI * (m * l) as f64 / LAYER2_FFT_LEN as f64).sin();
+        }
+        let mut x = power_density_spectrum_layer2(&s);
+        let _ = normalize_to_spl_reference(&mut x);
+        // `a + (96 - a)` is not guaranteed bit-exact in f64 — pin
+        // to a tight tolerance instead.
+        assert!(
+            (x[m] - SPL_REFERENCE_LEVEL_DB).abs() < 1e-9,
+            "X(m) = {}",
+            x[m]
+        );
+        let map: Vec<usize> = (0..x.len()).map(fft_line_to_subband_layer2).collect();
+        assert_eq!(map[m], 6);
+        let scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        let l_sb = sound_pressure_level_subband(&x, &map, &scf, SubbandSplMethod::MaxLine);
+        assert!(
+            (l_sb[6] - SPL_REFERENCE_LEVEL_DB).abs() < 1e-9,
+            "L_sb(6) = {}",
+            l_sb[6]
+        );
+        // A subband far from the tone degenerates to the (deeply
+        // negative) scalefactor term — the spectrum there is noise
+        // floor only.
+        assert!(l_sb[20] < 0.0);
     }
 }
