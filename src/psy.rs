@@ -1139,6 +1139,152 @@ pub fn signal_to_mask_ratio_subband(
     out
 }
 
+/// §D.1 Step 2 full-scale reference: the spec's `32 768` factor in
+/// `20·log10(scf_max(n)·32768) - 10` (PDF page 116, printed 110).
+/// The scalefactor is a `[-1, +1)`-domain multiplier (Annex B
+/// Table 3-B.1); multiplying by `32 768 = 2^15` maps it onto the
+/// 16-bit PCM full-scale axis the §D.1 Step 1 "normalization to
+/// the reference level of 96 dB SPL" establishes.
+pub const SPL_FULL_SCALE: f64 = 32768.0;
+
+/// §D.1 Step 2 peak-to-RMS correction: the spec's `-10 dB` term in
+/// `20·log10(scf_max(n)·32768) - 10` — per the spec prose, "The
+/// '-10 dB' term corrects for the difference between peak and RMS
+/// level" (PDF page 116, printed 110).
+pub const SPL_PEAK_RMS_CORRECTION_DB: f64 = 10.0;
+
+/// §D.1 Step 2 scalefactor operand of the sound-pressure-level
+/// `MAX`. The verbatim spec term (PDF page 116, printed 110):
+///
+/// ```text
+/// 20·log10( scf_max(n) · 32768 ) - 10   dB
+/// ```
+///
+/// `scf_max` is, for Layer II, "the maximum of the three
+/// scalefactors of subband n within a frame" — the Annex B
+/// Table 3-B.1 *multiplier value* ([`crate::tables::SCALEFACTORS`]
+/// entry), not the 6-bit index. The caller takes the maximum
+/// multiplier (= the smallest of the three indices, Table 3-B.1
+/// being monotonically decreasing) before calling.
+///
+/// Precondition: `scf_max > 0`. Every Table 3-B.1 entry is
+/// strictly positive (entry 62 ≈ 1.2e-6 is the smallest), so the
+/// logarithm is always defined for table-sourced inputs.
+#[must_use]
+pub fn scalefactor_spl_term_db(scf_max: f64) -> f64 {
+    20.0 * (scf_max * SPL_FULL_SCALE).log10() - SPL_PEAK_RMS_CORRECTION_DB
+}
+
+/// Which §D.1 Step 2 estimator feeds the `X` operand of the
+/// sound-pressure-level `MAX` in
+/// [`sound_pressure_level_subband`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubbandSplMethod {
+    /// The primary method (PDF page 116, printed 110): "X(k) is
+    /// the sound pressure level of the spectral line with index k
+    /// of the FFT with the maximum amplitude in the frequency
+    /// range corresponding to subband n".
+    MaxLine,
+    /// The spec's documented alternative (PDF page 117, printed
+    /// 111): `X_spl(n) = 10·log10( Σ_k 10^(X(k)/10) ) dB` over
+    /// `k in subband n` — flagged by the spec as offering "a
+    /// potential for better encoder performance" while noting the
+    /// technique "has not been subjected to a formal audio
+    /// quality test".
+    PowerSum,
+}
+
+/// §D.1 Step 2 determination of the sound pressure level. The
+/// verbatim spec equation (PDF page 116, printed 110):
+///
+/// ```text
+/// L_sb(n) = MAX[ X(k), 20·log10(scf_max(n)·32768) - 10 ]   dB
+///           X(k) in subband n
+/// ```
+///
+/// computed for every subband `n`. `spl_db` is the §D.1 Step 1
+/// power-density spectrum `X(k)` (96 dB-normalised, full FFT-line
+/// axis `k = 0 ..= N/2`); `line_subband[k]` maps FFT line `k` to
+/// its §2.4.1.5 subband (`0 ..= 31`; `usize::MAX` is the
+/// documented "outside the audio band" sentinel, consistent with
+/// [`minimum_masking_threshold_subband`]) — see
+/// [`fft_line_to_subband_layer2`] for the closed-form Layer II
+/// map. `scf_max[n]` is the per-subband maximum Table 3-B.1
+/// multiplier (see [`scalefactor_spl_term_db`]). `method` selects
+/// the primary max-line `X` operand or the spec's alternative
+/// power-sum operand.
+///
+/// Every output slot is defined: the scalefactor operand of the
+/// `MAX` always exists, so a subband that receives no FFT line
+/// (its `X` operand is the empty maximum, `-inf dB`) degenerates
+/// to the scalefactor term alone. `NaN` spectral lines are
+/// dropped from the `X` operand. A `spl_db` / `line_subband`
+/// length mismatch is a caller error; the documented safe
+/// response treats the spectrum as empty and returns the
+/// scalefactor terms alone.
+#[must_use]
+pub fn sound_pressure_level_subband(
+    spl_db: &[f64],
+    line_subband: &[usize],
+    scf_max: &[f64; NUM_SUBBANDS_LAYER2],
+    method: SubbandSplMethod,
+) -> [f64; NUM_SUBBANDS_LAYER2] {
+    // X-operand accumulator per subband: maximum line for
+    // `MaxLine`, linear-power sum for `PowerSum`. Empty subbands
+    // stay at the additive identity (`-inf` max / `0.0` sum), both
+    // of which degenerate the final MAX to the scalefactor term.
+    let mut max_line = [f64::NEG_INFINITY; NUM_SUBBANDS_LAYER2];
+    let mut power_sum = [0.0_f64; NUM_SUBBANDS_LAYER2];
+    if spl_db.len() == line_subband.len() {
+        for (k, &sb) in line_subband.iter().enumerate() {
+            if sb >= NUM_SUBBANDS_LAYER2 {
+                // usize::MAX sentinel or invalid index: no subband.
+                continue;
+            }
+            let x = spl_db[k];
+            if x.is_nan() {
+                continue;
+            }
+            max_line[sb] = max_line[sb].max(x);
+            power_sum[sb] += 10.0_f64.powf(x / 10.0);
+        }
+    }
+    let mut out = [0.0_f64; NUM_SUBBANDS_LAYER2];
+    for n in 0..NUM_SUBBANDS_LAYER2 {
+        let x_term = match method {
+            SubbandSplMethod::MaxLine => max_line[n],
+            SubbandSplMethod::PowerSum => {
+                // 10·log10(0) = -inf reproduces the empty-subband
+                // degenerate exactly.
+                10.0 * power_sum[n].log10()
+            }
+        };
+        out[n] = x_term.max(scalefactor_spl_term_db(scf_max[n]));
+    }
+    out
+}
+
+/// Closed-form Layer II FFT-line → subband map for the §D.1
+/// Step 2 `line_subband` argument. Per the §D.1 Step 1 "Technical
+/// data of the FFT" table (PDF page 116, printed 110) the Layer II
+/// frequency resolution is `fs / 1024`, so FFT line `k` sits at
+/// frequency `k·fs/1024`; the §2.4.3.2 filterbank splits
+/// `[0, fs/2)` into 32 equal-width subbands of `fs/64` each, so
+/// subband `n` spans `[n·fs/64, (n+1)·fs/64)` — i.e. FFT lines
+/// `16·n ..= 16·n + 15`. Lines at or above the Nyquist index
+/// (`k >= 512`, frequency `>= fs/2`) fall outside every subband
+/// and map to the `usize::MAX` "outside the audio band" sentinel.
+/// A line landing exactly on a subband boundary (`k = 16·n`)
+/// belongs to the higher subband per the half-open spans above.
+#[must_use]
+pub fn fft_line_to_subband_layer2(k: usize) -> usize {
+    if k < LAYER2_FFT_LEN / 2 {
+        k / 16
+    } else {
+        usize::MAX
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2659,5 +2805,196 @@ mod tests {
             }
             assert_eq!(*slot, None);
         }
+    }
+
+    // ----- §D.1 Step 2: sound pressure level per subband -----
+
+    #[test]
+    fn scalefactor_spl_term_unity_anchor() {
+        // scf_max = 1.0: 20·log10(32768) - 10
+        //   = 300·log10(2) - 10 = 90.30899869919435… - 10.
+        let expected = 300.0 * 2.0_f64.log10() - 10.0;
+        assert!((scalefactor_spl_term_db(1.0) - expected).abs() < 1e-12);
+        assert!((scalefactor_spl_term_db(1.0) - 80.308_998_699_194_35).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scalefactor_spl_term_doubling_adds_exactly_20log2() {
+        // 20·log10(2·x·32768) - 20·log10(x·32768) = 20·log10(2)
+        // ≈ 6.0206 dB; Table 3-B.1 entry 0 (2.0) vs unity.
+        let delta = scalefactor_spl_term_db(2.0) - scalefactor_spl_term_db(1.0);
+        assert!((delta - 20.0 * 2.0_f64.log10()).abs() < 1e-12);
+        // Monotone over the whole Table 3-B.1 multiplier range.
+        for i in 1..crate::tables::SCALEFACTOR_COUNT {
+            let hi = scalefactor_spl_term_db(crate::tables::SCALEFACTORS[i - 1]);
+            let lo = scalefactor_spl_term_db(crate::tables::SCALEFACTORS[i]);
+            assert!(hi > lo, "term must follow Table 3-B.1 monotonicity at {i}");
+        }
+    }
+
+    #[test]
+    fn spl_max_line_picks_loudest_line_in_subband() {
+        // Three lines in subband 5 at 70 / 95 / 80 dB; scf small so
+        // the X operand dominates the MAX → L_sb(5) = 95 dB.
+        let spl = vec![70.0_f64, 95.0, 80.0];
+        let map = vec![5_usize, 5, 5];
+        let scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        let l_sb = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::MaxLine);
+        assert!((l_sb[5] - 95.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn spl_scalefactor_term_dominates_quiet_spectrum() {
+        // All lines at -100 dB with scf_max = 1.0: the MAX resolves
+        // to the scalefactor operand 80.3089… dB in both methods.
+        let spl = vec![-100.0_f64; 32];
+        let map: Vec<usize> = (0..32).map(|k| k / 16).collect();
+        let mut scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        scf[0] = 1.0;
+        scf[1] = 1.0;
+        let expected = scalefactor_spl_term_db(1.0);
+        for method in [SubbandSplMethod::MaxLine, SubbandSplMethod::PowerSum] {
+            let l_sb = sound_pressure_level_subband(&spl, &map, &scf, method);
+            assert!((l_sb[0] - expected).abs() < 1e-9);
+            assert!((l_sb[1] - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn spl_power_sum_three_equal_lines() {
+        // X_spl = 10·log10(3·10^(90/10)) = 90 + 10·log10(3)
+        // ≈ 94.7712 dB; scf tiny so the power sum wins the MAX.
+        let spl = vec![90.0_f64, 90.0, 90.0];
+        let map = vec![12_usize, 12, 12];
+        let scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        let l_sb = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::PowerSum);
+        let expected = 90.0 + 10.0 * 3.0_f64.log10();
+        assert!((l_sb[12] - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn spl_power_sum_never_below_max_line() {
+        // Σ 10^(X/10) >= max 10^(X/10), so the PowerSum L_sb
+        // dominates the MaxLine L_sb in every subband.
+        let spl: Vec<f64> = (0..512).map(|k| 30.0 + ((k * 7) % 50) as f64).collect();
+        let map: Vec<usize> = (0..512).map(fft_line_to_subband_layer2).collect();
+        let scf = [0.5_f64; NUM_SUBBANDS_LAYER2];
+        let by_max = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::MaxLine);
+        let by_sum = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::PowerSum);
+        for n in 0..NUM_SUBBANDS_LAYER2 {
+            assert!(
+                by_sum[n] >= by_max[n] - 1e-12,
+                "PowerSum below MaxLine at subband {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn spl_subband_with_no_lines_falls_back_to_scf_term() {
+        // Every line maps to the out-of-band sentinel: the X
+        // operand is the empty maximum (-inf) and every slot
+        // degenerates to its scalefactor term — in both methods.
+        let spl = vec![100.0_f64; 8];
+        let map = vec![usize::MAX; 8];
+        let mut scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        scf[9] = 2.0;
+        for method in [SubbandSplMethod::MaxLine, SubbandSplMethod::PowerSum] {
+            let l_sb = sound_pressure_level_subband(&spl, &map, &scf, method);
+            for (n, (slot, sf)) in l_sb.iter().zip(scf.iter()).enumerate() {
+                let expected = scalefactor_spl_term_db(*sf);
+                assert!(
+                    (slot - expected).abs() < 1e-12,
+                    "subband {n} must carry the scf term alone"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spl_sentinel_and_out_of_range_indices_skipped() {
+        // usize::MAX and any index >= 32 contribute to no subband;
+        // the valid line still lands.
+        let spl = vec![88.0_f64, 99.0, 77.0];
+        let map = vec![4_usize, usize::MAX, 32];
+        let scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        let l_sb = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::MaxLine);
+        assert!((l_sb[4] - 88.0).abs() < 1e-12);
+        for (n, slot) in l_sb.iter().enumerate() {
+            if n == 4 {
+                continue;
+            }
+            assert!((slot - scalefactor_spl_term_db(1e-6)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn spl_nan_lines_dropped_from_x_operand() {
+        let spl = vec![f64::NAN, 85.0, f64::NAN];
+        let map = vec![2_usize, 2, 2];
+        let scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        for method in [SubbandSplMethod::MaxLine, SubbandSplMethod::PowerSum] {
+            let l_sb = sound_pressure_level_subband(&spl, &map, &scf, method);
+            assert!(
+                (l_sb[2] - 85.0).abs() < 1e-12,
+                "NaN must not poison the MAX"
+            );
+        }
+    }
+
+    #[test]
+    fn spl_length_mismatch_returns_scf_terms() {
+        // Documented safe response to the caller error: the
+        // spectrum is treated as empty.
+        let spl = vec![100.0_f64; 10];
+        let map = vec![0_usize; 9];
+        let scf = [1.0_f64; NUM_SUBBANDS_LAYER2];
+        let l_sb = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::MaxLine);
+        for slot in &l_sb {
+            assert!((slot - scalefactor_spl_term_db(1.0)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn fft_line_to_subband_layer2_boundaries() {
+        // 16 lines per subband: fs/1024 resolution vs fs/64 width.
+        assert_eq!(fft_line_to_subband_layer2(0), 0);
+        assert_eq!(fft_line_to_subband_layer2(15), 0);
+        assert_eq!(fft_line_to_subband_layer2(16), 1);
+        assert_eq!(fft_line_to_subband_layer2(255), 15);
+        assert_eq!(fft_line_to_subband_layer2(256), 16);
+        assert_eq!(fft_line_to_subband_layer2(511), 31);
+        // Nyquist line and beyond sit outside every subband.
+        assert_eq!(fft_line_to_subband_layer2(512), usize::MAX);
+        assert_eq!(fft_line_to_subband_layer2(1000), usize::MAX);
+        // Full sweep: every in-band line lands in k/16 and every
+        // subband receives exactly 16 lines.
+        let mut per_subband = [0_usize; NUM_SUBBANDS_LAYER2];
+        for k in 0..LAYER2_FFT_LEN / 2 {
+            let sb = fft_line_to_subband_layer2(k);
+            assert_eq!(sb, k / 16);
+            per_subband[sb] += 1;
+        }
+        assert!(per_subband.iter().all(|&c| c == 16));
+    }
+
+    #[test]
+    fn step2_feeds_step9_smr_end_to_end() {
+        // §D.1 Step 2 → Step 8 → Step 9 composition: a 95 dB line
+        // in subband 1 over a tiny scalefactor, LTg = 60 dB on the
+        // same line → SMR_sb(1) = 95 - 60 = 35 dB.
+        let spl = vec![-100.0_f64, -100.0, 95.0];
+        let map = vec![
+            fft_line_to_subband_layer2(0),  // 0
+            fft_line_to_subband_layer2(8),  // 0
+            fft_line_to_subband_layer2(16), // 1
+        ];
+        let scf = [1e-6_f64; NUM_SUBBANDS_LAYER2];
+        let l_sb = sound_pressure_level_subband(&spl, &map, &scf, SubbandSplMethod::MaxLine);
+        let ltg = vec![55.0_f64, 58.0, 60.0];
+        let lt_min = minimum_masking_threshold_subband(&ltg, &map);
+        let smr = signal_to_mask_ratio_subband(&l_sb, &lt_min);
+        assert_eq!(lt_min[1], Some(60.0));
+        let smr1 = smr[1].expect("subband 1 carries an SMR");
+        assert!((smr1 - 35.0).abs() < 1e-12);
     }
 }

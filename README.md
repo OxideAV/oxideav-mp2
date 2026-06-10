@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-321 lib tests + 6 LSF integration tests + 14 malformed-input
+349 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -359,6 +359,55 @@ syntactically-valid bit-allocated frame whose subjective quality
 is rate-driven only. The masker → masking-threshold half of
 Model 1 (§D.1 Steps 6 and 7) is starting to land in the `psy`
 module — see **Round 238** below.
+
+**Round 269 (2026-06-10)** added the Annex D Model 1 §D.1 Step 2
+**sound-pressure-level determination** (`psy` module). Three new
+spec-text-only entry points land the `L_sb(n)` producer feeding the
+round-253 Step 9 `signal_to_mask_ratio_subband` consumer:
+`scalefactor_spl_term_db(scf_max)` reproduces the verbatim
+scalefactor operand `20·log10(scf_max(n)·32768) − 10` dB (PDF
+p.116, printed 110), where `scf_max` is for Layer II "the maximum
+of the three scalefactors of subband n within a frame" (the Annex B
+Table 3-B.1 multiplier value, not the index) and the −10 dB term
+"corrects for the difference between peak and RMS level";
+`sound_pressure_level_subband(spl_db, line_subband, scf_max,
+method)` runs the verbatim `L_sb(n) = MAX[ X(k), 20·log10(
+scf_max(n)·32768) − 10 ]` reduction for every subband, with
+`SubbandSplMethod::MaxLine` the primary "spectral line with the
+maximum amplitude in the frequency range corresponding to subband
+n" estimator and `SubbandSplMethod::PowerSum` the spec's documented
+alternative `X_spl(n) = 10·log10( Σ_k 10^(X(k)/10) )` ("offers a
+potential for better encoder performance" but "has not been
+subjected to a formal audio quality test", PDF p.117, printed 111);
+`fft_line_to_subband_layer2(k)` is the closed-form Layer II
+FFT-line → subband map (`fs/1024` Step-1 frequency resolution vs
+the §2.4.3.2 `fs/64` subband width → 16 lines per subband, `k/16`;
+`k >= 512` maps to the `usize::MAX` out-of-band sentinel shared
+with Step 8). Every output slot is defined — the scalefactor
+operand of the MAX always exists, so a subband receiving no FFT
+line degenerates to the scf term alone; `NaN` lines are dropped
+from the X operand; a `spl_db` / `line_subband` length mismatch
+returns the scf terms as the documented safe response. Two new
+constants `SPL_FULL_SCALE = 32768.0` and
+`SPL_PEAK_RMS_CORRECTION_DB = 10.0` expose the spec values. Model
+1's Steps 2 → 8 → 9 now compose end-to-end on the same
+`line_subband` axis (pinned by a new composition test). 12 new lib
+tests (337 → 349, all green): the unity-scalefactor anchor
+`80.30899869919435 dB = 300·log10(2) − 10`, the doubling
+`+20·log10(2)` identity plus Table 3-B.1 monotonicity of the term,
+loudest-line selection, scf-term dominance over a quiet spectrum
+(both methods), the three-equal-lines power-sum identity
+`90 + 10·log10(3)`, the `PowerSum >= MaxLine` dominance property
+across a 512-line spectrum, the no-lines scf-term degenerate (both
+methods), sentinel / out-of-range index skipping, NaN drop, the
+length-mismatch safe return, the 16-lines-per-subband boundary
+sweep (`0→0`, `15→0`, `16→1`, `511→31`, `512→sentinel`, full
+0..512 sweep counting exactly 16 lines per subband), and the
+Step 2 → 8 → 9 SMR composition (`SMR_sb(1) = 95 − 60 = 35 dB`).
+Remaining §D.1 gaps: the Step 1 power-density spectrum itself
+(`X(k) = 10·log10|FFT(h·s)|²` + the 96 dB normalisation) is the
+next prose-only step; Steps 3 and 5(a) stay DOCS-BLOCKED on the
+PNG-only Table D.1d/e/f threshold-in-quiet inner rows (#1262).
 
 **Round 261 (2026-06-08)** added the Annex D Model 1 §D.1 Step 7
 **masker-range pre-filter** (`psy` module). Two new spec-text-only

@@ -8,6 +8,61 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D Model 1 §D.1 Step 2 sound-pressure-level determination
+  (`psy` module). Three new spec-text-only primitives produce the
+  per-subband `L_sb(n)` array the §D.1 Step 9
+  `signal_to_mask_ratio_subband` (round 253) consumes:
+  * `scalefactor_spl_term_db(scf_max) -> f64` is the verbatim
+    scalefactor operand `20·log10(scf_max(n)·32768) - 10` dB
+    (PDF p.116, printed 110). `scf_max` is, for Layer II, "the
+    maximum of the three scalefactors of subband n within a
+    frame" — the Annex B Table 3-B.1 multiplier value, not the
+    6-bit index. The spec's "-10 dB" term "corrects for the
+    difference between peak and RMS level"; the `32768 = 2^15`
+    factor maps the `[-1, +1)` scalefactor domain onto the 16-bit
+    full-scale axis the Step 1 96-dB normalisation establishes.
+    Exposed as the new constants `SPL_FULL_SCALE = 32768.0` and
+    `SPL_PEAK_RMS_CORRECTION_DB = 10.0`.
+  * `sound_pressure_level_subband(spl_db, line_subband, scf_max,
+    method) -> [f64; 32]` runs the verbatim Step 2 reduction
+    `L_sb(n) = MAX[ X(k), 20·log10(scf_max(n)·32768) - 10 ]` over
+    `X(k) in subband n` for every subband. The
+    `SubbandSplMethod::MaxLine` variant is the primary "spectral
+    line with the maximum amplitude in the frequency range
+    corresponding to subband n" estimator;
+    `SubbandSplMethod::PowerSum` is the spec's documented
+    alternative `X_spl(n) = 10·log10( Σ_k 10^(X(k)/10) )` dB
+    (PDF p.117, printed 111). Every output slot is defined — the
+    scalefactor operand always exists, so a subband receiving no
+    FFT line degenerates to the scf term alone. `NaN` lines are
+    dropped; the `usize::MAX` "outside the audio band" sentinel
+    and out-of-range subband indices are skipped (consistent with
+    the Step 8 `minimum_masking_threshold_subband` conventions);
+    a `spl_db` / `line_subband` length mismatch returns the scf
+    terms alone as the documented safe response.
+  * `fft_line_to_subband_layer2(k) -> usize` is the closed-form
+    Layer II FFT-line → subband map: Step 1's "Technical data of
+    the FFT" table gives a `fs/1024` frequency resolution and the
+    §2.4.3.2 filterbank splits `[0, fs/2)` into 32 equal `fs/64`
+    subbands, so subband `n` spans FFT lines `16n ..= 16n + 15`
+    (`k/16`); lines at or above the Nyquist index (`k >= 512`)
+    map to the `usize::MAX` sentinel.
+  * Model 1's Steps 2 → 8 → 9 now compose end-to-end on a shared
+    `line_subband` axis. Remaining §D.1 gaps: the Step 1
+    power-density spectrum (`X(k)` FFT + 96 dB normalisation) is
+    the next prose-only step; Steps 3 and 5(a) stay DOCS-BLOCKED
+    on the PNG-only Table D.1d/e/f inner rows (#1262).
+  * 12 new lib tests (337 → 349) pin the unity-scalefactor anchor
+    (`80.30899869919435 dB = 300·log10(2) − 10`), the doubling
+    `+20·log10(2)` identity and Table 3-B.1 monotonicity of the
+    term, loudest-line selection, scf-term dominance over a quiet
+    spectrum (both methods), the three-equal-lines power-sum
+    identity (`90 + 10·log10(3)`), the `PowerSum >= MaxLine`
+    dominance property across a 512-line spectrum, the no-lines
+    scf-term degenerate (both methods), sentinel / out-of-range
+    skipping, NaN drop, the length-mismatch safe return, the
+    16-lines-per-subband boundary sweep, and the Step 2 → 8 → 9
+    SMR composition (`SMR_sb(1) = 95 − 60 = 35 dB`).
 - Annex D Model 1 §D.1 Step 7 masker-range pre-filter (`psy`
   module). Two new spec-text-only primitives implementing the
   verbatim "For a given `i` the range of `j` may be reduced to
