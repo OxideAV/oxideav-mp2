@@ -60,8 +60,7 @@
 //! Table D.3a at PDF page 139 / printed page 133; spreading function
 //! at PDF page 129 / printed page 123), cross-checked against the
 //! markdown extract
-//! `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md`. No
-//! third-party MP2 source was consulted.
+//! `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md`.
 
 /// One row of an Annex D Table D.3 Model-2 *calculation partition
 /// table*.
