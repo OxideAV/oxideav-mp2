@@ -217,6 +217,7 @@ pub mod synthesis;
 pub mod tables;
 pub mod tables_analysis;
 pub mod tables_d2;
+pub mod tables_model2;
 pub mod tables_synthesis;
 
 pub use analysis::{AnalysisFilterbank, NUM_SUBBANDS as ANALYSIS_NUM_SUBBANDS, X_BUF_LEN};
@@ -285,6 +286,7 @@ pub use tables_d2::{
     CriticalBandBoundary, SamplingRate as PsyAnnexDSamplingRate, TABLE_D_2D_LAYER_II_32KHZ,
     TABLE_D_2E_LAYER_II_44K1HZ, TABLE_D_2F_LAYER_II_48KHZ,
 };
+pub use tables_model2::{spreading_function, CalcPartition, TABLE_D_3A_CALC_PARTITION_32KHZ};
 pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 
 /// Crate-local error type. The frame-level decode path is wired up via

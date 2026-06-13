@@ -8,6 +8,34 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Annex D **Model 2** (clause §D.2) opening stage (`tables_model2`
+  module): the *calculation partition table* and the Model-2
+  *spreading function*.
+  * `TABLE_D_3A_CALC_PARTITION_32KHZ: [CalcPartition; 49]` is Table
+    D.3a (Fs = 32 kHz, 49 threshold-calculation partitions),
+    transcribed verbatim from the staged ISO/IEC 11172-3:1993 PDF
+    page 139 (printed 133). Each `CalcPartition` carries the spec
+    columns `ωlow` / `ωhigh` (first / last 1-based FFT line of the
+    partition), `bval` (median Bark value), `minval` (minimum
+    masking-spread value, dB), and `tmn` (tone-masking-noise offset,
+    dB). The partitions tile the 1024-point analysis FFT's lines
+    1…513 with no gaps (`ωlow[n+1] = ωhigh[n]+1`, last `ωhigh = 513`
+    Nyquist). `CalcPartition::line_count()` returns `ωhigh − ωlow +
+    1`.
+  * `spreading_function(bval_from, bval_into) -> f64` is the clause
+    D.2.3 Model-2 spreading function `sprdngf(i, j)` (PDF page 129,
+    printed 123): `tmpx = 1,05·(j−i)`, `x = 8·min((tmpx−0,5)² −
+    2·(tmpx−0,5), 0)`, `tmpy = 15,811389 + 7,5·(tmpx+0,474) −
+    17,5·√(1 + (tmpx+0,474)²)`, returning `10^((x+tmpy)/10)` and
+    clamping to 0 when `tmpy < −100`. `i` is the Bark value of the
+    source partition, `j` the Bark value of the target partition.
+  * 11 new lib tests pin the 49-partition count, the contiguous
+    tile-to-Nyquist invariant (summed line count = 513),
+    non-decreasing `bval`, the constant `minval = 4,5 dB` from
+    partition 17, the monotone TMN tail, and the spreading
+    function's self-peak / asymmetry / far-below decay-to-zero.
+  * Companion tables D.3b (44,1 kHz, 57 partitions) and D.3c
+    (48 kHz, 58 partitions) are PNG-only renders not yet transcribed.
 - Annex D Model 1 §D.1 Step 1 power-density spectrum + 96 dB SPL
   normalisation (`psy` module). With these, every prose-only Step 1
   item is in place and Model 1's Steps 1 → 2 → 8 → 9 compose

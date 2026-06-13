@@ -361,6 +361,28 @@ end-to-end from raw PCM (Steps 1 → 2 → 4 → 5(b) → 6 → 7 → 8 → 9 in
 the `psy` module); what still blocks an automatic `SmrTable` is the
 PNG-only Annex D table material — see the per-round notes below.
 
+**Round 286 (2026-06-13)** opened the **§D.2 Psychoacoustic Model 2**
+stage (`tables_model2` module) with the first two text-sourced
+pieces. Table **D.3a** — the Model-2 *calculation partition table*
+for Fs = 32 kHz — lands as the typed 49-row `CalcPartition` array
+`TABLE_D_3A_CALC_PARTITION_32KHZ` (`ωlow` / `ωhigh` / `bval` /
+`minval` / `tmn` columns, transcribed from PDF p.139, printed 133),
+and the Model-2 *spreading function* `sprdngf(i, j)` lands as
+`spreading_function(bval_from, bval_into)` — the verbatim clause
+D.2.3 envelope `tmpx = 1,05·(j−i)`, `x = 8·min((tmpx−0,5)² −
+2·(tmpx−0,5), 0)`, `tmpy = 15,811389 + 7,5·(tmpx+0,474) −
+17,5·√(1 + (tmpx+0,474)²)`, `sprdngf = 10^((x+tmpy)/10)` (clamped to
+0 when `tmpy < −100`), from PDF p.129 (printed 123). 11 new lib
+tests (357 → 368, all green): the 49-partition count, contiguous-
+tiling-to-Nyquist invariant (`ωlow[n+1] = ωhigh[n]+1`, summed line
+count = 513), non-decreasing `bval`, the `minval = 4,5 dB` settle
+from partition 17, the monotone TMN tail, and the spreading
+function's self-peak / asymmetry / far-below decay-to-zero
+behaviour. The companion tables D.3b (44,1 kHz, 57 partitions) and
+D.3c (48 kHz, 58 partitions) are PNG-only renders not yet
+transcribed; Model 2's energy convolution / threshold loop is the
+next stage.
+
 **Round 277 (2026-06-11)** added the Annex D Model 1 §D.1 Step 1
 **power-density spectrum + 96 dB SPL normalisation** (`psy`
 module), completing every prose-only Step 1 item.
