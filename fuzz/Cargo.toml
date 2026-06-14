@@ -1,0 +1,70 @@
+# cargo-fuzz manifest for the oxideav-mp2 Layer II DECODE attacker
+# surface.
+#
+# Round 296 depth-mode lane. The decoder is mature (~99%); the
+# remaining depth-mode lane without coverage is libFuzzer over the
+# Layer II decode path. The existing `tests/malformed_input.rs`
+# property suite exhausts the 32-bit header bit-flip space and the
+# prefix-truncation space deterministically; this target adds a
+# coverage-guided fuzzer that constructs structurally-valid MPEG-1 and
+# MPEG-2 LSF headers (so the deep degroup / requantise / synthesis
+# chain is reached) and stitches several frames into one buffer so the
+# multi-frame chaining + sync-resync entry point `decode_all_frames`
+# and the cross-frame `FrameDecodeState` filterbank carry-over are
+# exercised on every iteration.
+#
+# Spec basis for the target: ISO/IEC 11172-3 §2.4.1.3 / §2.4.2.3
+# (frame header / sync), §2.4.1.6 / §2.4.3.3.1..4 (bit allocation,
+# scfsi, scalefactors, sample requantisation), §2.4.3.2 / §2.4.3.3.5
+# (polyphase synthesis filterbank), §2.4.3.1 (CRC-16 verify), plus the
+# ISO/IEC 13818-3 §2.4.2.3 low-sampling-rate (LSF) bitrate / sampling
+# ladders. The contract under test is panic-freedom on every public
+# decode entry, irrespective of input shape.
+
+[package]
+name = "oxideav-mp2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxideav-core = "0.1"
+
+[dependencies.oxideav-mp2]
+path = ".."
+
+# Self-contained workspace so the umbrella's `crates/*` member glob
+# (one level deep — this manifest is two levels deep and would not
+# match anyway) cannot pull this package in.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# ------------------------------------------------------------------
+# Fuzz targets.
+# ------------------------------------------------------------------
+
+# Target 1 — `decode`. Drives attacker-controlled bytes through three
+# public decode entry points: the free function `decode_frame` (single
+# cold-start frame), the streaming `decode_all_frames` (sync-resync +
+# multi-frame chaining + cross-frame `FrameDecodeState`), and the
+# registered `Decoder` trait object (`send_packet` / `receive_frame` /
+# `flush` / `reset`). The input is split into a sequence of crafted
+# frames, each with a structurally-valid 4-byte header (MPEG-1 or
+# MPEG-2 LSF) whose every field is attacker-chosen, padded out to the
+# header-implied frame length with attacker bytes for the CRC slot, the
+# bit-allocation / scfsi / scalefactor side info, and the sample
+# codewords — so the deep decode chain is reached on essentially every
+# iteration. Raw-byte packets are interleaved so the `< 4 bytes`,
+# `BadSync`, and short-frame rejections are also hit.
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false

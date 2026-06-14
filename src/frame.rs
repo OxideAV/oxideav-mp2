@@ -410,8 +410,14 @@ pub fn decode_all_frames(buf: &[u8]) -> Result<Vec<Vec<f64>>, FrameError> {
             continue;
         }
         let frame = decode_frame_with(&buf[offset..], &mut state)?;
-        if pcm.is_empty() {
-            pcm = vec![Vec::new(); frame.header.channels()];
+        // Each §2.4.1.3 frame header carries its own `mode` field, so a
+        // stream may switch channel count between frames (e.g. a mono
+        // intro frame followed by a stereo frame). Grow the per-channel
+        // accumulator to the widest channel count seen so far rather
+        // than fixing it from the first frame — otherwise a later,
+        // wider frame would index past the accumulator's end.
+        if frame.pcm.len() > pcm.len() {
+            pcm.resize_with(frame.pcm.len(), Vec::new);
         }
         for (ch, samples) in frame.pcm.iter().enumerate() {
             pcm[ch].extend_from_slice(samples);
@@ -652,5 +658,73 @@ mod tests {
         let direct = crate::crc::crc16_layer2(header[2], header[3], &payload, bits);
         let via_helper = layer2_crc(header, &payload, bits);
         assert_eq!(direct, via_helper);
+    }
+
+    #[test]
+    fn decode_all_frames_handles_channel_count_change_mid_stream() {
+        // Each §2.4.1.3 frame header carries its own `mode` field, so a
+        // single Layer II stream may switch channel count between
+        // frames (a mono frame followed by a stereo frame is legal).
+        // `decode_all_frames` sizes its per-channel accumulator from the
+        // running maximum channel count, so a wider second frame must
+        // not index past the accumulator (regression for the
+        // out-of-bounds panic found by the round-296 decode fuzzer:
+        // first frame mono → accumulator width 1, second frame stereo →
+        // `pcm[1]` out of bounds).
+        use crate::encoder_bit_allocator::SmrTable;
+        use crate::encoder_frame::encode_frame;
+        use crate::header::{Emphasis, ModeExtension};
+        use crate::NUM_SUBBANDS;
+
+        let smr: SmrTable = [[0.0f64; NUM_SUBBANDS]; 2];
+
+        // §2.4.2.3: 32 kbit/s with mode single_channel is permitted;
+        // 64 kbit/s admits stereo. Both at 44.1 kHz / unprotected.
+        let mono_header = FrameHeader {
+            lsf: false,
+            protection_bit: true,
+            bit_rate: 32_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::SingleChannel,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+        };
+        let stereo_header = FrameHeader {
+            mode: Mode::Stereo,
+            bit_rate: 64_000,
+            ..mono_header
+        };
+
+        let mono_pcm = vec![vec![0.0f64; PCM_SAMPLES_PER_CHANNEL]];
+        let stereo_pcm = vec![
+            vec![0.0f64; PCM_SAMPLES_PER_CHANNEL],
+            vec![0.0f64; PCM_SAMPLES_PER_CHANNEL],
+        ];
+
+        let mut stream = encode_frame(&mono_header, &mono_pcm, &smr, 0).expect("encode mono");
+        stream.extend_from_slice(
+            &encode_frame(&stereo_header, &stereo_pcm, &smr, 0).expect("encode stereo"),
+        );
+
+        // Must not panic; the accumulator widens to the stereo frame's
+        // two channels. The mono frame contributed one channel's worth
+        // of samples; the stereo frame contributes to both. Channel 0
+        // therefore holds two frames, channel 1 only the second.
+        let pcm = decode_all_frames(&stream).expect("mixed-channel stream decodes");
+        assert_eq!(pcm.len(), 2, "accumulator widened to the stereo frame");
+        assert_eq!(
+            pcm[0].len(),
+            2 * PCM_SAMPLES_PER_CHANNEL,
+            "ch0: both frames"
+        );
+        assert_eq!(
+            pcm[1].len(),
+            PCM_SAMPLES_PER_CHANNEL,
+            "ch1: stereo frame only"
+        );
     }
 }

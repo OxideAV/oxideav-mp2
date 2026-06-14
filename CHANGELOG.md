@@ -6,7 +6,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `frame::decode_all_frames` no longer panics when a Layer II stream
+  switches channel count mid-stream (e.g. a §2.4.1.3 single-channel
+  frame followed by a stereo frame — each frame header carries its own
+  `mode` field, so this is legal). The per-channel PCM accumulator was
+  sized once from the first frame; a later, wider frame indexed past
+  its end (`index out of bounds: the len is 1 but the index is 1`).
+  It now grows to the running maximum channel count. Found by the new
+  round-296 `decode` libFuzzer target; covered by the
+  `decode_all_frames_handles_channel_count_change_mid_stream`
+  regression test.
+
 ### Added
+
+- **Round-296 depth-mode `decode` cargo-fuzz target**
+  (`fuzz/fuzz_targets/decode.rs`). A coverage-guided panic-freedom
+  fuzzer over the Layer II decode attacker surface: the `decode_frame`
+  free function, the streaming `decode_all_frames` chain (sync-resync
+  skip + multi-frame chaining + cross-frame `FrameDecodeState`
+  filterbank carry-over), and the registered `Decoder` trait object
+  (`send_packet` / `receive_frame` / `flush` / `reset`). Constructs
+  structurally-valid MPEG-1 and MPEG-2 LSF headers from attacker bytes
+  so the deep degroup / requantise / synthesis chain is reached on
+  essentially every iteration, with raw-byte frames interleaved for the
+  `BadSync` / short-frame rejections. The self-contained `fuzz/`
+  sub-crate has its own `[workspace]` so the umbrella `crates/*` glob
+  cannot pull it in. Ran clean for 2 000 000 executions after the
+  channel-count fix above.
 
 - Annex D **Model 2** (clause §D.2) opening stage (`tables_model2`
   module): the *calculation partition table* and the Model-2

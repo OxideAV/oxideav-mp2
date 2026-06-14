@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-357 lib tests + 6 LSF integration tests + 14 malformed-input
+369 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -323,6 +323,26 @@ discoverable decoder factory and resolves both container tags
 `resolve_tag_ref`; and the `f64 → i16 LE` plane converter is pinned
 at the {0, ±0.5, ±1, ±1.5, ±2} reference points (the ±1.5 and ±2
 inputs clamp at the i16 endpoints).
+
+Round 296 added a depth-mode `decode` cargo-fuzz target
+(`fuzz/fuzz_targets/decode.rs`): a coverage-guided panic-freedom
+fuzzer over the Layer II decode attacker surface — the `decode_frame`
+free function, the streaming `decode_all_frames` chain (sync-resync
+skip + multi-frame chaining + cross-frame `FrameDecodeState`
+filterbank carry-over), and the registered `Decoder` trait object
+(`send_packet` / `receive_frame` / `flush` / `reset`). It constructs
+structurally-valid MPEG-1 and MPEG-2 LSF headers from attacker bytes
+(so the deep degroup / requantise / synthesis chain is reached on
+essentially every iteration) and interleaves raw-byte frames for the
+`BadSync` / short-frame paths. The first session surfaced a real
+out-of-bounds panic in `decode_all_frames` when a stream switches
+channel count mid-stream (a §2.4.1.3 single-channel frame followed by
+a stereo frame is legal — each header carries its own `mode`): the
+per-channel PCM accumulator was fixed from the first frame, so the
+wider second frame indexed past its end. The accumulator now grows to
+the running maximum channel count; the
+`decode_all_frames_handles_channel_count_change_mid_stream` regression
+test pins it, and the target then ran clean for 2 000 000 executions.
 
 ## What does not work yet
 
