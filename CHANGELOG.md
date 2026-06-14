@@ -6,6 +6,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round-303 Annex D Table D.5 — Layer I / Layer II coder partition
+  table** (`tables_model2` module). The 33-row (`n = 0..=32`)
+  Model 1 + Model 2 coder-partition boundary table, transcribed
+  verbatim from ISO/IEC 11172-3:1993 Annex D Table D.5 (PDF page 145 /
+  printed 139), lands as `TABLE_D_5_CODER_PARTITION: [CoderPartition;
+  33]` with the `boundary` (`ωhigh_n` / `ωlow_{n+1}`) and `width_n`
+  columns. The table is common to all three sampling rates and both
+  Layers. Two accessors map between coder partitions and FFT lines:
+  `coder_partition_span(n) -> Option<(u32, u32)>` returns the 1-based
+  inclusive FFT-line span of partition `n` (partition 0 is the single
+  DC line; partition `n ≥ 1` covers `boundary(n-1)+1 ..= boundary(n)`),
+  and `coder_partition_of_line(omega) -> Option<usize>` is its inverse
+  over the `1..=513` analysis-FFT working range. `CODER_PARTITION_COUNT`
+  exposes the row count. 10 new lib tests (369 → 379): row count, the
+  literal page-145 boundary endpoints / interior rows, the uniform
+  16-line boundary step above partition 0, strict-increase-to-Nyquist,
+  the `width_n` 0→1 flip at partition 13, contiguous span tiling of
+  `1..=513`, span↔line round-trip over every partition, boundary
+  anchors, and out-of-range `None` guards.
+
 ### Fixed
 
 - `frame::decode_all_frames` no longer panics when a Layer II stream

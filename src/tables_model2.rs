@@ -1,6 +1,7 @@
 //! ISO/IEC 11172-3:1993 Annex D clause **D.2** (Psychoacoustic
-//! *Model 2*) — the *calculation partition table* (Table D.3a) and the
-//! Model-2 *spreading function* `sprdngf(i, j)`.
+//! *Model 2*) — the *calculation partition table* (Table D.3a), the
+//! Model-2 *spreading function* `sprdngf(i, j)`, and the Model 1 + 2
+//! *Layer I / Layer II coder partition table* (Table D.5).
 //!
 //! Annex D is informative; it gives two worked example psychoacoustic
 //! models. Model 1 (clause D.1) groups the FFT lines into critical
@@ -473,6 +474,216 @@ pub fn spreading_function(bval_from: f64, bval_into: f64) -> f64 {
     }
 }
 
+/// One row of Annex D Table **D.5** — the Model 1 + Model 2 *Layer I
+/// and Layer II coder partition table*.
+///
+/// Clause D.2 (printed page 138) describes the columns as: "1. the
+/// index `n` of the coder partition; 2. the lower index `ωlow_{n+1}`
+/// (equivalently the upper index `ωhigh_n`) — the FFT-line boundary
+/// of the partition; 3. `width_n`." The boundary column is shared
+/// between consecutive partitions: the value listed for index `n` is
+/// both `ωhigh_n` (the last FFT line of coder partition `n`) and
+/// `ωlow_{n+1}` (one past the start of coder partition `n + 1`).
+///
+/// FFT-line indices are the published 1-based values; callers indexing
+/// a 0-based FFT-line buffer must subtract 1.
+///
+/// The table is common to **all three sampling rates** (32 / 44,1 /
+/// 48 kHz) and to **both Layer I and Layer II** — unlike the
+/// calculation-partition table (D.3a–c), which is per-rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoderPartition {
+    /// `ωhigh_n` / `ωlow_{n+1}` — the partition boundary FFT line
+    /// (1-based). It is the last FFT line of coder partition `n` and
+    /// the line one before the start of coder partition `n + 1`.
+    pub boundary: u32,
+    /// `width_n` — the spec's per-partition width flag (`0` for the
+    /// low-frequency partitions `n ≤ 12`, `1` from `n = 13` onward).
+    pub width: u32,
+}
+
+/// Annex D Table **D.5** — Layer I / Layer II coder partition table.
+///
+/// 33 rows indexed by coder partition `n = 0..=32`. Source: PDF page
+/// 145 (printed 139); cross-checked against the markdown extract
+/// `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md`.
+///
+/// The `boundary` column rises in steps of 16 FFT lines: partition 0
+/// ends at line 1, partition 1 at line 17, …, partition 32 at line
+/// 513 (the Nyquist line of the 1024-point analysis FFT). Coder
+/// partition `n` (for `n ≥ 1`) therefore covers FFT lines
+/// `boundary(n-1) + 1 ..= boundary(n)`; partition 0 is the single DC
+/// line 1.
+pub const TABLE_D_5_CODER_PARTITION: [CoderPartition; 33] = [
+    CoderPartition {
+        boundary: 1,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 17,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 33,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 49,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 65,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 81,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 97,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 113,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 129,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 145,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 161,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 177,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 193,
+        width: 0,
+    },
+    CoderPartition {
+        boundary: 209,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 225,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 241,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 257,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 273,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 289,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 305,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 321,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 337,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 353,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 369,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 385,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 401,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 417,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 433,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 449,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 465,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 481,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 497,
+        width: 1,
+    },
+    CoderPartition {
+        boundary: 513,
+        width: 1,
+    },
+];
+
+/// The number of coder partitions in Table D.5 (`n = 0..=32`).
+pub const CODER_PARTITION_COUNT: usize = TABLE_D_5_CODER_PARTITION.len();
+
+/// FFT-line span `(ωlow, ωhigh)` covered by coder partition `n`
+/// (1-based, inclusive), per Annex D Table D.5.
+///
+/// Coder partition 0 is the single DC FFT line 1; for `n ≥ 1` the
+/// span is `boundary(n-1) + 1 ..= boundary(n)`. Returns `None` for
+/// `n > 32` (out of table).
+#[must_use]
+pub fn coder_partition_span(n: usize) -> Option<(u32, u32)> {
+    let row = TABLE_D_5_CODER_PARTITION.get(n)?;
+    let low = if n == 0 {
+        1
+    } else {
+        TABLE_D_5_CODER_PARTITION[n - 1].boundary + 1
+    };
+    Some((low, row.boundary))
+}
+
+/// The coder partition index `n` containing FFT line `omega`
+/// (1-based), per Annex D Table D.5.
+///
+/// Returns `None` for `omega == 0` or `omega > 513` (outside the
+/// 1024-point analysis FFT's `1..=513` working range).
+#[must_use]
+pub fn coder_partition_of_line(omega: u32) -> Option<usize> {
+    if omega == 0 || omega > 513 {
+        return None;
+    }
+    TABLE_D_5_CODER_PARTITION
+        .iter()
+        .position(|p| omega <= p.boundary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,5 +816,119 @@ mod tests {
         // Far below the masker (large negative j - i) the asymmetric
         // term drives tmpy below -100, clamping the spread to zero.
         assert_eq!(spreading_function(24.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn table_d5_has_33_coder_partitions() {
+        assert_eq!(TABLE_D_5_CODER_PARTITION.len(), 33);
+        assert_eq!(CODER_PARTITION_COUNT, 33);
+    }
+
+    #[test]
+    fn table_d5_boundaries_match_printed_rows() {
+        // Spot-check the literal PDF page-145 (printed 139) boundary
+        // column at its endpoints and a couple of interior rows.
+        assert_eq!(TABLE_D_5_CODER_PARTITION[0].boundary, 1);
+        assert_eq!(TABLE_D_5_CODER_PARTITION[1].boundary, 17);
+        assert_eq!(TABLE_D_5_CODER_PARTITION[12].boundary, 193);
+        assert_eq!(TABLE_D_5_CODER_PARTITION[13].boundary, 209);
+        assert_eq!(TABLE_D_5_CODER_PARTITION[32].boundary, 513);
+    }
+
+    #[test]
+    fn table_d5_boundaries_step_by_16_after_partition_0() {
+        // Partition 0 ends at line 1; every subsequent boundary is
+        // exactly 16 FFT lines past the previous one (the spec's
+        // uniform 16-line coder-partition geometry above DC).
+        let table = &TABLE_D_5_CODER_PARTITION;
+        assert_eq!(table[1].boundary - table[0].boundary, 16);
+        for w in table[1..].windows(2) {
+            assert_eq!(
+                w[1].boundary - w[0].boundary,
+                16,
+                "coder-partition boundaries step by 16 FFT lines"
+            );
+        }
+    }
+
+    #[test]
+    fn table_d5_boundaries_strictly_increase_to_nyquist() {
+        let table = &TABLE_D_5_CODER_PARTITION;
+        for w in table.windows(2) {
+            assert!(
+                w[1].boundary > w[0].boundary,
+                "boundaries must strictly increase: {} then {}",
+                w[0].boundary,
+                w[1].boundary
+            );
+        }
+        // Last boundary reaches the Nyquist line of the 1024-point FFT.
+        assert_eq!(table[32].boundary, 513);
+    }
+
+    #[test]
+    fn table_d5_width_flag_flips_at_partition_13() {
+        // width_n is 0 for the low-frequency partitions n ≤ 12 and 1
+        // from n = 13 onward (verbatim from the printed table).
+        for (n, p) in TABLE_D_5_CODER_PARTITION.iter().enumerate() {
+            let expected = if n <= 12 { 0 } else { 1 };
+            assert_eq!(p.width, expected, "width_n at partition {n}");
+        }
+    }
+
+    #[test]
+    fn coder_partition_span_covers_axis_contiguously() {
+        // Partition 0 is the single DC line; for n ≥ 1 the span begins
+        // one past the previous boundary and ends at this boundary, so
+        // the spans tile 1..=513 with no gap or overlap.
+        assert_eq!(coder_partition_span(0), Some((1, 1)));
+        assert_eq!(coder_partition_span(1), Some((2, 17)));
+        assert_eq!(coder_partition_span(32), Some((498, 513)));
+        let mut next_expected = 1;
+        for n in 0..CODER_PARTITION_COUNT {
+            let (low, high) = coder_partition_span(n).unwrap();
+            assert_eq!(low, next_expected, "span {n} starts contiguously");
+            assert!(high >= low, "span {n} is non-empty");
+            next_expected = high + 1;
+        }
+        assert_eq!(next_expected, 514, "spans cover lines 1..=513 exactly");
+    }
+
+    #[test]
+    fn coder_partition_span_out_of_table_is_none() {
+        assert_eq!(coder_partition_span(33), None);
+        assert_eq!(coder_partition_span(usize::MAX), None);
+    }
+
+    #[test]
+    fn coder_partition_of_line_inverts_the_span() {
+        // Every FFT line in a partition's span maps back to that
+        // partition index.
+        for n in 0..CODER_PARTITION_COUNT {
+            let (low, high) = coder_partition_span(n).unwrap();
+            for omega in low..=high {
+                assert_eq!(
+                    coder_partition_of_line(omega),
+                    Some(n),
+                    "line {omega} must map to coder partition {n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coder_partition_of_line_boundary_anchors() {
+        assert_eq!(coder_partition_of_line(1), Some(0));
+        assert_eq!(coder_partition_of_line(2), Some(1));
+        assert_eq!(coder_partition_of_line(17), Some(1));
+        assert_eq!(coder_partition_of_line(18), Some(2));
+        assert_eq!(coder_partition_of_line(513), Some(32));
+    }
+
+    #[test]
+    fn coder_partition_of_line_out_of_range_is_none() {
+        assert_eq!(coder_partition_of_line(0), None);
+        assert_eq!(coder_partition_of_line(514), None);
+        assert_eq!(coder_partition_of_line(u32::MAX), None);
     }
 }

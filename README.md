@@ -163,7 +163,7 @@ solely from the ISO/IEC 11172-3 PDF:
   `2 × 31 × 1152 = 71 424` finite PCM samples in
   `[-4, +4]` (the §2.4.3.4.7.1 nominal range is `[-1, +1]`).
 
-369 lib tests + 6 LSF integration tests + 14 malformed-input
+379 lib tests + 6 LSF integration tests + 14 malformed-input
 property tests cover the MPEG-1 + LSF bitrate / sampling-frequency
 ladders end-to-end (decoding and encoding inverses cross-checked
 across all 14 × 3 = 42 LSF cells and all 168 LSF (bitrate, mode)
@@ -380,6 +380,37 @@ is rate-driven only. Model 1's prose-only steps now compose
 end-to-end from raw PCM (Steps 1 → 2 → 4 → 5(b) → 6 → 7 → 8 → 9 in
 the `psy` module); what still blocks an automatic `SmrTable` is the
 PNG-only Annex D table material — see the per-round notes below.
+
+**Round 303 (2026-06-14)** added the **§D.2 Table D.5 Layer I /
+Layer II coder partition table** (`tables_model2` module). The 33-row
+(`n = 0..=32`) coder-partition boundary table — common to Model 1 and
+Model 2, to all three sampling rates, and to both Layers, unlike the
+per-rate calculation-partition table (D.3a–c) — lands as
+`TABLE_D_5_CODER_PARTITION: [CoderPartition; 33]` carrying the
+`boundary` column (`ωhigh_n` = `ωlow_{n+1}`, the partition's last FFT
+line, shared with the next partition's start) and the `width_n` flag
+(0 for the low-frequency partitions `n ≤ 12`, 1 from `n = 13` onward),
+transcribed verbatim from PDF page 145 (printed 139). The boundary
+column rises in uniform 16-FFT-line steps after the DC partition
+(1 → 17 → 33 → … → 513, the Nyquist line of the 1024-point analysis
+FFT). Two accessors bridge coder partitions and FFT lines:
+`coder_partition_span(n) -> Option<(u32, u32)>` returns partition
+`n`'s 1-based inclusive FFT-line span (partition 0 is the single DC
+line 1; partition `n ≥ 1` covers `boundary(n-1)+1 ..= boundary(n)`),
+and `coder_partition_of_line(omega) -> Option<usize>` is the inverse
+over the `1..=513` working range (returning `None` outside it).
+`CODER_PARTITION_COUNT` exposes the 33-row count. 10 new lib tests
+(369 → 379, all green): the 33-row count, the literal page-145
+boundary endpoints and interior rows (`[0]=1`, `[1]=17`, `[12]=193`,
+`[13]=209`, `[32]=513`), the uniform 16-line boundary step above
+partition 0, strict-increase-to-Nyquist, the `width_n` 0→1 flip at
+partition 13, contiguous span tiling of `1..=513` with no gap or
+overlap, span↔line round-trip over every line of every partition,
+boundary anchors, and the out-of-table / out-of-range `None` guards.
+The companion D.3b (44,1 kHz) / D.3c (48 kHz) calculation-partition
+tables and the D.4a–c absolute-threshold tables remain PNG-only
+renders not yet transcribed; Model 2's energy convolution / threshold
+loop is the next stage.
 
 **Round 286 (2026-06-13)** opened the **§D.2 Psychoacoustic Model 2**
 stage (`tables_model2` module) with the first two text-sourced
