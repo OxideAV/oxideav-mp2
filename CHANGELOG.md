@@ -6,6 +6,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Round-318 §2.4.1.6 intensity-stereo sample loop — one shared sample
+  codeword above `bound`** (`frame` decode loop + `encoder_frame` write
+  loop). The §2.4.1.6 `audio_data()` sample syntax has two regions per
+  granule: for `sb < bound` one triplet is read/written **per channel**
+  (`samplecode[ch][sb][gr]`), but for `bound ≤ sb < sblimit` (the
+  intensity-stereo region in `joint_stereo` mode) only **one** triplet is
+  on the wire (`samplecode[0][sb][gr]`), valid for both channels
+  (§2.4.2.6: "for subbands in intensity_stereo mode the coded
+  representation of the sample is valid for both channels"). Each channel
+  still rescales that shared codeword by its own §2.4.3.3.3 scalefactor.
+  Both the decoder and the encoder previously read/wrote a separate
+  triplet per channel across the whole `sblimit` range, so a real-world
+  `joint_stereo` MP2 stream desync'd on decode and our encoder emitted a
+  non-conformant frame that over-ran the §C.1.5.2.7 bit budget the
+  allocator had already sized for a single shared codeword above `bound`.
+  The two regions are now split to match the syntax; the non-joint modes
+  (`bound == sblimit`) reduce to the prior flat per-channel loop and are
+  unaffected. New tests:
+  `frame::joint_stereo_above_bound_shares_codeword_across_channels` (both
+  channels reconstruct from one codeword) and
+  `encoder_frame::joint_stereo_above_bound_writes_one_shared_codeword_per_subband`
+  (the frame stays within `frame_size_bytes`). Sourced from ISO/IEC
+  11172-3:1993 §2.4.1.6 / §2.4.2.6.
+
 ### Added
 
 - **Round-310 Annex D §D.2.4 step (f) — Model 2 partition-domain

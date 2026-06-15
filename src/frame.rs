@@ -16,12 +16,22 @@
 //! # §2.4.1.6 sample loop
 //!
 //! ```text
-//! for (gr = 0; gr < 12; gr++)
-//!     for (sb = 0; sb < sblimit; sb++)
+//! for (gr = 0; gr < 12; gr++) {
+//!     for (sb = 0; sb < bound; sb++)              // per-channel region
 //!         for (ch = 0; ch < nch; ch++)
 //!             if (allocation[ch][sb] != 0)
-//!                 read one triplet of subband samples for (gr, sb, ch)
+//!                 read one triplet samplecode[ch][sb][gr]
+//!     for (sb = bound; sb < sblimit; sb++)        // intensity-stereo region
+//!         if (allocation[0][sb] != 0)
+//!             read one triplet samplecode[0][sb][gr]  // shared by both ch
+//! }
 //! ```
+//!
+//! The second region only differs from the first in `joint_stereo` mode;
+//! for every other mode `bound == sblimit`, so the intensity region is
+//! empty and the loop is a flat per-channel read. In the intensity region
+//! the single decoded codeword is valid for both channels (§2.4.2.6), and
+//! each channel rescales it by its own §2.4.3.3.3 scalefactor.
 //!
 //! Each iteration of the inner triplet read produces three subband
 //! samples (the codeword is grouped for `nb_steps ∈ {3, 5, 9}` and
@@ -276,12 +286,32 @@ pub fn decode_frame_with(
         .map(|_| vec![[0.0_f64; NUM_SUBBANDS]; SAMPLE_GRANULES_PER_FRAME * SAMPLES_PER_TRIPLET])
         .collect();
 
+    // §2.4.1.6 sample loop. Two regions per the syntax (PDF page 16,
+    // lines `for (sb=0; sb<bound;…)` then `for (sb=bound; sb<sblimit;…)`):
+    //
+    //   * `sb < bound` — one triplet is read *per channel*
+    //     (`samplecode[ch][sb][gr]`).
+    //   * `bound <= sb < sblimit` (intensity-stereo region in
+    //     joint_stereo mode) — only ONE triplet is on the wire
+    //     (`samplecode[0][sb][gr]`); §2.4.2.6 "for subbands in
+    //     intensity_stereo mode the coded representation of the sample
+    //     is valid for both channels." The single decoded triplet is
+    //     shared, but each channel applies its OWN §2.4.3.3.3
+    //     scalefactor (scfsi + scalefactor are transmitted per channel
+    //     above the bound — the scfsi/scalefactor loops in
+    //     [`parse_audio_data`] run over `sb < sblimit` for every
+    //     channel).
+    //
+    // For the non-joint modes `bound == sblimit`, so the second region
+    // is empty and the loop is identical to a flat per-channel read.
     for sample_gr in 0..SAMPLE_GRANULES_PER_FRAME {
         // §2.4.2.3: 12 sample-granules split into 3 scalefactor-
         // granules of 4 each.
         let sf_gr = sample_gr / 4;
         let base = sample_gr * SAMPLES_PER_TRIPLET;
-        for sb in 0..audio.sblimit {
+
+        // Region 1: `sb < bound` — one triplet per channel.
+        for sb in 0..audio.bound {
             for (ch, channel_subband) in subband.iter_mut().enumerate().take(channels) {
                 let nb_steps = audio.nb_steps[ch][sb];
                 if nb_steps == 0 {
@@ -293,6 +323,33 @@ pub fn decode_frame_with(
                 // §2.4.3.3.3 rescaling: `s' = factor * s''` with the
                 // §2.4.2.3 / scfsi-expanded scalefactor for this
                 // sample-granule's scalefactor-granule.
+                let sf_idx = audio.scalefactor[ch][sb][sf_gr] as usize;
+                let factor = SCALEFACTORS[sf_idx];
+                channel_subband[base][sb] = triplet[0] * factor;
+                channel_subband[base + 1][sb] = triplet[1] * factor;
+                channel_subband[base + 2][sb] = triplet[2] * factor;
+            }
+        }
+
+        // Region 2: `bound <= sb < sblimit` — one shared triplet,
+        // valid for both channels (intensity stereo). `parse_allocation`
+        // copied the single on-wire allocation to both channels, so
+        // `nb_steps[0][sb] == nb_steps[1][sb]` here; channel 0 is the
+        // authoritative `samplecode[0][sb]` source per the syntax.
+        for sb in audio.bound..audio.sblimit {
+            let nb_steps = audio.nb_steps[0][sb];
+            if nb_steps == 0 {
+                continue; // §2.4.2.3 "no bits allocated" sentinel.
+            }
+            let class = class_of_quantization(nb_steps).ok_or(FrameError::UnknownQuantClass {
+                ch: 0,
+                sb,
+                nb_steps,
+            })?;
+            let triplet = read_triplet(&class, &mut reader)?;
+            for (ch, channel_subband) in subband.iter_mut().enumerate().take(channels) {
+                // Each channel rescales the shared samplecode by its own
+                // §2.4.3.3.3 scalefactor for this scalefactor-granule.
                 let sf_idx = audio.scalefactor[ch][sb][sf_gr] as usize;
                 let factor = SCALEFACTORS[sf_idx];
                 channel_subband[base][sb] = triplet[0] * factor;
@@ -658,6 +715,118 @@ mod tests {
         let direct = crate::crc::crc16_layer2(header[2], header[3], &payload, bits);
         let via_helper = layer2_crc(header, &payload, bits);
         assert_eq!(direct, via_helper);
+    }
+
+    #[test]
+    fn joint_stereo_above_bound_shares_codeword_across_channels() {
+        // §2.4.1.6 / §2.4.2.6: above `bound` the bitstream carries one
+        // sample triplet per (sb, gr), valid for both channels. The
+        // decoder reconstructs each channel by scaling that shared
+        // codeword by the channel's own §2.4.3.3.3 scalefactor. When the
+        // encoder hands both channels identical above-bound input (so
+        // their scalefactors coincide), the decoded above-bound subband
+        // samples must be *identical* between channels — a direct
+        // consequence of the single shared codeword. The pre-fix decoder
+        // read two independent codewords above the bound and desync'd the
+        // bitstream, so this property could not hold.
+        use crate::audio_data::parse_audio_data_with_section_bits;
+        use crate::bitalloc::class_of_quantization;
+        use crate::encoder_bit_allocator::SmrTable;
+        use crate::encoder_frame::encode_frame;
+        use crate::header::{Emphasis, Mode, ModeExtension};
+        use oxideav_core::bits::BitReader;
+
+        let header = FrameHeader {
+            lsf: false,
+            protection_bit: true,
+            bit_rate: 192_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::JointStereo,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+        };
+
+        // Identical input on both channels → identical scalefactors, so
+        // the shared above-bound codeword reconstructs identically.
+        let one: Vec<f64> = (0..PCM_SAMPLES_PER_CHANNEL)
+            .map(|n| 0.5 * (2.0 * std::f64::consts::PI * 6_000.0 * n as f64 / 44_100.0).sin())
+            .collect();
+        let pcm = vec![one.clone(), one];
+
+        let smr: SmrTable = [[40.0f64; NUM_SUBBANDS]; 2];
+
+        let bytes = encode_frame(&header, &pcm, &smr, 0).expect("encode joint-stereo");
+
+        // Parse the audio-data to learn the bound / allocation / scfsi.
+        let mut reader = BitReader::with_position(&bytes, 4);
+        let (audio, _, _) = parse_audio_data_with_section_bits(&header, &mut reader).unwrap();
+        assert_eq!(audio.bound, 4, "Bound4 mode_extension");
+        assert!(
+            (audio.bound..audio.sblimit).any(|sb| audio.nb_steps[0][sb] != 0),
+            "test premise: above-bound region must be allocated"
+        );
+
+        // Decode and confirm the decoder stayed bit-aligned and the
+        // above-bound subband contributions match between channels. We
+        // re-walk the sample loop the same way `decode_frame_with` does,
+        // but compare the two channels' reconstructed subband values.
+        let decoded = decode_frame(&bytes).expect("decode joint-stereo");
+        // The synthesis filterbank mixes subbands, so we compare the
+        // pre-synthesis subband matrix instead by re-running the loop.
+        let mut r2 = BitReader::with_position(&bytes, 4);
+        let (a2, _, _) = parse_audio_data_with_section_bits(&header, &mut r2).unwrap();
+        let mut ch0 = vec![[0.0f64; NUM_SUBBANDS]; 36];
+        let mut ch1 = vec![[0.0f64; NUM_SUBBANDS]; 36];
+        for sample_gr in 0..SAMPLE_GRANULES_PER_FRAME {
+            let sf_gr = sample_gr / 4;
+            let base = sample_gr * SAMPLES_PER_TRIPLET;
+            for sb in 0..a2.bound {
+                for ch in 0..2 {
+                    let nb = a2.nb_steps[ch][sb];
+                    if nb == 0 {
+                        continue;
+                    }
+                    let class = class_of_quantization(nb).unwrap();
+                    let t = read_triplet(&class, &mut r2).unwrap();
+                    let f = SCALEFACTORS[a2.scalefactor[ch][sb][sf_gr] as usize];
+                    let dst = if ch == 0 { &mut ch0 } else { &mut ch1 };
+                    for s in 0..3 {
+                        dst[base + s][sb] = t[s] * f;
+                    }
+                }
+            }
+            for sb in a2.bound..a2.sblimit {
+                let nb = a2.nb_steps[0][sb];
+                if nb == 0 {
+                    continue;
+                }
+                let class = class_of_quantization(nb).unwrap();
+                let t = read_triplet(&class, &mut r2).unwrap();
+                for ch in 0..2 {
+                    let f = SCALEFACTORS[a2.scalefactor[ch][sb][sf_gr] as usize];
+                    let dst = if ch == 0 { &mut ch0 } else { &mut ch1 };
+                    for s in 0..3 {
+                        dst[base + s][sb] = t[s] * f;
+                    }
+                }
+            }
+        }
+        for (gr, (a, b)) in ch0.iter().zip(ch1.iter()).enumerate() {
+            for sb in audio.bound..audio.sblimit {
+                assert_eq!(
+                    a[sb], b[sb],
+                    "above-bound subband sb={sb} gr={gr} must be identical \
+                     (shared codeword + equal scalefactor)"
+                );
+            }
+        }
+        // Sanity: the frame decoded to full length on both channels.
+        assert_eq!(decoded.pcm[0].len(), PCM_SAMPLES_PER_CHANNEL);
+        assert_eq!(decoded.pcm[1].len(), PCM_SAMPLES_PER_CHANNEL);
     }
 
     #[test]

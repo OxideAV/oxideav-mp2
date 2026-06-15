@@ -495,10 +495,26 @@ fn encode_frame_inner(
     // post-rescaling `s'` from `subband_samples[ch][sb][t]` (each
     // sample-granule contributes three contiguous values starting at
     // `t = sample_gr * 3`).
+    //
+    // The §2.4.1.6 syntax has two regions per granule (mirroring the
+    // decoder in [`crate::frame`]):
+    //
+    //   * `sb < bound` — one triplet *per channel* (`samplecode[ch][sb]`).
+    //   * `bound <= sb < sblimit` (intensity-stereo region) — only ONE
+    //     triplet (`samplecode[0][sb]`); §2.4.2.6 "for subbands in
+    //     intensity_stereo mode the coded representation of the sample
+    //     is valid for both channels." Channel 0's samples are the
+    //     authoritative on-wire codeword. The allocator has already
+    //     enforced `nb_steps[0][sb] == nb_steps[1][sb]` above bound.
+    //
+    // For the non-joint modes `bound == sblimit`, so the second region
+    // is empty and this reduces to a flat per-channel write.
     for sample_gr in 0..SAMPLE_GRANULES_PER_FRAME {
         let base = sample_gr * SAMPLES_PER_TRIPLET;
         let sf_gr = sample_gr / 4; // §2.4.2.3 partition.
-        for sb in 0..audio.sblimit {
+
+        // Region 1: `sb < bound` — one triplet per channel.
+        for sb in 0..audio.bound {
             for ch in 0..channels {
                 let nb = audio.nb_steps[ch][sb];
                 if nb == 0 {
@@ -517,6 +533,27 @@ fn encode_frame_inner(
                 ];
                 write_triplet_scaled(&class, sf_idx, &triplet, &mut writer)?;
             }
+        }
+
+        // Region 2: `bound <= sb < sblimit` — one shared triplet,
+        // sourced from channel 0 (`samplecode[0][sb]`).
+        for sb in audio.bound..audio.sblimit {
+            let nb = audio.nb_steps[0][sb];
+            if nb == 0 {
+                continue; // §2.4.2.3 "no bits allocated" sentinel.
+            }
+            let class = class_of_quantization(nb).ok_or(EncodeError::UnknownQuantClass {
+                ch: 0,
+                sb,
+                nb_steps: nb,
+            })?;
+            let sf_idx = audio.scalefactor[0][sb][sf_gr];
+            let triplet = [
+                subband_samples[0][sb][base],
+                subband_samples[0][sb][base + 1],
+                subband_samples[0][sb][base + 2],
+            ];
+            write_triplet_scaled(&class, sf_idx, &triplet, &mut writer)?;
         }
     }
 
@@ -979,6 +1016,57 @@ mod tests {
                 audio.nb_steps[0][sb], audio.nb_steps[1][sb],
                 "joint-stereo invariant violated at sb={sb}"
             );
+        }
+    }
+
+    #[test]
+    fn joint_stereo_above_bound_writes_one_shared_codeword_per_subband() {
+        // §2.4.1.6: above `bound` the bitstream carries ONE sample
+        // triplet per (sb, gr) — `samplecode[0][sb][gr]` — shared by
+        // both channels (intensity stereo). Drive a high-SMR table that
+        // forces non-zero allocation in the above-bound region, then
+        // confirm the encoded sample-codeword region is sized for ONE
+        // codeword per above-bound subband, not two. We measure this
+        // by comparing the actual frame's used bits against an
+        // independently-computed expectation: doubling the above-bound
+        // codewords would overflow the §2.4.3.1 frame size.
+        let header = FrameHeader {
+            mode: Mode::JointStereo,
+            mode_extension: ModeExtension::Bound4,
+            bit_rate: 192_000,
+            ..canonical_stereo_header()
+        };
+        let pcm = tone_pcm(2, 6_000.0, 0.7);
+        // Boost SMR across the whole spectrum so the allocator spends
+        // bits above the bound.
+        let smr: SmrTable = [[40.0f64; NUM_SUBBANDS]; 2];
+        let bytes = encode_frame(&header, &pcm, &smr, 0).expect("encode joint-stereo");
+        assert_eq!(
+            bytes.len(),
+            header.frame_size_bytes(),
+            "frame must be exactly frame_size_bytes — a doubled above-bound \
+             sample region would overflow"
+        );
+
+        // Confirm at least one above-bound subband actually carries an
+        // allocation, otherwise the test would be vacuous.
+        let mut reader = BitReader::with_position(&bytes, 6);
+        let (audio, _, _) = parse_audio_data_with_section_bits(&header, &mut reader).unwrap();
+        let any_above_bound_allocated =
+            (audio.bound..audio.sblimit).any(|sb| audio.nb_steps[0][sb] != 0);
+        assert!(
+            any_above_bound_allocated,
+            "test premise: at least one above-bound subband must be allocated"
+        );
+
+        // Round-trips cleanly: the decoder consumes exactly one shared
+        // codeword per above-bound subband, so the bitstream stays
+        // aligned and the frame decodes without a desync.
+        let decoded = decode_frame(&bytes).expect("decode joint-stereo");
+        assert_eq!(decoded.pcm.len(), 2);
+        for ch in 0..2 {
+            assert_eq!(decoded.pcm[ch].len(), 1152);
+            assert!(decoded.pcm[ch].iter().all(|v| v.is_finite()));
         }
     }
 

@@ -31,6 +31,12 @@ the runtime registry as a decoder.
 - **Sample requantization** (§2.4.3.3.4): MSB-invert → two's-complement
   fraction → `s'' = C · (s''' + D)`, radix-`nlevels` degrouping for the
   grouped classes, and Table 3-B.1 rescaling.
+- **Intensity stereo** (§2.4.1.6 / §2.4.2.6): in `joint_stereo` mode the
+  sample loop reads one shared sample codeword per subband above `bound`
+  (`samplecode[0][sb][gr]`, valid for both channels), and each channel
+  rescales it by its own scalefactor — keeping the bitstream aligned
+  through the intensity region. The four `mode_extension` bounds (4 / 8 /
+  12 / 16) are honoured.
 - **CRC-16** (§2.4.1.4 / §2.4.3.1) over the Annex B Table B.5 protected
   fields, verified on decode.
 - **Polyphase synthesis filterbank** (§2.4.3.2, Annex A Figure A.2):
