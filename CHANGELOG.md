@@ -8,6 +8,48 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round-310 Annex D §D.2.4 step (f) — Model 2 partition-domain
+  spreading convolution + normalization** (`tables_model2` module).
+  The clause D.2.4 step (f) machinery that convolves the
+  threshold-calculation partition energies / unpredictabilities with the
+  already-landed clause D.2.3 `spreading_function` across the Bark axis,
+  transcribed verbatim from ISO/IEC 11172-3:1993 Annex D (PDF pages
+  130–131 / printed 124–125):
+  * `convolve_partition_spreading(table, quantity) -> Vec<f64>` is the
+    shared `ecb_b = Σ_bb e_bb · sprdngf(bval_bb, bval_b)` (and
+    identically `cf_b = Σ_bb e_bb·c_bb · sprdngf(...)`) convolution over
+    every calculation partition `bb` into target partition `b`, indexed
+    by the 0-based row of the supplied `CalcPartition` table (e.g.
+    `TABLE_D_3A_CALC_PARTITION_32KHZ`). A length mismatch returns an
+    empty vector.
+  * `rnorm_coefficient(table, b) -> Option<f64>` is the
+    spreading-function normalization coefficient `rnorm_b = 1 /
+    Σ_bb sprdngf(bval_bb, bval_b)` (the reciprocal of the spreading
+    row-sum into partition `b`); always finite and positive because the
+    self-spread is > 0. `None` for `b` out of range.
+  * `normalize_spread_energy(table, ecb) -> Vec<f64>` applies the
+    coefficient pointwise: `en_b = ecb_b · rnorm_b`.
+  * `renormalize_unpredictability(cf, ecb) -> Vec<f64>` is the
+    energy-weighting renormalization `cb_b = cf_b / ecb_b`; a silent
+    partition (`ecb_b == 0`) yields `cb_b = 0.0` rather than NaN.
+  The spec's `bb = 1..bmax` summation (the clause D.2.2 "partition
+  numbering starts at 1" convention) maps to summing over every row of
+  the 0-based `table`. 13 new lib tests (379 → 392): the convolution
+  against an independent from-spec reference on D.3a, the unit-impulse
+  identity (`ecb` reproduces the spreading row), linearity in the source
+  quantity, length-mismatch safe return; `rnorm` as the exact row-sum
+  reciprocal across all 49 partitions with finite/positive guarantees,
+  out-of-range `None`, and the flat-spread-normalizes-to-unity identity;
+  `normalize_spread_energy` pointwise application and length-mismatch
+  safe return; `renormalize_unpredictability` as exact `cf/ecb`, the
+  silent-partition zero, and length-mismatch safe return; plus an
+  end-to-end step (f) pipeline check that constant unpredictability is
+  preserved through the energy-weighted convolution + renormalization
+  for any energy profile. The companion D.3b (44,1 kHz) / D.3c (48 kHz)
+  calculation-partition tables and the D.4a–c absolute-threshold tables
+  remain PNG-only renders; the step (f) primitives are table-agnostic
+  and work against whichever `CalcPartition` table the caller supplies.
+
 - **Round-303 Annex D Table D.5 — Layer I / Layer II coder partition
   table** (`tables_model2` module). The 33-row (`n = 0..=32`)
   Model 1 + Model 2 coder-partition boundary table, transcribed

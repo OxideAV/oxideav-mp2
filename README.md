@@ -381,6 +381,38 @@ end-to-end from raw PCM (Steps 1 → 2 → 4 → 5(b) → 6 → 7 → 8 → 9 in
 the `psy` module); what still blocks an automatic `SmrTable` is the
 PNG-only Annex D table material — see the per-round notes below.
 
+**Round 310 (2026-06-15)** added the **§D.2.4 step (f) Model 2
+partition-domain spreading convolution + normalization**
+(`tables_model2` module). The clause D.2.4 step (f) machinery that
+convolves the threshold-calculation partition energies and
+unpredictabilities with the round-286 clause D.2.3 `spreading_function`
+across the Bark axis, transcribed verbatim from PDF pages 130-131
+(printed 124-125): `convolve_partition_spreading(table, quantity)` is
+the shared `ecb_b = Σ_bb e_bb · sprdngf(bval_bb, bval_b)` /
+`cf_b = Σ_bb e_bb·c_bb · sprdngf(...)` convolution over every
+calculation partition `bb` into target partition `b`, indexed by the
+0-based row of the supplied `CalcPartition` table;
+`rnorm_coefficient(table, b)` is the normalization coefficient
+`rnorm_b = 1 / Σ_bb sprdngf(bval_bb, bval_b)` (the reciprocal of the
+spreading row-sum, always finite and positive);
+`normalize_spread_energy(table, ecb)` applies it pointwise as
+`en_b = ecb_b · rnorm_b`; and `renormalize_unpredictability(cf, ecb)`
+is the energy-weighting renorm `cb_b = cf_b / ecb_b` (silent partition
+→ 0, not NaN). The spec's `bb = 1..bmax` sum maps to summing over every
+row of the 0-based table (clause D.2.2 "partition numbering starts at
+1"). 13 new lib tests (379 → 392): the convolution against an
+independent from-spec reference on D.3a, the unit-impulse identity,
+linearity, the `rnorm` row-sum-reciprocal identity over all 49
+partitions, flat-spread-normalizes-to-unity, the `cf/ecb` quotient, the
+silent-partition zero, length-mismatch safe returns, and an end-to-end
+step (f) pipeline check that a constant unpredictability survives the
+energy-weighted convolution + renormalization for any energy profile.
+The primitives are table-agnostic; the PNG-only D.3b/c and D.4a–c
+tables still gate the full per-rate threshold loop. The remaining step
+(f) `tb` tonality index, step (h)/(i)/(j) SNR / power-ratio / energy
+threshold, and the step (k)/(n) FFT-line spread + SMR reduction are the
+next stages.
+
 **Round 303 (2026-06-14)** added the **§D.2 Table D.5 Layer I /
 Layer II coder partition table** (`tables_model2` module). The 33-row
 (`n = 0..=32`) coder-partition boundary table — common to Model 1 and

@@ -474,6 +474,135 @@ pub fn spreading_function(bval_from: f64, bval_into: f64) -> f64 {
     }
 }
 
+/// Annex D clause **D.2.4 step (f)** Model-2 *partition-domain
+/// spreading convolution*.
+///
+/// Convolves a per-calculation-partition quantity with the clause
+/// D.2.3 [`spreading_function`] across the Bark axis. Verbatim from
+/// PDF page 130 (printed 124):
+///
+/// ```text
+/// ecb_b = Σ_{bb=1..bmax}  e_bb       · sprdngf(bval_bb, bval_b)
+/// cf_b  = Σ_{bb=1..bmax}  e_bb·c_bb  · sprdngf(bval_bb, bval_b)
+/// ```
+///
+/// `quantity[bb]` is the source value for partition `bb` (the partition
+/// energy `e_bb` for the `ecb` convolution, or the energy-weighted
+/// unpredictability product `e_bb·c_bb` for the `cf` convolution — the
+/// spec performs the identical convolution on both, so a single
+/// primitive serves). `table` supplies the per-partition Bark values
+/// `bval` (the calculation-partition table for the active sampling
+/// rate, e.g. [`TABLE_D_3A_CALC_PARTITION_32KHZ`]).
+///
+/// The returned vector is indexed by the same 0-based partition index
+/// as `table`; entry `b` is the convolution result for target
+/// partition `b`. A length mismatch between `quantity` and `table` is a
+/// caller error and yields an empty vector as the documented safe
+/// response.
+///
+/// The spec's `bb=1..bmax` summation is over every partition (the
+/// "Partition numbering starts at 1" convention of clause D.2.2); this
+/// 0-based implementation sums over every row of `table`.
+#[must_use]
+pub fn convolve_partition_spreading(table: &[CalcPartition], quantity: &[f64]) -> Vec<f64> {
+    if quantity.len() != table.len() {
+        return Vec::new();
+    }
+    table
+        .iter()
+        .map(|target| {
+            table
+                .iter()
+                .zip(quantity)
+                .map(|(source, &q)| q * spreading_function(source.bval, target.bval))
+                .sum()
+        })
+        .collect()
+}
+
+/// Annex D clause **D.2.4 step (f)** Model-2 spreading-function
+/// *normalization coefficient* `rnorm_b`.
+///
+/// Because the [`spreading_function`] is not normalized, the spec
+/// renormalizes the spread energy. Verbatim from PDF page 131
+/// (printed 125):
+///
+/// ```text
+/// rnorm_b = 1 / Σ_{bb=1..bmax} sprdngf(bval_bb, bval_b)
+/// ```
+///
+/// `b` is the 0-based target-partition index into `table`. Returns the
+/// reciprocal of the spreading row-sum into partition `b`; returns
+/// `None` for `b` out of range. The row-sum is strictly positive for
+/// every partition (the self-spread `sprdngf(bval_b, bval_b)` is
+/// always > 0), so the reciprocal is always finite.
+#[must_use]
+pub fn rnorm_coefficient(table: &[CalcPartition], b: usize) -> Option<f64> {
+    let target = table.get(b)?;
+    let row_sum: f64 = table
+        .iter()
+        .map(|source| spreading_function(source.bval, target.bval))
+        .sum();
+    Some(1.0 / row_sum)
+}
+
+/// Annex D clause **D.2.4 step (f)** Model-2 *spread-energy
+/// normalization*.
+///
+/// Applies the [`rnorm_coefficient`] to the convolved partition energy
+/// `ecb` to produce the normalized energy `en`. Verbatim from PDF
+/// page 131 (printed 125):
+///
+/// ```text
+/// en_b = ecb_b · rnorm_b
+/// ```
+///
+/// `ecb` is the output of [`convolve_partition_spreading`] applied to
+/// the partition energies; `table` supplies the Bark values that
+/// determine each partition's `rnorm`. The returned vector is indexed
+/// by the same 0-based partition index. A length mismatch between `ecb`
+/// and `table` yields an empty vector as the documented safe response.
+#[must_use]
+pub fn normalize_spread_energy(table: &[CalcPartition], ecb: &[f64]) -> Vec<f64> {
+    if ecb.len() != table.len() {
+        return Vec::new();
+    }
+    ecb.iter()
+        .enumerate()
+        .map(|(b, &e)| e * rnorm_coefficient(table, b).unwrap_or(0.0))
+        .collect()
+}
+
+/// Annex D clause **D.2.4 step (f)** Model-2 *unpredictability
+/// renormalization* `cb_b`.
+///
+/// The convolved unpredictability `cf` is weighted by the signal
+/// energy, so the spec renormalizes it to the convolved energy `ecb`.
+/// Verbatim from PDF page 130–131 (printed 124–125):
+///
+/// ```text
+/// cb_b = cf_b / ecb_b
+/// ```
+///
+/// `cf` is [`convolve_partition_spreading`] applied to the
+/// energy-weighted unpredictability product `e·c`; `ecb` is the same
+/// convolution applied to the partition energy `e`. Both are indexed by
+/// the 0-based partition index. A partition whose convolved energy
+/// `ecb_b` is zero (a silent partition) yields `cb_b = 0.0` — the
+/// documented safe response, since no energy means no defined
+/// unpredictability. A length mismatch between `cf` and `ecb` yields an
+/// empty vector.
+#[must_use]
+pub fn renormalize_unpredictability(cf: &[f64], ecb: &[f64]) -> Vec<f64> {
+    if cf.len() != ecb.len() {
+        return Vec::new();
+    }
+    cf.iter()
+        .zip(ecb)
+        .map(|(&c, &e)| if e == 0.0 { 0.0 } else { c / e })
+        .collect()
+}
+
 /// One row of Annex D Table **D.5** — the Model 1 + Model 2 *Layer I
 /// and Layer II coder partition table*.
 ///
@@ -930,5 +1059,192 @@ mod tests {
         assert_eq!(coder_partition_of_line(0), None);
         assert_eq!(coder_partition_of_line(514), None);
         assert_eq!(coder_partition_of_line(u32::MAX), None);
+    }
+
+    // ----- Model 2 step (f): spreading convolution + normalization -----
+
+    /// Independent reference implementation of the step (f) convolution,
+    /// written straight from the spec sum so the production routine is
+    /// cross-checked against a second formulation rather than itself.
+    fn reference_convolve(table: &[CalcPartition], quantity: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0; table.len()];
+        for (b, target) in table.iter().enumerate() {
+            let mut acc = 0.0;
+            for (bb, source) in table.iter().enumerate() {
+                acc += quantity[bb] * spreading_function(source.bval, target.bval);
+            }
+            out[b] = acc;
+        }
+        out
+    }
+
+    #[test]
+    fn convolve_matches_independent_reference_on_d3a() {
+        // A deterministic per-partition energy profile (no RNG, no
+        // external data) convolved through both the production routine
+        // and the from-spec reference must agree bin-for-bin.
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let energy: Vec<f64> = (0..table.len()).map(|n| 1.0 + (n as f64) * 0.5).collect();
+        let got = convolve_partition_spreading(table, &energy);
+        let want = reference_convolve(table, &energy);
+        assert_eq!(got.len(), table.len());
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g - w).abs() < 1e-12, "convolution mismatch: {g} vs {w}");
+        }
+    }
+
+    #[test]
+    fn convolve_of_unit_impulse_is_the_spreading_row() {
+        // Convolving an impulse at source partition s reproduces the
+        // spreading function from s into every target partition b — the
+        // defining property of the convolution.
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let s = 20usize;
+        let mut energy = vec![0.0; table.len()];
+        energy[s] = 1.0;
+        let ecb = convolve_partition_spreading(table, &energy);
+        for (b, target) in table.iter().enumerate() {
+            let expected = spreading_function(table[s].bval, target.bval);
+            assert!(
+                (ecb[b] - expected).abs() < 1e-12,
+                "impulse at {s} into {b}: {} vs {}",
+                ecb[b],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn convolve_is_linear_in_the_source_quantity() {
+        // The convolution is a linear operator: conv(a·x + b·y) =
+        // a·conv(x) + b·conv(y).
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let x: Vec<f64> = (0..table.len()).map(|n| (n as f64) * 0.3 + 0.1).collect();
+        let y: Vec<f64> = (0..table.len()).map(|n| 10.0 - (n as f64) * 0.2).collect();
+        let (a, b) = (2.5_f64, -1.5_f64);
+        let combined: Vec<f64> = x.iter().zip(&y).map(|(&xi, &yi)| a * xi + b * yi).collect();
+        let lhs = convolve_partition_spreading(table, &combined);
+        let cx = convolve_partition_spreading(table, &x);
+        let cy = convolve_partition_spreading(table, &y);
+        for ((l, &px), &py) in lhs.iter().zip(&cx).zip(&cy) {
+            assert!((l - (a * px + b * py)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn convolve_length_mismatch_returns_empty() {
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        assert!(convolve_partition_spreading(table, &[1.0, 2.0]).is_empty());
+        assert!(convolve_partition_spreading(table, &[]).is_empty());
+    }
+
+    #[test]
+    fn rnorm_is_reciprocal_of_the_spreading_row_sum() {
+        // rnorm_b = 1 / Σ_bb sprdngf(bval_bb, bval_b), verbatim.
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        for b in 0..table.len() {
+            let row_sum: f64 = table
+                .iter()
+                .map(|s| spreading_function(s.bval, table[b].bval))
+                .sum();
+            let got = rnorm_coefficient(table, b).unwrap();
+            assert!((got - 1.0 / row_sum).abs() < 1e-12, "rnorm at {b}");
+            assert!(got.is_finite() && got > 0.0, "rnorm must be finite > 0");
+        }
+    }
+
+    #[test]
+    fn rnorm_out_of_range_is_none() {
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        assert_eq!(rnorm_coefficient(table, table.len()), None);
+        assert_eq!(rnorm_coefficient(table, usize::MAX), None);
+    }
+
+    #[test]
+    fn rnorm_normalizes_a_flat_spread_to_unity() {
+        // Feeding a flat unit energy through convolve then normalize
+        // must return exactly 1.0 in every partition: en_b =
+        // (Σ_bb 1·sprdngf) · (1 / Σ_bb sprdngf) = 1.
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let flat = vec![1.0; table.len()];
+        let ecb = convolve_partition_spreading(table, &flat);
+        let en = normalize_spread_energy(table, &ecb);
+        assert_eq!(en.len(), table.len());
+        for (b, &v) in en.iter().enumerate() {
+            assert!((v - 1.0).abs() < 1e-12, "en[{b}] = {v}, expected 1.0");
+        }
+    }
+
+    #[test]
+    fn normalize_spread_energy_applies_rnorm_pointwise() {
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let ecb: Vec<f64> = (0..table.len()).map(|n| 3.0 + (n as f64)).collect();
+        let en = normalize_spread_energy(table, &ecb);
+        for (b, &e) in ecb.iter().enumerate() {
+            let expected = e * rnorm_coefficient(table, b).unwrap();
+            assert!((en[b] - expected).abs() < 1e-12, "en at {b}");
+        }
+    }
+
+    #[test]
+    fn normalize_spread_energy_length_mismatch_returns_empty() {
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        assert!(normalize_spread_energy(table, &[1.0]).is_empty());
+    }
+
+    #[test]
+    fn renormalize_unpredictability_divides_cf_by_ecb() {
+        // cb_b = cf_b / ecb_b for the energy-weighted convolution.
+        // Build cf as the convolution of e·c and ecb as the convolution
+        // of e, then check the quotient against direct division.
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let e: Vec<f64> = (0..table.len()).map(|n| 1.0 + (n as f64) * 0.7).collect();
+        let c: Vec<f64> = (0..table.len())
+            .map(|n| 0.1 + ((n % 5) as f64) * 0.15)
+            .collect();
+        let ec: Vec<f64> = e.iter().zip(&c).map(|(&ei, &ci)| ei * ci).collect();
+        let ecb = convolve_partition_spreading(table, &e);
+        let cf = convolve_partition_spreading(table, &ec);
+        let cb = renormalize_unpredictability(&cf, &ecb);
+        assert_eq!(cb.len(), table.len());
+        for b in 0..table.len() {
+            assert!((cb[b] - cf[b] / ecb[b]).abs() < 1e-12, "cb at {b}");
+            // A weighted average of c-values lies within their range.
+            assert!(cb[b] >= -1e-9 && cb[b] <= 1.0 + 1e-9, "cb[{b}] = {}", cb[b]);
+        }
+    }
+
+    #[test]
+    fn renormalize_unpredictability_silent_partition_is_zero() {
+        // ecb_b == 0 (silent partition) yields cb_b = 0, not NaN.
+        let cf = [0.0, 5.0, 0.0];
+        let ecb = [0.0, 2.5, 0.0];
+        let cb = renormalize_unpredictability(&cf, &ecb);
+        assert_eq!(cb, vec![0.0, 2.0, 0.0]);
+        assert!(cb.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn renormalize_unpredictability_length_mismatch_returns_empty() {
+        assert!(renormalize_unpredictability(&[1.0, 2.0], &[1.0]).is_empty());
+    }
+
+    #[test]
+    fn step_f_pipeline_preserves_constant_unpredictability() {
+        // A physically meaningful end-to-end check: if every partition
+        // has the same unpredictability c0, then after the energy-weighted
+        // convolution and renormalization cb_b must equal c0 everywhere
+        // (a weighted mean of identical values is that value), for any
+        // energy profile.
+        let table = &TABLE_D_3A_CALC_PARTITION_32KHZ;
+        let c0 = 0.42_f64;
+        let e: Vec<f64> = (0..table.len()).map(|n| 0.5 + (n as f64) * 1.3).collect();
+        let ec: Vec<f64> = e.iter().map(|&ei| ei * c0).collect();
+        let ecb = convolve_partition_spreading(table, &e);
+        let cf = convolve_partition_spreading(table, &ec);
+        let cb = renormalize_unpredictability(&cf, &ecb);
+        for (b, &v) in cb.iter().enumerate() {
+            assert!((v - c0).abs() < 1e-12, "cb[{b}] = {v}, expected {c0}");
+        }
     }
 }
