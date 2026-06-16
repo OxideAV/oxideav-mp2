@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2.4 Model-2 threshold-calculation loop, steps (g)…(n)**
+  (`tables_model2`). The Model-2 chain now continues past the step-(f)
+  spreading convolution to the signal-to-mask ratio. New primitives,
+  each transcribed verbatim from ISO/IEC 11172-3:1993 Annex D PDF pages
+  131–132 (printed 125–126): `tonality_index` (step g, `tb_b = −0,299 −
+  0,43·ln(cb_b)` clamped to `[0, 1]`, with the silent-partition
+  `cb_b ≤ 0` → maximally-tonal safe response), `required_snr_db`
+  (step h, `SNR_b = max(minval_b, tb_b·TMN_b + (1−tb_b)·NMT_b)`) backed
+  by the new `NMT_DB` = 5,5 dB noise-masking-tone constant, `power_ratio`
+  (step i, `bc_b = 10^(−SNR_b/10)`), `actual_energy_threshold` (step j,
+  `nb_b = en_b·bc_b`), `line_energy_threshold` (the per-rate partition
+  loop running g…k and spreading each partition's threshold energy
+  uniformly over its FFT lines, `nb_ω = nb_b / line_count_b`),
+  `include_absolute_threshold` (step l, `thr_ω = max(nb_ω, absthr_ω)`,
+  taking a caller-supplied energy-domain `absthr_ω`), and
+  `signal_to_mask_ratio_db` (step n, `SMR_n = 10·log10(epart_n /
+  npart_n)` per Table D.5 coder partition, honouring the narrow-band
+  `width = 1` threshold-sum vs wide-band `width = 0` smallest-positive-
+  threshold-times-line-count rule). Step (m) pre-echo control is Layer
+  III only and omitted for Layers I/II per the spec. 24 new unit tests
+  (formula/clamp boundaries, minval-floor override, energy conservation
+  across the per-line spread, narrow/wide SMR rules, zero-threshold and
+  out-of-range safe responses, and an end-to-end g…n walk). The
+  end-to-end Model-2 chain remains 32 kHz-only pending the D.3b/D.3c
+  partition tables and the D.4 per-line absolute-threshold tables (both
+  staged as CSVs under `docs/audio/mp3/`).
 - **§D.1 Step 3 absolute-threshold offset + Step 5(a) threshold-in-quiet
   decimation** (`psy`, `tables_d2`). The Layer II Annex D Table D.1d /
   D.1e / D.1f threshold-in-quiet (`LTq`) curves (132 / 130 / 126 entries

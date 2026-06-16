@@ -73,9 +73,17 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
   absolute-threshold offset, −12 dB ≥ 96 kbit/s/ch) and **Step 5(a)**
   threshold-in-quiet decimation (`X(k) ≥ LTq(k)`), reading the Layer II
   Annex D Table D.1d / D.1e / D.1f `LTq` curves now text-transcribed into
-  `tables_d2` (`LtqEntry`). What remains is the Model 2 §D.2 per-rate
-  threshold loop and wiring the chain into the encoder's automatic SMR
-  selection.
+  `tables_d2` (`LtqEntry`). The Model 2 §D.2 chain in `tables_model2` now
+  reaches the **signal-to-mask ratio** end to end: past the §D.2.4
+  step-(f) spreading convolution it runs the step-(g)…(n) threshold loop
+  — tonality index (g), required SNR (h), power ratio (i), per-partition
+  threshold (j), per-FFT-line spread (k), the absolute-threshold floor
+  (l), and the per-coder-partition `SMR_n` (n, with the Table D.5
+  narrow/wide-band rule). What remains is the per-rate generalisation
+  (the D.3b/D.3c calc-partition and D.4 per-line absolute-threshold
+  tables — both staged as CSVs under `docs/audio/mp3/` — so the
+  end-to-end Model-2 chain is 32 kHz-only for now) and wiring the chain
+  into the encoder's automatic SMR selection.
 - Bit-exact PCM-against-reference validation (PSNR / SNR) pending an
   audit pass.
 
