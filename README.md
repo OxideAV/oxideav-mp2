@@ -68,9 +68,14 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
 ## Not yet supported
 
 - A full Annex D §D.1 / §D.2 psychoacoustic model to drive the encoder's
-  SMR table automatically (Model 1 / Model 2 building blocks are staged
-  in the `psy` / `tables_model2` modules but the per-rate threshold loop
-  is gated on table material not yet fully transcribed).
+  SMR table automatically. The Model 1 §D.1 chain is now staged in `psy`
+  end-to-end through Step 9 — including **Step 3** (the overall-bit-rate
+  absolute-threshold offset, −12 dB ≥ 96 kbit/s/ch) and **Step 5(a)**
+  threshold-in-quiet decimation (`X(k) ≥ LTq(k)`), reading the Layer II
+  Annex D Table D.1d / D.1e / D.1f `LTq` curves now text-transcribed into
+  `tables_d2` (`LtqEntry`). What remains is the Model 2 §D.2 per-rate
+  threshold loop and wiring the chain into the encoder's automatic SMR
+  selection.
 - Bit-exact PCM-against-reference validation (PSNR / SNR) pending an
   audit pass.
 

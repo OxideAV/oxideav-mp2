@@ -77,6 +77,34 @@ pub struct CriticalBandBoundary {
     pub top_bark: f64,
 }
 
+/// One row of an Annex D Table D.1d / D.1e / D.1f *Layer II*
+/// threshold-in-quiet (absolute threshold) table.
+///
+/// The spec tabulates, per index `i`, the frequency, critical-band
+/// rate and the absolute threshold `LTq` in dB. For the §D.1 Step 5(a)
+/// "threshold-in-quiet decimation" the only two columns needed are the
+/// FFT line each `i` covers and the threshold value, so this carrier
+/// keeps:
+///
+/// * [`Self::top_line_index`] — the top 1024-point-analysis-FFT line of
+///   the range covered by index `i`. The lower bound is implicit
+///   (previous entry's `top_line_index + 1`; the first entry's range
+///   starts at line 1). These ranges are the deterministic
+///   `higher = round(frequency_Hz / (Fs/1024))` mapping (they coincide
+///   with the Annex D Table D.4 line ranges at the same rate).
+/// * [`Self::threshold_db`] — the `Absolute threshold [dB]` column of
+///   the Layer II D.1 table (D.1d / D.1e / D.1f), *not* the Model-2
+///   D.4 column (which diverges by the documented last-digit / ceiling
+///   errata at 32 kHz and 44.1 kHz). Step 5(a) cites D.1d/e/f by name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LtqEntry {
+    /// Top FFT-line index of the range this threshold entry covers.
+    pub top_line_index: u32,
+    /// Threshold in quiet `LTq` (absolute threshold), in dB, before the
+    /// §D.1 Step 3 overall-bit-rate offset is applied.
+    pub threshold_db: f64,
+}
+
 /// Annex D Table **D.2d** — Critical band boundaries, Layer II,
 /// Fs = 32 kHz. 25 rows, `no = 0 .. 24`. Source: PDF printed page
 /// 122 (PDF p.128 in the staged 11172-3 edition); the markdown
@@ -528,7 +556,1614 @@ impl SamplingRate {
             SamplingRate::Fs48kHz => &TABLE_D_2F_LAYER_II_48KHZ,
         }
     }
+
+    /// Returns the Layer II Annex D Table D.1d / D.1e / D.1f
+    /// threshold-in-quiet (`LTq`) slice for this sampling rate, used by
+    /// the §D.1 Step 5(a) threshold-in-quiet decimation in `psy`.
+    #[must_use]
+    pub fn ltq_table_layer2(self) -> &'static [LtqEntry] {
+        match self {
+            SamplingRate::Fs32kHz => &TABLE_D_1D_LTQ_LAYER_II_32,
+            SamplingRate::Fs44k1Hz => &TABLE_D_1E_LTQ_LAYER_II_44_1HZ,
+            SamplingRate::Fs48kHz => &TABLE_D_1F_LTQ_LAYER_II_48,
+        }
+    }
 }
+
+/// ISO/IEC 11172-3:1993 Annex D Table D.1d — Layer II
+/// threshold in quiet (absolute threshold) LTq, Fs = 32000 Hz.
+/// 132 entries. Each entry carries the top FFT line of its
+/// 1024-point analysis-FFT line range (`index_higher`; the lower
+/// bound is the previous entry's `top_line_index + 1`, first = 1)
+/// and the threshold-in-quiet value in dB. Thresholds read from
+/// the Table D.1d `Absolute threshold [dB]` column; the
+/// FFT-line ranges from the deterministic
+/// `higher = round(frequency_Hz / (Fs/1024))` mapping (matching the
+/// Annex D Table D.4 line ranges at this rate).
+// One spec threshold value (6.28 dB) happens to coincide with the
+// decimal expansion of TAU; it is a verbatim Annex D table cell, not a
+// mathematical constant, so the approx_constant lint is suppressed.
+#[allow(clippy::approx_constant)]
+pub static TABLE_D_1D_LTQ_LAYER_II_32: [LtqEntry; 132] = [
+    LtqEntry {
+        top_line_index: 1,
+        threshold_db: 58.23,
+    },
+    LtqEntry {
+        top_line_index: 2,
+        threshold_db: 33.44,
+    },
+    LtqEntry {
+        top_line_index: 3,
+        threshold_db: 24.17,
+    },
+    LtqEntry {
+        top_line_index: 4,
+        threshold_db: 19.2,
+    },
+    LtqEntry {
+        top_line_index: 5,
+        threshold_db: 16.05,
+    },
+    LtqEntry {
+        top_line_index: 6,
+        threshold_db: 13.87,
+    },
+    LtqEntry {
+        top_line_index: 7,
+        threshold_db: 12.26,
+    },
+    LtqEntry {
+        top_line_index: 8,
+        threshold_db: 11.01,
+    },
+    LtqEntry {
+        top_line_index: 9,
+        threshold_db: 10.01,
+    },
+    LtqEntry {
+        top_line_index: 10,
+        threshold_db: 9.2,
+    },
+    LtqEntry {
+        top_line_index: 11,
+        threshold_db: 8.52,
+    },
+    LtqEntry {
+        top_line_index: 12,
+        threshold_db: 7.94,
+    },
+    LtqEntry {
+        top_line_index: 13,
+        threshold_db: 7.44,
+    },
+    LtqEntry {
+        top_line_index: 14,
+        threshold_db: 7.0,
+    },
+    LtqEntry {
+        top_line_index: 15,
+        threshold_db: 6.62,
+    },
+    LtqEntry {
+        top_line_index: 16,
+        threshold_db: 6.28,
+    },
+    LtqEntry {
+        top_line_index: 17,
+        threshold_db: 5.97,
+    },
+    LtqEntry {
+        top_line_index: 18,
+        threshold_db: 5.7,
+    },
+    LtqEntry {
+        top_line_index: 19,
+        threshold_db: 5.44,
+    },
+    LtqEntry {
+        top_line_index: 20,
+        threshold_db: 5.21,
+    },
+    LtqEntry {
+        top_line_index: 21,
+        threshold_db: 5.0,
+    },
+    LtqEntry {
+        top_line_index: 22,
+        threshold_db: 4.8,
+    },
+    LtqEntry {
+        top_line_index: 23,
+        threshold_db: 4.62,
+    },
+    LtqEntry {
+        top_line_index: 24,
+        threshold_db: 4.45,
+    },
+    LtqEntry {
+        top_line_index: 25,
+        threshold_db: 4.29,
+    },
+    LtqEntry {
+        top_line_index: 26,
+        threshold_db: 4.14,
+    },
+    LtqEntry {
+        top_line_index: 27,
+        threshold_db: 4.0,
+    },
+    LtqEntry {
+        top_line_index: 28,
+        threshold_db: 3.86,
+    },
+    LtqEntry {
+        top_line_index: 29,
+        threshold_db: 3.73,
+    },
+    LtqEntry {
+        top_line_index: 30,
+        threshold_db: 3.61,
+    },
+    LtqEntry {
+        top_line_index: 31,
+        threshold_db: 3.49,
+    },
+    LtqEntry {
+        top_line_index: 32,
+        threshold_db: 3.37,
+    },
+    LtqEntry {
+        top_line_index: 33,
+        threshold_db: 3.26,
+    },
+    LtqEntry {
+        top_line_index: 34,
+        threshold_db: 3.15,
+    },
+    LtqEntry {
+        top_line_index: 35,
+        threshold_db: 3.04,
+    },
+    LtqEntry {
+        top_line_index: 36,
+        threshold_db: 2.93,
+    },
+    LtqEntry {
+        top_line_index: 37,
+        threshold_db: 2.83,
+    },
+    LtqEntry {
+        top_line_index: 38,
+        threshold_db: 2.73,
+    },
+    LtqEntry {
+        top_line_index: 39,
+        threshold_db: 2.63,
+    },
+    LtqEntry {
+        top_line_index: 40,
+        threshold_db: 2.53,
+    },
+    LtqEntry {
+        top_line_index: 41,
+        threshold_db: 2.42,
+    },
+    LtqEntry {
+        top_line_index: 42,
+        threshold_db: 2.32,
+    },
+    LtqEntry {
+        top_line_index: 43,
+        threshold_db: 2.22,
+    },
+    LtqEntry {
+        top_line_index: 44,
+        threshold_db: 2.12,
+    },
+    LtqEntry {
+        top_line_index: 45,
+        threshold_db: 2.02,
+    },
+    LtqEntry {
+        top_line_index: 46,
+        threshold_db: 1.92,
+    },
+    LtqEntry {
+        top_line_index: 47,
+        threshold_db: 1.81,
+    },
+    LtqEntry {
+        top_line_index: 48,
+        threshold_db: 1.71,
+    },
+    LtqEntry {
+        top_line_index: 50,
+        threshold_db: 1.49,
+    },
+    LtqEntry {
+        top_line_index: 52,
+        threshold_db: 1.27,
+    },
+    LtqEntry {
+        top_line_index: 54,
+        threshold_db: 1.04,
+    },
+    LtqEntry {
+        top_line_index: 56,
+        threshold_db: 0.8,
+    },
+    LtqEntry {
+        top_line_index: 58,
+        threshold_db: 0.55,
+    },
+    LtqEntry {
+        top_line_index: 60,
+        threshold_db: 0.29,
+    },
+    LtqEntry {
+        top_line_index: 62,
+        threshold_db: 0.02,
+    },
+    LtqEntry {
+        top_line_index: 64,
+        threshold_db: -0.25,
+    },
+    LtqEntry {
+        top_line_index: 66,
+        threshold_db: -0.54,
+    },
+    LtqEntry {
+        top_line_index: 68,
+        threshold_db: -0.83,
+    },
+    LtqEntry {
+        top_line_index: 70,
+        threshold_db: -1.12,
+    },
+    LtqEntry {
+        top_line_index: 72,
+        threshold_db: -1.43,
+    },
+    LtqEntry {
+        top_line_index: 74,
+        threshold_db: -1.73,
+    },
+    LtqEntry {
+        top_line_index: 76,
+        threshold_db: -2.04,
+    },
+    LtqEntry {
+        top_line_index: 78,
+        threshold_db: -2.34,
+    },
+    LtqEntry {
+        top_line_index: 80,
+        threshold_db: -2.64,
+    },
+    LtqEntry {
+        top_line_index: 82,
+        threshold_db: -2.93,
+    },
+    LtqEntry {
+        top_line_index: 84,
+        threshold_db: -3.22,
+    },
+    LtqEntry {
+        top_line_index: 86,
+        threshold_db: -3.49,
+    },
+    LtqEntry {
+        top_line_index: 88,
+        threshold_db: -3.74,
+    },
+    LtqEntry {
+        top_line_index: 90,
+        threshold_db: -3.98,
+    },
+    LtqEntry {
+        top_line_index: 92,
+        threshold_db: -4.2,
+    },
+    LtqEntry {
+        top_line_index: 94,
+        threshold_db: -4.4,
+    },
+    LtqEntry {
+        top_line_index: 96,
+        threshold_db: -4.57,
+    },
+    LtqEntry {
+        top_line_index: 100,
+        threshold_db: -4.82,
+    },
+    LtqEntry {
+        top_line_index: 104,
+        threshold_db: -4.96,
+    },
+    LtqEntry {
+        top_line_index: 108,
+        threshold_db: -4.97,
+    },
+    LtqEntry {
+        top_line_index: 112,
+        threshold_db: -4.86,
+    },
+    LtqEntry {
+        top_line_index: 116,
+        threshold_db: -4.63,
+    },
+    LtqEntry {
+        top_line_index: 120,
+        threshold_db: -4.29,
+    },
+    LtqEntry {
+        top_line_index: 124,
+        threshold_db: -3.87,
+    },
+    LtqEntry {
+        top_line_index: 128,
+        threshold_db: -3.39,
+    },
+    LtqEntry {
+        top_line_index: 132,
+        threshold_db: -2.86,
+    },
+    LtqEntry {
+        top_line_index: 136,
+        threshold_db: -2.31,
+    },
+    LtqEntry {
+        top_line_index: 140,
+        threshold_db: -1.77,
+    },
+    LtqEntry {
+        top_line_index: 144,
+        threshold_db: -1.24,
+    },
+    LtqEntry {
+        top_line_index: 148,
+        threshold_db: -0.74,
+    },
+    LtqEntry {
+        top_line_index: 152,
+        threshold_db: -0.29,
+    },
+    LtqEntry {
+        top_line_index: 156,
+        threshold_db: 0.12,
+    },
+    LtqEntry {
+        top_line_index: 160,
+        threshold_db: 0.48,
+    },
+    LtqEntry {
+        top_line_index: 164,
+        threshold_db: 0.79,
+    },
+    LtqEntry {
+        top_line_index: 168,
+        threshold_db: 1.06,
+    },
+    LtqEntry {
+        top_line_index: 172,
+        threshold_db: 1.29,
+    },
+    LtqEntry {
+        top_line_index: 176,
+        threshold_db: 1.49,
+    },
+    LtqEntry {
+        top_line_index: 180,
+        threshold_db: 1.66,
+    },
+    LtqEntry {
+        top_line_index: 184,
+        threshold_db: 1.81,
+    },
+    LtqEntry {
+        top_line_index: 188,
+        threshold_db: 1.95,
+    },
+    LtqEntry {
+        top_line_index: 192,
+        threshold_db: 2.08,
+    },
+    LtqEntry {
+        top_line_index: 200,
+        threshold_db: 2.33,
+    },
+    LtqEntry {
+        top_line_index: 208,
+        threshold_db: 2.59,
+    },
+    LtqEntry {
+        top_line_index: 216,
+        threshold_db: 2.86,
+    },
+    LtqEntry {
+        top_line_index: 224,
+        threshold_db: 3.17,
+    },
+    LtqEntry {
+        top_line_index: 232,
+        threshold_db: 3.51,
+    },
+    LtqEntry {
+        top_line_index: 240,
+        threshold_db: 3.89,
+    },
+    LtqEntry {
+        top_line_index: 248,
+        threshold_db: 4.31,
+    },
+    LtqEntry {
+        top_line_index: 256,
+        threshold_db: 4.79,
+    },
+    LtqEntry {
+        top_line_index: 264,
+        threshold_db: 5.31,
+    },
+    LtqEntry {
+        top_line_index: 272,
+        threshold_db: 5.88,
+    },
+    LtqEntry {
+        top_line_index: 280,
+        threshold_db: 6.5,
+    },
+    LtqEntry {
+        top_line_index: 288,
+        threshold_db: 7.19,
+    },
+    LtqEntry {
+        top_line_index: 296,
+        threshold_db: 7.93,
+    },
+    LtqEntry {
+        top_line_index: 304,
+        threshold_db: 8.75,
+    },
+    LtqEntry {
+        top_line_index: 312,
+        threshold_db: 9.63,
+    },
+    LtqEntry {
+        top_line_index: 320,
+        threshold_db: 10.58,
+    },
+    LtqEntry {
+        top_line_index: 328,
+        threshold_db: 11.6,
+    },
+    LtqEntry {
+        top_line_index: 336,
+        threshold_db: 12.71,
+    },
+    LtqEntry {
+        top_line_index: 344,
+        threshold_db: 13.9,
+    },
+    LtqEntry {
+        top_line_index: 352,
+        threshold_db: 15.18,
+    },
+    LtqEntry {
+        top_line_index: 360,
+        threshold_db: 16.54,
+    },
+    LtqEntry {
+        top_line_index: 368,
+        threshold_db: 18.01,
+    },
+    LtqEntry {
+        top_line_index: 376,
+        threshold_db: 19.57,
+    },
+    LtqEntry {
+        top_line_index: 384,
+        threshold_db: 21.23,
+    },
+    LtqEntry {
+        top_line_index: 392,
+        threshold_db: 23.01,
+    },
+    LtqEntry {
+        top_line_index: 400,
+        threshold_db: 24.9,
+    },
+    LtqEntry {
+        top_line_index: 408,
+        threshold_db: 26.9,
+    },
+    LtqEntry {
+        top_line_index: 416,
+        threshold_db: 29.03,
+    },
+    LtqEntry {
+        top_line_index: 424,
+        threshold_db: 31.28,
+    },
+    LtqEntry {
+        top_line_index: 432,
+        threshold_db: 33.67,
+    },
+    LtqEntry {
+        top_line_index: 440,
+        threshold_db: 36.19,
+    },
+    LtqEntry {
+        top_line_index: 448,
+        threshold_db: 38.86,
+    },
+    LtqEntry {
+        top_line_index: 456,
+        threshold_db: 41.67,
+    },
+    LtqEntry {
+        top_line_index: 464,
+        threshold_db: 44.63,
+    },
+    LtqEntry {
+        top_line_index: 472,
+        threshold_db: 47.76,
+    },
+    LtqEntry {
+        top_line_index: 480,
+        threshold_db: 51.04,
+    },
+];
+
+/// ISO/IEC 11172-3:1993 Annex D Table D.1e — Layer II
+/// threshold in quiet (absolute threshold) LTq, Fs = 44100 Hz.
+/// 130 entries. Each entry carries the top FFT line of its
+/// 1024-point analysis-FFT line range (`index_higher`; the lower
+/// bound is the previous entry's `top_line_index + 1`, first = 1)
+/// and the threshold-in-quiet value in dB. Thresholds read from
+/// the Table D.1e `Absolute threshold [dB]` column; the
+/// FFT-line ranges from the deterministic
+/// `higher = round(frequency_Hz / (Fs/1024))` mapping (matching the
+/// Annex D Table D.4 line ranges at this rate).
+pub static TABLE_D_1E_LTQ_LAYER_II_44_1HZ: [LtqEntry; 130] = [
+    LtqEntry {
+        top_line_index: 1,
+        threshold_db: 45.05,
+    },
+    LtqEntry {
+        top_line_index: 2,
+        threshold_db: 25.87,
+    },
+    LtqEntry {
+        top_line_index: 3,
+        threshold_db: 18.7,
+    },
+    LtqEntry {
+        top_line_index: 4,
+        threshold_db: 14.85,
+    },
+    LtqEntry {
+        top_line_index: 5,
+        threshold_db: 12.41,
+    },
+    LtqEntry {
+        top_line_index: 6,
+        threshold_db: 10.72,
+    },
+    LtqEntry {
+        top_line_index: 7,
+        threshold_db: 9.47,
+    },
+    LtqEntry {
+        top_line_index: 8,
+        threshold_db: 8.5,
+    },
+    LtqEntry {
+        top_line_index: 9,
+        threshold_db: 7.73,
+    },
+    LtqEntry {
+        top_line_index: 10,
+        threshold_db: 7.1,
+    },
+    LtqEntry {
+        top_line_index: 11,
+        threshold_db: 6.56,
+    },
+    LtqEntry {
+        top_line_index: 12,
+        threshold_db: 6.11,
+    },
+    LtqEntry {
+        top_line_index: 13,
+        threshold_db: 5.72,
+    },
+    LtqEntry {
+        top_line_index: 14,
+        threshold_db: 5.37,
+    },
+    LtqEntry {
+        top_line_index: 15,
+        threshold_db: 5.07,
+    },
+    LtqEntry {
+        top_line_index: 16,
+        threshold_db: 4.79,
+    },
+    LtqEntry {
+        top_line_index: 17,
+        threshold_db: 4.55,
+    },
+    LtqEntry {
+        top_line_index: 18,
+        threshold_db: 4.32,
+    },
+    LtqEntry {
+        top_line_index: 19,
+        threshold_db: 4.11,
+    },
+    LtqEntry {
+        top_line_index: 20,
+        threshold_db: 3.92,
+    },
+    LtqEntry {
+        top_line_index: 21,
+        threshold_db: 3.74,
+    },
+    LtqEntry {
+        top_line_index: 22,
+        threshold_db: 3.57,
+    },
+    LtqEntry {
+        top_line_index: 23,
+        threshold_db: 3.4,
+    },
+    LtqEntry {
+        top_line_index: 24,
+        threshold_db: 3.25,
+    },
+    LtqEntry {
+        top_line_index: 25,
+        threshold_db: 3.1,
+    },
+    LtqEntry {
+        top_line_index: 26,
+        threshold_db: 2.95,
+    },
+    LtqEntry {
+        top_line_index: 27,
+        threshold_db: 2.81,
+    },
+    LtqEntry {
+        top_line_index: 28,
+        threshold_db: 2.67,
+    },
+    LtqEntry {
+        top_line_index: 29,
+        threshold_db: 2.53,
+    },
+    LtqEntry {
+        top_line_index: 30,
+        threshold_db: 2.39,
+    },
+    LtqEntry {
+        top_line_index: 31,
+        threshold_db: 2.25,
+    },
+    LtqEntry {
+        top_line_index: 32,
+        threshold_db: 2.11,
+    },
+    LtqEntry {
+        top_line_index: 33,
+        threshold_db: 1.97,
+    },
+    LtqEntry {
+        top_line_index: 34,
+        threshold_db: 1.83,
+    },
+    LtqEntry {
+        top_line_index: 35,
+        threshold_db: 1.68,
+    },
+    LtqEntry {
+        top_line_index: 36,
+        threshold_db: 1.53,
+    },
+    LtqEntry {
+        top_line_index: 37,
+        threshold_db: 1.38,
+    },
+    LtqEntry {
+        top_line_index: 38,
+        threshold_db: 1.23,
+    },
+    LtqEntry {
+        top_line_index: 39,
+        threshold_db: 1.07,
+    },
+    LtqEntry {
+        top_line_index: 40,
+        threshold_db: 0.9,
+    },
+    LtqEntry {
+        top_line_index: 41,
+        threshold_db: 0.74,
+    },
+    LtqEntry {
+        top_line_index: 42,
+        threshold_db: 0.56,
+    },
+    LtqEntry {
+        top_line_index: 43,
+        threshold_db: 0.39,
+    },
+    LtqEntry {
+        top_line_index: 44,
+        threshold_db: 0.21,
+    },
+    LtqEntry {
+        top_line_index: 45,
+        threshold_db: 0.02,
+    },
+    LtqEntry {
+        top_line_index: 46,
+        threshold_db: -0.17,
+    },
+    LtqEntry {
+        top_line_index: 47,
+        threshold_db: -0.36,
+    },
+    LtqEntry {
+        top_line_index: 48,
+        threshold_db: -0.56,
+    },
+    LtqEntry {
+        top_line_index: 50,
+        threshold_db: -0.96,
+    },
+    LtqEntry {
+        top_line_index: 52,
+        threshold_db: -1.38,
+    },
+    LtqEntry {
+        top_line_index: 54,
+        threshold_db: -1.79,
+    },
+    LtqEntry {
+        top_line_index: 56,
+        threshold_db: -2.21,
+    },
+    LtqEntry {
+        top_line_index: 58,
+        threshold_db: -2.63,
+    },
+    LtqEntry {
+        top_line_index: 60,
+        threshold_db: -3.03,
+    },
+    LtqEntry {
+        top_line_index: 62,
+        threshold_db: -3.41,
+    },
+    LtqEntry {
+        top_line_index: 64,
+        threshold_db: -3.77,
+    },
+    LtqEntry {
+        top_line_index: 66,
+        threshold_db: -4.09,
+    },
+    LtqEntry {
+        top_line_index: 68,
+        threshold_db: -4.37,
+    },
+    LtqEntry {
+        top_line_index: 70,
+        threshold_db: -4.6,
+    },
+    LtqEntry {
+        top_line_index: 72,
+        threshold_db: -4.78,
+    },
+    LtqEntry {
+        top_line_index: 74,
+        threshold_db: -4.91,
+    },
+    LtqEntry {
+        top_line_index: 76,
+        threshold_db: -4.97,
+    },
+    LtqEntry {
+        top_line_index: 78,
+        threshold_db: -4.98,
+    },
+    LtqEntry {
+        top_line_index: 80,
+        threshold_db: -4.92,
+    },
+    LtqEntry {
+        top_line_index: 82,
+        threshold_db: -4.81,
+    },
+    LtqEntry {
+        top_line_index: 84,
+        threshold_db: -4.65,
+    },
+    LtqEntry {
+        top_line_index: 86,
+        threshold_db: -4.43,
+    },
+    LtqEntry {
+        top_line_index: 88,
+        threshold_db: -4.17,
+    },
+    LtqEntry {
+        top_line_index: 90,
+        threshold_db: -3.87,
+    },
+    LtqEntry {
+        top_line_index: 92,
+        threshold_db: -3.54,
+    },
+    LtqEntry {
+        top_line_index: 94,
+        threshold_db: -3.19,
+    },
+    LtqEntry {
+        top_line_index: 96,
+        threshold_db: -2.82,
+    },
+    LtqEntry {
+        top_line_index: 100,
+        threshold_db: -2.06,
+    },
+    LtqEntry {
+        top_line_index: 104,
+        threshold_db: -1.32,
+    },
+    LtqEntry {
+        top_line_index: 108,
+        threshold_db: -0.64,
+    },
+    LtqEntry {
+        top_line_index: 112,
+        threshold_db: -0.04,
+    },
+    LtqEntry {
+        top_line_index: 116,
+        threshold_db: 0.47,
+    },
+    LtqEntry {
+        top_line_index: 120,
+        threshold_db: 0.89,
+    },
+    LtqEntry {
+        top_line_index: 124,
+        threshold_db: 1.23,
+    },
+    LtqEntry {
+        top_line_index: 128,
+        threshold_db: 1.51,
+    },
+    LtqEntry {
+        top_line_index: 132,
+        threshold_db: 1.74,
+    },
+    LtqEntry {
+        top_line_index: 136,
+        threshold_db: 1.93,
+    },
+    LtqEntry {
+        top_line_index: 140,
+        threshold_db: 2.11,
+    },
+    LtqEntry {
+        top_line_index: 144,
+        threshold_db: 2.28,
+    },
+    LtqEntry {
+        top_line_index: 148,
+        threshold_db: 2.46,
+    },
+    LtqEntry {
+        top_line_index: 152,
+        threshold_db: 2.63,
+    },
+    LtqEntry {
+        top_line_index: 156,
+        threshold_db: 2.82,
+    },
+    LtqEntry {
+        top_line_index: 160,
+        threshold_db: 3.03,
+    },
+    LtqEntry {
+        top_line_index: 164,
+        threshold_db: 3.25,
+    },
+    LtqEntry {
+        top_line_index: 168,
+        threshold_db: 3.49,
+    },
+    LtqEntry {
+        top_line_index: 172,
+        threshold_db: 3.74,
+    },
+    LtqEntry {
+        top_line_index: 176,
+        threshold_db: 4.02,
+    },
+    LtqEntry {
+        top_line_index: 180,
+        threshold_db: 4.32,
+    },
+    LtqEntry {
+        top_line_index: 184,
+        threshold_db: 4.64,
+    },
+    LtqEntry {
+        top_line_index: 188,
+        threshold_db: 4.98,
+    },
+    LtqEntry {
+        top_line_index: 192,
+        threshold_db: 5.35,
+    },
+    LtqEntry {
+        top_line_index: 200,
+        threshold_db: 6.15,
+    },
+    LtqEntry {
+        top_line_index: 208,
+        threshold_db: 7.07,
+    },
+    LtqEntry {
+        top_line_index: 216,
+        threshold_db: 8.1,
+    },
+    LtqEntry {
+        top_line_index: 224,
+        threshold_db: 9.25,
+    },
+    LtqEntry {
+        top_line_index: 232,
+        threshold_db: 10.54,
+    },
+    LtqEntry {
+        top_line_index: 240,
+        threshold_db: 11.97,
+    },
+    LtqEntry {
+        top_line_index: 248,
+        threshold_db: 13.56,
+    },
+    LtqEntry {
+        top_line_index: 256,
+        threshold_db: 15.31,
+    },
+    LtqEntry {
+        top_line_index: 264,
+        threshold_db: 17.23,
+    },
+    LtqEntry {
+        top_line_index: 272,
+        threshold_db: 19.34,
+    },
+    LtqEntry {
+        top_line_index: 280,
+        threshold_db: 21.64,
+    },
+    LtqEntry {
+        top_line_index: 288,
+        threshold_db: 24.15,
+    },
+    LtqEntry {
+        top_line_index: 296,
+        threshold_db: 26.88,
+    },
+    LtqEntry {
+        top_line_index: 304,
+        threshold_db: 29.84,
+    },
+    LtqEntry {
+        top_line_index: 312,
+        threshold_db: 33.05,
+    },
+    LtqEntry {
+        top_line_index: 320,
+        threshold_db: 36.52,
+    },
+    LtqEntry {
+        top_line_index: 328,
+        threshold_db: 40.25,
+    },
+    LtqEntry {
+        top_line_index: 336,
+        threshold_db: 44.27,
+    },
+    LtqEntry {
+        top_line_index: 344,
+        threshold_db: 48.59,
+    },
+    LtqEntry {
+        top_line_index: 352,
+        threshold_db: 53.22,
+    },
+    LtqEntry {
+        top_line_index: 360,
+        threshold_db: 58.18,
+    },
+    LtqEntry {
+        top_line_index: 368,
+        threshold_db: 63.49,
+    },
+    LtqEntry {
+        top_line_index: 376,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 384,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 392,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 400,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 408,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 416,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 424,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 432,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 440,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 448,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 456,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 464,
+        threshold_db: 68.0,
+    },
+];
+
+/// ISO/IEC 11172-3:1993 Annex D Table D.1f — Layer II
+/// threshold in quiet (absolute threshold) LTq, Fs = 48000 Hz.
+/// 126 entries. Each entry carries the top FFT line of its
+/// 1024-point analysis-FFT line range (`index_higher`; the lower
+/// bound is the previous entry's `top_line_index + 1`, first = 1)
+/// and the threshold-in-quiet value in dB. Thresholds read from
+/// the Table D.1f `Absolute threshold [dB]` column; the
+/// FFT-line ranges from the deterministic
+/// `higher = round(frequency_Hz / (Fs/1024))` mapping (matching the
+/// Annex D Table D.4 line ranges at this rate).
+pub static TABLE_D_1F_LTQ_LAYER_II_48: [LtqEntry; 126] = [
+    LtqEntry {
+        top_line_index: 1,
+        threshold_db: 42.1,
+    },
+    LtqEntry {
+        top_line_index: 2,
+        threshold_db: 24.17,
+    },
+    LtqEntry {
+        top_line_index: 3,
+        threshold_db: 17.47,
+    },
+    LtqEntry {
+        top_line_index: 4,
+        threshold_db: 13.87,
+    },
+    LtqEntry {
+        top_line_index: 5,
+        threshold_db: 11.6,
+    },
+    LtqEntry {
+        top_line_index: 6,
+        threshold_db: 10.01,
+    },
+    LtqEntry {
+        top_line_index: 7,
+        threshold_db: 8.84,
+    },
+    LtqEntry {
+        top_line_index: 8,
+        threshold_db: 7.94,
+    },
+    LtqEntry {
+        top_line_index: 9,
+        threshold_db: 7.22,
+    },
+    LtqEntry {
+        top_line_index: 10,
+        threshold_db: 6.62,
+    },
+    LtqEntry {
+        top_line_index: 11,
+        threshold_db: 6.12,
+    },
+    LtqEntry {
+        top_line_index: 12,
+        threshold_db: 5.7,
+    },
+    LtqEntry {
+        top_line_index: 13,
+        threshold_db: 5.33,
+    },
+    LtqEntry {
+        top_line_index: 14,
+        threshold_db: 5.0,
+    },
+    LtqEntry {
+        top_line_index: 15,
+        threshold_db: 4.71,
+    },
+    LtqEntry {
+        top_line_index: 16,
+        threshold_db: 4.45,
+    },
+    LtqEntry {
+        top_line_index: 17,
+        threshold_db: 4.21,
+    },
+    LtqEntry {
+        top_line_index: 18,
+        threshold_db: 4.0,
+    },
+    LtqEntry {
+        top_line_index: 19,
+        threshold_db: 3.79,
+    },
+    LtqEntry {
+        top_line_index: 20,
+        threshold_db: 3.61,
+    },
+    LtqEntry {
+        top_line_index: 21,
+        threshold_db: 3.43,
+    },
+    LtqEntry {
+        top_line_index: 22,
+        threshold_db: 3.26,
+    },
+    LtqEntry {
+        top_line_index: 23,
+        threshold_db: 3.09,
+    },
+    LtqEntry {
+        top_line_index: 24,
+        threshold_db: 2.93,
+    },
+    LtqEntry {
+        top_line_index: 25,
+        threshold_db: 2.78,
+    },
+    LtqEntry {
+        top_line_index: 26,
+        threshold_db: 2.63,
+    },
+    LtqEntry {
+        top_line_index: 27,
+        threshold_db: 2.47,
+    },
+    LtqEntry {
+        top_line_index: 28,
+        threshold_db: 2.32,
+    },
+    LtqEntry {
+        top_line_index: 29,
+        threshold_db: 2.17,
+    },
+    LtqEntry {
+        top_line_index: 30,
+        threshold_db: 2.02,
+    },
+    LtqEntry {
+        top_line_index: 31,
+        threshold_db: 1.86,
+    },
+    LtqEntry {
+        top_line_index: 32,
+        threshold_db: 1.71,
+    },
+    LtqEntry {
+        top_line_index: 33,
+        threshold_db: 1.55,
+    },
+    LtqEntry {
+        top_line_index: 34,
+        threshold_db: 1.38,
+    },
+    LtqEntry {
+        top_line_index: 35,
+        threshold_db: 1.21,
+    },
+    LtqEntry {
+        top_line_index: 36,
+        threshold_db: 1.04,
+    },
+    LtqEntry {
+        top_line_index: 37,
+        threshold_db: 0.86,
+    },
+    LtqEntry {
+        top_line_index: 38,
+        threshold_db: 0.67,
+    },
+    LtqEntry {
+        top_line_index: 39,
+        threshold_db: 0.49,
+    },
+    LtqEntry {
+        top_line_index: 40,
+        threshold_db: 0.29,
+    },
+    LtqEntry {
+        top_line_index: 41,
+        threshold_db: 0.09,
+    },
+    LtqEntry {
+        top_line_index: 42,
+        threshold_db: -0.11,
+    },
+    LtqEntry {
+        top_line_index: 43,
+        threshold_db: -0.32,
+    },
+    LtqEntry {
+        top_line_index: 44,
+        threshold_db: -0.54,
+    },
+    LtqEntry {
+        top_line_index: 45,
+        threshold_db: -0.75,
+    },
+    LtqEntry {
+        top_line_index: 46,
+        threshold_db: -0.97,
+    },
+    LtqEntry {
+        top_line_index: 47,
+        threshold_db: -1.2,
+    },
+    LtqEntry {
+        top_line_index: 48,
+        threshold_db: -1.43,
+    },
+    LtqEntry {
+        top_line_index: 50,
+        threshold_db: -1.88,
+    },
+    LtqEntry {
+        top_line_index: 52,
+        threshold_db: -2.34,
+    },
+    LtqEntry {
+        top_line_index: 54,
+        threshold_db: -2.79,
+    },
+    LtqEntry {
+        top_line_index: 56,
+        threshold_db: -3.22,
+    },
+    LtqEntry {
+        top_line_index: 58,
+        threshold_db: -3.62,
+    },
+    LtqEntry {
+        top_line_index: 60,
+        threshold_db: -3.98,
+    },
+    LtqEntry {
+        top_line_index: 62,
+        threshold_db: -4.3,
+    },
+    LtqEntry {
+        top_line_index: 64,
+        threshold_db: -4.57,
+    },
+    LtqEntry {
+        top_line_index: 66,
+        threshold_db: -4.77,
+    },
+    LtqEntry {
+        top_line_index: 68,
+        threshold_db: -4.91,
+    },
+    LtqEntry {
+        top_line_index: 70,
+        threshold_db: -4.98,
+    },
+    LtqEntry {
+        top_line_index: 72,
+        threshold_db: -4.97,
+    },
+    LtqEntry {
+        top_line_index: 74,
+        threshold_db: -4.9,
+    },
+    LtqEntry {
+        top_line_index: 76,
+        threshold_db: -4.76,
+    },
+    LtqEntry {
+        top_line_index: 78,
+        threshold_db: -4.55,
+    },
+    LtqEntry {
+        top_line_index: 80,
+        threshold_db: -4.29,
+    },
+    LtqEntry {
+        top_line_index: 82,
+        threshold_db: -3.99,
+    },
+    LtqEntry {
+        top_line_index: 84,
+        threshold_db: -3.64,
+    },
+    LtqEntry {
+        top_line_index: 86,
+        threshold_db: -3.26,
+    },
+    LtqEntry {
+        top_line_index: 88,
+        threshold_db: -2.86,
+    },
+    LtqEntry {
+        top_line_index: 90,
+        threshold_db: -2.45,
+    },
+    LtqEntry {
+        top_line_index: 92,
+        threshold_db: -2.04,
+    },
+    LtqEntry {
+        top_line_index: 94,
+        threshold_db: -1.63,
+    },
+    LtqEntry {
+        top_line_index: 96,
+        threshold_db: -1.24,
+    },
+    LtqEntry {
+        top_line_index: 100,
+        threshold_db: -0.51,
+    },
+    LtqEntry {
+        top_line_index: 104,
+        threshold_db: 0.12,
+    },
+    LtqEntry {
+        top_line_index: 108,
+        threshold_db: 0.64,
+    },
+    LtqEntry {
+        top_line_index: 112,
+        threshold_db: 1.06,
+    },
+    LtqEntry {
+        top_line_index: 116,
+        threshold_db: 1.39,
+    },
+    LtqEntry {
+        top_line_index: 120,
+        threshold_db: 1.66,
+    },
+    LtqEntry {
+        top_line_index: 124,
+        threshold_db: 1.88,
+    },
+    LtqEntry {
+        top_line_index: 128,
+        threshold_db: 2.08,
+    },
+    LtqEntry {
+        top_line_index: 132,
+        threshold_db: 2.27,
+    },
+    LtqEntry {
+        top_line_index: 136,
+        threshold_db: 2.46,
+    },
+    LtqEntry {
+        top_line_index: 140,
+        threshold_db: 2.65,
+    },
+    LtqEntry {
+        top_line_index: 144,
+        threshold_db: 2.86,
+    },
+    LtqEntry {
+        top_line_index: 148,
+        threshold_db: 3.09,
+    },
+    LtqEntry {
+        top_line_index: 152,
+        threshold_db: 3.33,
+    },
+    LtqEntry {
+        top_line_index: 156,
+        threshold_db: 3.6,
+    },
+    LtqEntry {
+        top_line_index: 160,
+        threshold_db: 3.89,
+    },
+    LtqEntry {
+        top_line_index: 164,
+        threshold_db: 4.2,
+    },
+    LtqEntry {
+        top_line_index: 168,
+        threshold_db: 4.54,
+    },
+    LtqEntry {
+        top_line_index: 172,
+        threshold_db: 4.91,
+    },
+    LtqEntry {
+        top_line_index: 176,
+        threshold_db: 5.31,
+    },
+    LtqEntry {
+        top_line_index: 180,
+        threshold_db: 5.73,
+    },
+    LtqEntry {
+        top_line_index: 184,
+        threshold_db: 6.18,
+    },
+    LtqEntry {
+        top_line_index: 188,
+        threshold_db: 6.67,
+    },
+    LtqEntry {
+        top_line_index: 192,
+        threshold_db: 7.19,
+    },
+    LtqEntry {
+        top_line_index: 200,
+        threshold_db: 8.33,
+    },
+    LtqEntry {
+        top_line_index: 208,
+        threshold_db: 9.63,
+    },
+    LtqEntry {
+        top_line_index: 216,
+        threshold_db: 11.08,
+    },
+    LtqEntry {
+        top_line_index: 224,
+        threshold_db: 12.71,
+    },
+    LtqEntry {
+        top_line_index: 232,
+        threshold_db: 14.53,
+    },
+    LtqEntry {
+        top_line_index: 240,
+        threshold_db: 16.54,
+    },
+    LtqEntry {
+        top_line_index: 248,
+        threshold_db: 18.77,
+    },
+    LtqEntry {
+        top_line_index: 256,
+        threshold_db: 21.23,
+    },
+    LtqEntry {
+        top_line_index: 264,
+        threshold_db: 23.94,
+    },
+    LtqEntry {
+        top_line_index: 272,
+        threshold_db: 26.9,
+    },
+    LtqEntry {
+        top_line_index: 280,
+        threshold_db: 30.14,
+    },
+    LtqEntry {
+        top_line_index: 288,
+        threshold_db: 33.67,
+    },
+    LtqEntry {
+        top_line_index: 296,
+        threshold_db: 37.51,
+    },
+    LtqEntry {
+        top_line_index: 304,
+        threshold_db: 41.67,
+    },
+    LtqEntry {
+        top_line_index: 312,
+        threshold_db: 46.17,
+    },
+    LtqEntry {
+        top_line_index: 320,
+        threshold_db: 51.04,
+    },
+    LtqEntry {
+        top_line_index: 328,
+        threshold_db: 56.29,
+    },
+    LtqEntry {
+        top_line_index: 336,
+        threshold_db: 61.94,
+    },
+    LtqEntry {
+        top_line_index: 344,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 352,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 360,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 368,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 376,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 384,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 392,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 400,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 408,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 416,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 424,
+        threshold_db: 68.0,
+    },
+    LtqEntry {
+        top_line_index: 432,
+        threshold_db: 68.0,
+    },
+];
 
 #[cfg(test)]
 mod tests {
@@ -667,6 +2302,85 @@ mod tests {
         assert!(
             (SamplingRate::Fs48kHz.critical_band_boundaries()[0].top_frequency_hz - 46.875).abs()
                 < 1.0e-6,
+        );
+    }
+
+    // --- Annex D Table D.1d/e/f Layer II threshold-in-quiet -----
+
+    #[test]
+    fn ltq_table_row_counts_match_spec() {
+        // The Layer II D.1 tables carry 132 / 130 / 126 entries at
+        // 32 / 44,1 / 48 kHz (per the psychoacoustic extracts doc).
+        assert_eq!(TABLE_D_1D_LTQ_LAYER_II_32.len(), 132);
+        assert_eq!(TABLE_D_1E_LTQ_LAYER_II_44_1HZ.len(), 130);
+        assert_eq!(TABLE_D_1F_LTQ_LAYER_II_48.len(), 126);
+    }
+
+    #[test]
+    fn ltq_line_ranges_are_contiguous_and_start_at_one() {
+        // The implicit lower bound of entry i is entry (i-1)'s
+        // top_line_index + 1, and the first entry's range starts at
+        // line 1 (top_line_index >= 1). The ranges must therefore be
+        // strictly increasing in top_line_index with no gaps.
+        for table in [
+            &TABLE_D_1D_LTQ_LAYER_II_32[..],
+            &TABLE_D_1E_LTQ_LAYER_II_44_1HZ[..],
+            &TABLE_D_1F_LTQ_LAYER_II_48[..],
+        ] {
+            assert_eq!(table[0].top_line_index, 1);
+            for window in table.windows(2) {
+                assert!(
+                    window[1].top_line_index > window[0].top_line_index,
+                    "non-monotone LTq top_line_index: {} >= {}",
+                    window[0].top_line_index,
+                    window[1].top_line_index,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ltq_anchor_cells_match_spec() {
+        // First row at each rate (lowest line, high threshold) and the
+        // 32 kHz minimum-region cell. D.1d i=1 = 58.23 dB; D.1d i=2 =
+        // 33.44 dB (the 62.5 Hz cell shared with the Layer I D.1a
+        // orientation anchor). The 44,1 / 48 kHz first cells are the
+        // distinct low-frequency thresholds 45.05 / 42.10 dB.
+        assert!((TABLE_D_1D_LTQ_LAYER_II_32[0].threshold_db - 58.23).abs() < 1e-9);
+        assert!((TABLE_D_1D_LTQ_LAYER_II_32[1].threshold_db - 33.44).abs() < 1e-9);
+        assert!((TABLE_D_1E_LTQ_LAYER_II_44_1HZ[0].threshold_db - 45.05).abs() < 1e-9);
+        assert!((TABLE_D_1F_LTQ_LAYER_II_48[0].threshold_db - 42.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ltq_uses_d1_thresholds_not_d4_errata_cells() {
+        // The spec Step 5(a) cites D.1d/e/f, NOT the Model-2 D.4
+        // tables. The two diverge at documented last-digit / ceiling
+        // cells. The 32 kHz top entry (i = 132) is D.1d = 51.04 dB,
+        // whereas the Model-2 D.4a top cell prints 51.03 dB — this
+        // table must carry the D.1d value.
+        assert!((TABLE_D_1D_LTQ_LAYER_II_32[131].threshold_db - 51.04).abs() < 1e-9);
+        // The 44,1 kHz top entry (i = 130) is D.1e = 68.00 dB (the
+        // Model-2 D.4b table caps at the surprising 69.13 dB ceiling
+        // instead — this table must NOT carry 69.13).
+        assert!((TABLE_D_1E_LTQ_LAYER_II_44_1HZ[129].threshold_db - 68.00).abs() < 1e-9);
+        // The 48 kHz table agrees with D.4c entry-for-entry; top = 68.00.
+        assert!((TABLE_D_1F_LTQ_LAYER_II_48[125].threshold_db - 68.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ltq_dispatch_picks_the_right_table() {
+        assert_eq!(
+            SamplingRate::Fs32kHz.ltq_table_layer2().len(),
+            TABLE_D_1D_LTQ_LAYER_II_32.len(),
+        );
+        assert_eq!(
+            SamplingRate::Fs44k1Hz.ltq_table_layer2().len(),
+            TABLE_D_1E_LTQ_LAYER_II_44_1HZ.len(),
+        );
+        assert_eq!(
+            SamplingRate::Fs48kHz.ltq_table_layer2().len(),
+            TABLE_D_1F_LTQ_LAYER_II_48.len(),
         );
     }
 }

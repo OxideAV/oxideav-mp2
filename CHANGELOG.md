@@ -6,6 +6,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **§D.1 Step 3 absolute-threshold offset + Step 5(a) threshold-in-quiet
+  decimation** (`psy`, `tables_d2`). The Layer II Annex D Table D.1d /
+  D.1e / D.1f threshold-in-quiet (`LTq`) curves (132 / 130 / 126 entries
+  at 32 / 44.1 / 48 kHz) are transcribed into `tables_d2` as a typed
+  `LtqEntry` table (top FFT line + threshold dB), keyed off the staged
+  Annex D CSVs; the thresholds are read from the **D.1** Layer II column
+  (not the Model-2 D.4 column, which diverges by the documented last-digit
+  / 69.13 dB ceiling errata at 32 / 44.1 kHz) and the FFT-line ranges from
+  the deterministic `higher = round(f / (Fs/1024))` mapping.
+  `SamplingRate::ltq_table_layer2()` dispatches per rate. New `psy`
+  primitives: `absolute_threshold_offset_db` (Step 3: −12 dB for ≥ 96
+  kbit/s/ch, 0 dB below — verbatim spec), `ltq_db_at_line` (per-FFT-line
+  `LTq(k)` lookup with the Step 3 offset folded in), `NonTonalCandidate`
+  + `list_non_tonal_candidates_layer2` (the `k`-carrying Step 4(c)
+  companion of `list_non_tonal_layer2`), `bark_for_line_layer2`
+  (Step 6 input-transform Bark position from the D.2 boundary table), and
+  `decimate_below_threshold_in_quiet` (Step 5(a): keep a tonal/non-tonal
+  masker iff `X(k) ≥ LTq(k)`, dropping untabulated lines; composes before
+  the existing Step 5(b) `decimate_tonal_maskers`). This closes the
+  `#1262` "Step 5(a) requires the PNG-only D.1d/e/f curves" gate noted in
+  `psy`'s module docs — those curves are now text-transcribed. 26 new
+  unit tests (table integrity, errata-cell provenance, offset boundary,
+  line-range walking, decimation classification, 5(a)→5(b) composition).
+
 ### Fixed
 
 - **Round-318 §2.4.1.6 intensity-stereo sample loop — one shared sample

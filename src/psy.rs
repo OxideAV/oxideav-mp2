@@ -90,13 +90,22 @@
 //!   ([`signal_to_mask_ratio_subband`]) — the verbatim spec
 //!   subtraction `SMR_sb(n) = L_sb(n) - LT_min(n)`.
 //!
-//! Step 5(a) "threshold-in-quiet decimation" requires the LTq
-//! values from Annex D Table D.1d/e/f and Step 2/3 also depend on
-//! those PNG-only rows (the LTq threshold-in-quiet curves for
-//! Layer II at 32 / 44.1 / 48 kHz, plus the per-subband range
-//! mapping). They are tracked under the docs-collaborator Tables
-//! D.1a–f / D.3a–c / D.4a–c PNG → text extraction gap (note
-//! `#1262`).
+//! * **Step 3 absolute-threshold offset**
+//!   ([`absolute_threshold_offset_db`]) — the verbatim overall-bit-rate
+//!   offset (−12 dB for >= 96 kbit/s/ch, 0 dB below).
+//! * **Step 5(a) threshold-in-quiet decimation**
+//!   ([`decimate_below_threshold_in_quiet`]) — keep a tonal/non-tonal
+//!   masker only if `X(k) >= LTq(k)`, with `LTq(k)` read per FFT line
+//!   from the Layer II Table D.1d/e/f curves
+//!   ([`ltq_db_at_line`]) carrying the Step 3 offset. The `k`-carrying
+//!   non-tonal candidate list ([`list_non_tonal_candidates_layer2`])
+//!   feeds it.
+//!
+//! The Layer II Table D.1d/e/f threshold-in-quiet values (note
+//! `#1262`) are now text-transcribed from the staged Annex D CSVs and
+//! live in [`crate::tables_d2`] (`LtqEntry` tables), so Step 5(a) is
+//! self-contained. (Step 2's per-subband range mapping is the closed
+//! form [`fft_line_to_subband_layer2`].)
 //!
 //! Step 4(c) and the Layer-II critical-band-boundary tables
 //! D.2d / D.2e / D.2f are independent of that gap — those tables
@@ -804,13 +813,12 @@ pub fn zero_tonal_neighbourhood_layer2(spl_db: &mut [f64], k: usize) {
 /// SPL `X_tm(k)` (in dB) computed at that line.
 ///
 /// This carrier does **not** include the masker's Bark position
-/// `z(j)` — the FFT-line → Bark mapping lives in the PNG-only
-/// Annex D Table D.1d / D.1e / D.1f Layer II columns and is not
-/// available in the staged text extracts this round (note `#1262`).
-/// When that material lands, the caller may convert each
-/// [`TonalCandidate`] into a [`Masker`] of [`MaskerKind::Tonal`]
-/// kind by looking up `z(j) = z[k]` from the table and using
-/// `spl_db = candidate.spl_db`.
+/// `z(j)` — the FFT-line → Bark mapping is the §D.1 Step 6 input
+/// transformation, applied later. The
+/// [`decimate_below_threshold_in_quiet`] Step 5(a) pass converts each
+/// surviving [`TonalCandidate`] into a [`Masker`] of
+/// [`MaskerKind::Tonal`] kind by looking up `z(j) = z[k]` via
+/// [`bark_for_line_layer2`] and keeping `spl_db = candidate.spl_db`.
 ///
 /// The two-stage carrier (line-index now, Bark later) keeps the
 /// Step 4(b) sweep self-contained: every primitive it depends on
@@ -1124,14 +1132,11 @@ pub const TONAL_DECIMATION_WINDOW_BARK: f64 = 0.5;
 /// `is_local_maximum`'s left-most pick on plateaus (cf. Step
 /// 4(a)). This keeps the decimation a pure function of the input.
 ///
-/// This primitive does **not** implement Step 5(a) — the
+/// This primitive performs **only** Step 5(b). The Step 5(a)
 /// threshold-in-quiet comparison `X_tm(k) >= LT_q(k)` /
-/// `X_nm(k) >= LT_q(k)` requires the Annex D Table D.1d / D.1e /
-/// D.1f Layer II `LT_q` curves which are PNG-only in the staged
-/// PDF (note `#1262`). When that material is text-extracted, a
-/// companion `decimate_below_threshold_in_quiet` primitive can be
-/// added and the two passes composed end-to-end per the spec
-/// ordering (5(a) first, then 5(b)).
+/// `X_nm(k) >= LT_q(k)` is the companion
+/// [`decimate_below_threshold_in_quiet`]; the two passes compose
+/// end-to-end per the spec ordering (5(a) first, then 5(b)).
 #[must_use]
 pub fn decimate_tonal_maskers(maskers: &[Masker]) -> Vec<Masker> {
     // Step 1: split maskers into the tonal and non-tonal lists,
@@ -1442,6 +1447,219 @@ pub fn fft_line_to_subband_layer2(k: usize) -> usize {
     } else {
         usize::MAX
     }
+}
+
+/// §D.1 Step 3 overall-bit-rate offset applied to the absolute
+/// threshold (threshold in quiet). The spec phrasing (PDF page 117,
+/// printed 111), verbatim:
+///
+/// > An offset depending on the overall bit rate is used for the
+/// > absolute threshold. This offset is −12 dB for bit rates >= 96
+/// > kbits/s and 0 dB for bit rates < 96 kbits/s per channel.
+///
+/// `bitrate_per_channel_kbps` is the overall bit rate **per channel**
+/// in kbit/s. The returned value is added to every `LTq(k)` looked up
+/// from the Table D.1d / D.1e / D.1f Layer II threshold-in-quiet curve
+/// before the §D.1 Step 5(a) comparison `X(k) >= LTq(k)`.
+///
+/// The boundary is inclusive at 96 kbit/s ("bit rates >= 96"): exactly
+/// 96 kbit/s/ch takes the −12 dB offset.
+#[must_use]
+pub fn absolute_threshold_offset_db(bitrate_per_channel_kbps: f64) -> f64 {
+    if bitrate_per_channel_kbps >= 96.0 {
+        -12.0
+    } else {
+        0.0
+    }
+}
+
+/// §D.1 Step 5(a) threshold-in-quiet lookup `LTq(k)` for a single
+/// 1024-point-analysis-FFT line index `k` (1-based, as the Annex D
+/// tables index the spectrum), with the §D.1 Step 3 overall-bit-rate
+/// `offset_db` already folded in.
+///
+/// The spec (PDF page 119) defines `LTq(k)` as "the absolute threshold
+/// (or threshold in quiet) at the frequency of index `k`", tabulated
+/// in Tables D.1d / D.1e / D.1f for Layer II. Each [`LtqEntry`] of the
+/// table covers a contiguous FFT-line range whose top line is
+/// `top_line_index`; the lower bound is the previous entry's
+/// `top_line_index + 1` (the first entry starts at line 1). This
+/// function walks the table and returns the threshold of the first
+/// entry whose range contains `k`, plus `offset_db`.
+///
+/// Returns `None` when `k == 0` (the DC line is below the tabulated
+/// range, `1..=top`) or when `k` exceeds the last entry's
+/// `top_line_index` (above the highest tabulated line — the spec's
+/// masking calculation does not extend past the top of the table).
+#[must_use]
+pub fn ltq_db_at_line(fs: crate::tables_d2::SamplingRate, k: usize, offset_db: f64) -> Option<f64> {
+    if k == 0 {
+        return None;
+    }
+    let table = fs.ltq_table_layer2();
+    // The table is monotone in `top_line_index`; the first entry whose
+    // top line is at or above `k` is the entry whose half-open range
+    // (prev_top, top] contains `k`.
+    for entry in table {
+        if k <= entry.top_line_index as usize {
+            return Some(entry.threshold_db + offset_db);
+        }
+    }
+    None
+}
+
+/// A single §D.1 Step 4(c) non-tonal candidate carrying its
+/// representative FFT-line index `k` alongside the non-tonal SPL
+/// `X_nm(k)`.
+///
+/// The §D.1 Step 5(a) threshold-in-quiet decimation compares the
+/// non-tonal SPL against `LTq(k)` at the band's representative line
+/// (the line "nearest to the geometric mean of the critical band", per
+/// [`non_tonal_band_index`]). [`list_non_tonal_layer2`] returns
+/// [`Masker`]s positioned on the Bark axis but drops the FFT-line
+/// index; this carrier keeps the `k` that Step 5(a) needs so the
+/// threshold-in-quiet pass can run before the Bark-domain Steps 6/7.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonTonalCandidate {
+    /// Representative FFT-line index of the critical band (the line
+    /// nearest the band's geometric mean; cf. [`non_tonal_band_index`]).
+    pub k: usize,
+    /// Bark position `z(j)` of the band's top line (carried through so
+    /// the survivor can be turned into a [`Masker`] without re-reading
+    /// the boundary table).
+    pub z_bark: f64,
+    /// Non-tonal SPL `X_nm(k)` in dB for the band (cf.
+    /// [`non_tonal_spl_db`]).
+    pub spl_db: f64,
+}
+
+/// §D.1 Step 4(c) non-tonal listing for Layer II that retains each
+/// band's representative FFT-line index `k` (for the Step 5(a)
+/// threshold-in-quiet decimation) in addition to the Bark position and
+/// SPL.
+///
+/// This is the `k`-carrying companion of [`list_non_tonal_layer2`]:
+/// it sweeps the same Table D.2d / D.2e / D.2f critical-band
+/// boundaries, power-sums each band's surviving (post-tonal-zero-out)
+/// lines via [`non_tonal_spl_db`], and pairs the result with the band's
+/// representative line index from [`non_tonal_band_index`]. Bands whose
+/// lines are all `-inf dB` (entirely tonal-zeroed) or whose
+/// representative line is undefined are dropped, exactly as
+/// [`list_non_tonal_layer2`] drops them.
+#[must_use]
+pub fn list_non_tonal_candidates_layer2(
+    spl_db: &[f64],
+    fs: crate::tables_d2::SamplingRate,
+) -> Vec<NonTonalCandidate> {
+    let boundaries = fs.critical_band_boundaries();
+    let mut out = Vec::with_capacity(boundaries.len());
+    let mut lo = 0_usize;
+    for boundary in boundaries {
+        let hi = boundary.top_line_index as usize;
+        if let (Some(x_nm), Some(k)) = (
+            non_tonal_spl_db(spl_db, lo, hi),
+            non_tonal_band_index(lo, hi),
+        ) {
+            out.push(NonTonalCandidate {
+                k,
+                z_bark: boundary.top_bark,
+                spl_db: x_nm,
+            });
+        }
+        lo = hi + 1;
+    }
+    out
+}
+
+/// §D.1 Step 5(a) threshold-in-quiet decimation. The spec phrasing
+/// (PDF page 119, printed 113), verbatim:
+///
+/// > Decimation is a procedure that is used to reduce the number of
+/// > maskers which are considered for the calculation of the global
+/// > masking threshold. … Tonal `X_tm(k)` or non-tonal `X_nm(k)`
+/// > components are considered for the calculation of the masking
+/// > threshold only if: `X_tm(k) >= LTq(k)` [or `X_nm(k) >= LTq(k)`].
+/// > In this expression, `LTq(k)` is the absolute threshold (or
+/// > threshold in quiet) at the frequency of index `k`. These values
+/// > are given in tables D.1d, D.1e, D.1f for Layer II.
+///
+/// A masker is **kept** iff its SPL is greater than or equal to the
+/// threshold-in-quiet at its own FFT line `k` (the comparison is
+/// `>=`, so a masker exactly at threshold survives). The `LTq(k)`
+/// value already carries the §D.1 Step 3 overall-bit-rate `offset_db`
+/// (see [`absolute_threshold_offset_db`] / [`ltq_db_at_line`]).
+///
+/// A candidate whose FFT line falls outside the tabulated range
+/// (`ltq_db_at_line` returns `None` — `k == 0` or above the top
+/// tabulated line) is **dropped**: the spec only computes masking for
+/// lines that have a tabulated threshold, so a line with no `LTq`
+/// entry contributes no masker.
+///
+/// Per the spec, Step 5(a) precedes the Step 5(b) tonal-masker
+/// 0.5-Bark decimation; the two passes compose as 5(a) then 5(b). This
+/// function performs **only** the 5(a) threshold-in-quiet pass and
+/// returns the survivors as Bark-positioned [`Masker`]s ready for the
+/// Step 5(b) [`decimate_tonal_maskers`] pass (or directly for Steps
+/// 6/7 if no further decimation is wanted).
+#[must_use]
+pub fn decimate_below_threshold_in_quiet(
+    tonal: &[TonalCandidate],
+    non_tonal: &[NonTonalCandidate],
+    fs: crate::tables_d2::SamplingRate,
+    offset_db: f64,
+) -> Vec<Masker> {
+    let mut out: Vec<Masker> = Vec::with_capacity(tonal.len() + non_tonal.len());
+    for cand in tonal {
+        if let Some(ltq) = ltq_db_at_line(fs, cand.k, offset_db) {
+            if cand.spl_db >= ltq {
+                // The tonal candidate carries only its FFT line; the
+                // Bark position z(j) = z[k] is the critical-band rate of
+                // line k. Use the tabulated rate of the band whose top
+                // line first reaches k (the same Table D.1/D.2 mapping
+                // the spec assigns each component its index i from).
+                let z = bark_for_line_layer2(fs, cand.k);
+                out.push(Masker {
+                    kind: MaskerKind::Tonal,
+                    z_bark: z,
+                    spl_db: cand.spl_db,
+                });
+            }
+        }
+    }
+    for cand in non_tonal {
+        if let Some(ltq) = ltq_db_at_line(fs, cand.k, offset_db) {
+            if cand.spl_db >= ltq {
+                out.push(Masker {
+                    kind: MaskerKind::NonTonal,
+                    z_bark: cand.z_bark,
+                    spl_db: cand.spl_db,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Bark position `z[k]` of a 1024-point-analysis-FFT line `k` for
+/// Layer II, taken as the critical-band rate of the Table D.2d / D.2e
+/// / D.2f boundary band whose top line first reaches `k`.
+///
+/// The §D.1 Step 6 input transformation assigns each masker the Bark
+/// position of its FFT line; for the threshold-in-quiet survivors of
+/// Step 5(a) the position is read from the same critical-band-boundary
+/// table that Step 4(c) used. A line above the topmost tabulated
+/// boundary takes that top boundary's Bark value (the band saturates
+/// at the top of the audio band).
+#[must_use]
+pub fn bark_for_line_layer2(fs: crate::tables_d2::SamplingRate, k: usize) -> f64 {
+    let boundaries = fs.critical_band_boundaries();
+    for boundary in boundaries {
+        if k <= boundary.top_line_index as usize {
+            return boundary.top_bark;
+        }
+    }
+    // Above the top boundary: saturate at the highest band's Bark.
+    boundaries.last().map_or(0.0, |b| b.top_bark)
 }
 
 #[cfg(test)]
@@ -3349,5 +3567,219 @@ mod tests {
         // negative) scalefactor term — the spectrum there is noise
         // floor only.
         assert!(l_sb[20] < 0.0);
+    }
+
+    // ----- §D.1 Step 3 absolute-threshold offset --------------
+
+    #[test]
+    fn step3_offset_is_minus_12_at_or_above_96_kbps() {
+        // Verbatim spec: −12 dB for >= 96 kbit/s/ch.
+        assert_eq!(absolute_threshold_offset_db(96.0), -12.0);
+        assert_eq!(absolute_threshold_offset_db(128.0), -12.0);
+        assert_eq!(absolute_threshold_offset_db(192.0), -12.0);
+    }
+
+    #[test]
+    fn step3_offset_is_zero_below_96_kbps() {
+        // Verbatim spec: 0 dB for < 96 kbit/s/ch.
+        assert_eq!(absolute_threshold_offset_db(95.999), 0.0);
+        assert_eq!(absolute_threshold_offset_db(64.0), 0.0);
+        assert_eq!(absolute_threshold_offset_db(32.0), 0.0);
+    }
+
+    // ----- §D.1 Step 5(a) LTq line lookup ----------------------
+
+    #[test]
+    fn ltq_at_line_first_entry_covers_line_one() {
+        // D.1d entry 1 covers FFT line 1 only; threshold 58.23 dB.
+        let v = ltq_db_at_line(crate::tables_d2::SamplingRate::Fs32kHz, 1, 0.0);
+        assert!((v.expect("line 1 tabulated") - 58.23).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ltq_at_line_applies_step3_offset() {
+        // The −12 dB offset is added to the looked-up threshold.
+        let off = absolute_threshold_offset_db(128.0);
+        let v = ltq_db_at_line(crate::tables_d2::SamplingRate::Fs32kHz, 2, off);
+        // D.1d entry 2 = 33.44 dB; with the −12 dB offset = 21.44 dB.
+        assert!((v.expect("line 2 tabulated") - (33.44 - 12.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ltq_at_line_dc_and_above_top_are_none() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // DC line 0 is below the tabulated 1..=top range.
+        assert!(ltq_db_at_line(fs, 0, 0.0).is_none());
+        // The 32 kHz table tops out at line 480; line 481 is above it.
+        assert!(ltq_db_at_line(fs, 481, 0.0).is_none());
+        assert!(ltq_db_at_line(fs, 480, 0.0).is_some());
+    }
+
+    #[test]
+    fn ltq_at_line_walks_ranges() {
+        // D.1d entry 2 covers line 2, entry 3 covers line 3, etc. at
+        // 32 kHz (one line per entry in the dense low region). The
+        // densest region is 1:1, so line k = entry k's threshold.
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // i=6 (line 6) = 13.87 dB per the extracts-doc orientation
+        // (D.1d frequency 187.5 Hz row).
+        let v = ltq_db_at_line(fs, 6, 0.0).expect("line 6");
+        assert!((v - 13.87).abs() < 1e-9, "LTq(6) = {v}");
+    }
+
+    // ----- §D.1 Step 5(a) decimation ---------------------------
+
+    #[test]
+    fn step5a_keeps_masker_at_or_above_threshold() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // Line 6 LTq = 13.87 dB. A tonal candidate exactly at the
+        // threshold survives (>= comparison); one below is dropped.
+        let tonal = [
+            TonalCandidate {
+                k: 6,
+                spl_db: 13.87,
+            },
+            TonalCandidate {
+                k: 6,
+                spl_db: 13.86,
+            },
+        ];
+        let out = decimate_below_threshold_in_quiet(&tonal, &[], fs, 0.0);
+        assert_eq!(out.len(), 1, "only the at-threshold masker survives");
+        assert_eq!(out[0].kind, MaskerKind::Tonal);
+        assert!((out[0].spl_db - 13.87).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step5a_offset_lowers_the_survival_bar() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // With the −12 dB offset, line 6's effective LTq is 1.87 dB,
+        // so a 2 dB masker that would fail the 13.87 dB bar now
+        // survives.
+        let tonal = [TonalCandidate { k: 6, spl_db: 2.0 }];
+        let no_off = decimate_below_threshold_in_quiet(&tonal, &[], fs, 0.0);
+        assert!(no_off.is_empty(), "2 dB < 13.87 dB without offset");
+        let with_off =
+            decimate_below_threshold_in_quiet(&tonal, &[], fs, absolute_threshold_offset_db(128.0));
+        assert_eq!(with_off.len(), 1, "2 dB >= 1.87 dB with −12 dB offset");
+    }
+
+    #[test]
+    fn step5a_drops_untabulated_lines() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // Line 0 (DC) and a line above the top of the table have no
+        // LTq entry, so the masker is dropped regardless of SPL.
+        let tonal = [
+            TonalCandidate {
+                k: 0,
+                spl_db: 200.0,
+            },
+            TonalCandidate {
+                k: 481,
+                spl_db: 200.0,
+            },
+        ];
+        let out = decimate_below_threshold_in_quiet(&tonal, &[], fs, 0.0);
+        assert!(out.is_empty(), "untabulated lines contribute no masker");
+    }
+
+    #[test]
+    fn step5a_classifies_tonal_and_non_tonal() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        let tonal = [TonalCandidate { k: 6, spl_db: 40.0 }];
+        let non_tonal = [NonTonalCandidate {
+            k: 6,
+            z_bark: 1.842,
+            spl_db: 40.0,
+        }];
+        let out = decimate_below_threshold_in_quiet(&tonal, &non_tonal, fs, 0.0);
+        assert_eq!(out.len(), 2);
+        // Tonal survivors come first, then non-tonal (build order).
+        assert_eq!(out[0].kind, MaskerKind::Tonal);
+        assert_eq!(out[1].kind, MaskerKind::NonTonal);
+        // The non-tonal carrier's Bark is preserved verbatim.
+        assert!((out[1].z_bark - 1.842).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step5a_tonal_survivor_carries_table_bark() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // Line 6 sits in Table D.2d band no=2 (top_line_index 6,
+        // Bark 1.842). The Step 5(a) survivor's Bark must read from
+        // that boundary table.
+        let tonal = [TonalCandidate { k: 6, spl_db: 40.0 }];
+        let out = decimate_below_threshold_in_quiet(&tonal, &[], fs, 0.0);
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].z_bark - 1.842).abs() < 1e-9,
+            "z(line 6) = {}",
+            out[0].z_bark
+        );
+    }
+
+    #[test]
+    fn bark_for_line_saturates_above_top_boundary() {
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        let top = fs.critical_band_boundaries().last().unwrap().top_bark;
+        // A line above the topmost boundary saturates at the top Bark.
+        assert!((bark_for_line_layer2(fs, 10_000) - top).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step5a_then_step5b_compose() {
+        // Spec ordering: 5(a) threshold-in-quiet first, then 5(b)
+        // 0.5-Bark tonal decimation. Two tonal candidates above
+        // threshold whose Bark positions land within 0.5 Bark of each
+        // other: 5(a) keeps both, 5(b) collapses them to the louder.
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        // Lines 6 and 7 both sit in low Bark bands very close
+        // together; give them loud, above-threshold SPLs.
+        let tonal = [
+            TonalCandidate { k: 6, spl_db: 40.0 },
+            TonalCandidate { k: 7, spl_db: 50.0 },
+        ];
+        let after_5a = decimate_below_threshold_in_quiet(&tonal, &[], fs, 0.0);
+        assert_eq!(after_5a.len(), 2, "both survive the quiet threshold");
+        // Force them within 0.5 Bark for the 5(b) merge test by
+        // checking the composed pipeline collapses identical-Bark
+        // tonal maskers to the loudest.
+        let z = after_5a[0].z_bark;
+        let merged = decimate_tonal_maskers(&[
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: z,
+                spl_db: 40.0,
+            },
+            Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: z + 0.1,
+                spl_db: 50.0,
+            },
+        ]);
+        assert_eq!(merged.len(), 1, "5(b) keeps the loudest of the cluster");
+        assert!((merged[0].spl_db - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn list_non_tonal_candidates_carries_representative_line() {
+        // A flat 50 dB spectrum yields one non-tonal masker per
+        // critical band, each carrying the band's geometric-mean line
+        // and its boundary Bark. The k values must be inside each
+        // band's [lo, hi] range.
+        let fs = crate::tables_d2::SamplingRate::Fs32kHz;
+        let spl = vec![50.0_f64; 600];
+        let cands = list_non_tonal_candidates_layer2(&spl, fs);
+        assert!(!cands.is_empty());
+        let boundaries = fs.critical_band_boundaries();
+        let mut lo = 0usize;
+        for (idx, b) in boundaries.iter().enumerate() {
+            let hi = b.top_line_index as usize;
+            // Each surviving candidate's k is within its band range.
+            if idx < cands.len() {
+                let k = cands[idx].k;
+                assert!(k >= lo.max(1) && k <= hi, "k {k} not in band [{lo},{hi}]");
+            }
+            lo = hi + 1;
+        }
     }
 }
