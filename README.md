@@ -84,9 +84,14 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
   49 partitions), **D.3b (44,1 kHz, 57 partitions)** and **D.3c (48 kHz,
   58 partitions)** — selected by `calc_partition_table_for_rate`, so the
   step-(f) spreading convolution and the step-(g)…(n) threshold loop run
-  at every rate. What remains is the D.4 per-line absolute-threshold
-  tables (staged as CSVs under `docs/audio/mp3/`) and wiring the chain
-  into the encoder's automatic SMR selection.
+  at every rate. The §D.2.4 step-(l) **absolute-threshold tables D.4a /
+  D.4b / D.4c** (32 / 44,1 / 48 kHz) are now text-transcribed into
+  `tables_model2` as `AbsThrEntry` ranges, with
+  `abs_threshold_table_for_rate` selecting per rate and
+  `absolute_threshold_db_per_line` expanding a table into the per-FFT-line
+  dB slice the step-(l) `include_absolute_threshold` floor consumes (after
+  the caller's dB→energy conversion). What remains is wiring the assembled
+  Model-1 / Model-2 chain into the encoder's automatic SMR selection.
 - Bit-exact PCM-against-reference validation (PSNR / SNR) pending an
   audit pass.
 

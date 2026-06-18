@@ -8,6 +8,37 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2.4 step (l) Model-2 absolute-threshold tables D.4a / D.4b / D.4c
+  (32 / 44,1 / 48 kHz) + per-line expander** (`tables_model2`). The Annex D
+  Table D.4a (132 entries), D.4b (130 entries) and D.4c (126 entries)
+  per-FFT-line absolute-threshold (threshold-in-quiet) tables are
+  transcribed verbatim from the staged CSVs
+  `docs/audio/mp3/annex-d-table-D4{a,b,c}-absolute-threshold-*.csv`
+  (`line_lower` / `line_higher` / `threshold_db` per range) into the new
+  `AbsThrEntry` carrier. Each row's `(line_lower ..= line_higher)` is the
+  inclusive 1-based range of 1024-point-analysis-FFT lines sharing one
+  threshold value; the ranges tile the band one-line-per-row at the bottom
+  and widen to 2-/4-/8-line groups toward the top (topmost line 480 / 464 /
+  432). The as-printed **D.4** divergences from the matching Layer II D.1
+  tables are reproduced faithfully: D.4a's `51.03` dB top (vs D.1d's 51.04),
+  D.4b's surprising `69.13` dB saturation ceiling (vs D.1e's 68.00), and
+  D.4c's `68.00` dB ceiling matching D.1f. New
+  `abs_threshold_table_for_rate(SamplingRate)` dispatches the
+  `&[AbsThrEntry]` table per rate, and
+  `absolute_threshold_db_per_line(table, line_count)` expands a D.4 table
+  into a per-FFT-line dB slice over the analysis-FFT working range
+  (broadcasting each range's value across its lines, holding the
+  top-of-band ceiling for lines above the last tabulated range), ready for
+  the caller's dB→energy conversion and the step-(l)
+  `include_absolute_threshold` floor. This closes the last un-transcribed
+  Annex D table the README "lacks" tail called out — the §D.2 chain can now
+  feed step (l) at all three Layer II sampling rates. 14 new lib tests
+  (438 → 452): row counts (132/130/126), contiguous one-based range tiling,
+  topmost-line spot checks (480/464/432), single-line low groups, verbatim
+  head/tail cells, the D.4b 69.13 dB ceiling + its 369–376 onset, the D.4c
+  68.00 dB ceiling, dispatcher pointer identity, per-line broadcast +
+  ceiling-hold-above-last-range, caller-driven output length, empty/zero
+  safe responses, and an end-to-end step-(l) floor composition.
 - **§D.2 Model-2 calculation-partition tables D.3b / D.3c (44,1 / 48 kHz)
   + rate dispatcher** (`tables_model2`). The Annex D Table D.3b (57
   partitions, 44,1 kHz) and Table D.3c (58 partitions, 48 kHz)

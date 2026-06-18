@@ -1955,6 +1955,2109 @@ pub fn signal_to_mask_ratio_db(n: usize, r2: &[f64], thr: &[f64]) -> Option<f64>
     Some(10.0 * (epart / npart).log10())
 }
 
+/// One row of an Annex D Table **D.4a / D.4b / D.4c** — the Model 2
+/// *absolute threshold table* (per FFT line).
+///
+/// Clause D.2 tabulates, per range of 1024-point-analysis-FFT lines, a
+/// single absolute-threshold (threshold-in-quiet) value in dB. The
+/// table is laid out as `index lower`, `index higher`, `absthr [dB]`:
+/// `(line_lower ..= line_higher)` is the inclusive, 1-based range of FFT
+/// lines that share the one `threshold_db` entry. The ranges tile the
+/// low FFT lines one-per-row and widen to 2-, 4- and 8-line groups
+/// toward the top of the band. The spec page note:
+///
+/// > A value of 0 dB represents a level in the absolute threshold
+/// > calculation of 96 dB below the energy of a sine wave of amplitude
+/// > ±32 760.
+///
+/// — fixes the dB→energy anchor the step-(l) [`include_absolute_threshold`]
+/// caller uses when converting `threshold_db` into the energy domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbsThrEntry {
+    /// First FFT line (1-based, inclusive) covered by this entry.
+    pub line_lower: u32,
+    /// Last FFT line (1-based, inclusive) covered by this entry.
+    pub line_higher: u32,
+    /// Absolute threshold (threshold in quiet) for the line range, in dB.
+    pub threshold_db: f64,
+}
+
+impl AbsThrEntry {
+    /// Number of FFT lines this entry covers (`line_higher − line_lower + 1`).
+    #[must_use]
+    pub const fn line_count(self) -> u32 {
+        self.line_higher - self.line_lower + 1
+    }
+}
+
+/// Annex D Table **D.4a** — Model 2 absolute threshold table, Fs = 32 kHz.
+///
+/// 132 rows; the FFT-line ranges run 1…480 (the topmost row covers lines
+/// 473–480). Source: the staged CSV
+/// `docs/audio/mp3/annex-d-table-D4a-absolute-threshold-32kHz.csv`
+/// (text transcription of ISO/IEC 11172-3:1993 Annex D Table D.4a, PDF
+/// printed page 136 / PDF p.142), cross-checked against the page render
+/// `docs/audio/mp3/annex-d-renders/Table-D.4a-absolute-threshold-32kHz-p136.png`.
+///
+/// The `threshold_db` column matches the Layer II D.1d threshold-in-quiet
+/// sequence entry-for-entry **except** the last entry (lines 473–480),
+/// which D.4a prints `51.03` dB where D.1d's i = 132 prints `51.04` dB —
+/// a documented ISO last-digit print divergence. The value below is the
+/// as-printed **D.4a** figure (`51.03`).
+// The `6.28` dB threshold at line 15 is a verbatim spec table value, not
+// an approximation of `f64::consts::TAU`; the clippy lint is a false
+// positive on transcribed numeric data.
+#[allow(clippy::approx_constant)]
+pub static TABLE_D_4A_ABSTHR_LAYER2_32: [AbsThrEntry; 132] = [
+    AbsThrEntry {
+        line_lower: 1,
+        line_higher: 1,
+        threshold_db: 58.23,
+    },
+    AbsThrEntry {
+        line_lower: 2,
+        line_higher: 2,
+        threshold_db: 33.44,
+    },
+    AbsThrEntry {
+        line_lower: 3,
+        line_higher: 3,
+        threshold_db: 24.17,
+    },
+    AbsThrEntry {
+        line_lower: 4,
+        line_higher: 4,
+        threshold_db: 19.20,
+    },
+    AbsThrEntry {
+        line_lower: 5,
+        line_higher: 5,
+        threshold_db: 16.05,
+    },
+    AbsThrEntry {
+        line_lower: 6,
+        line_higher: 6,
+        threshold_db: 13.87,
+    },
+    AbsThrEntry {
+        line_lower: 7,
+        line_higher: 7,
+        threshold_db: 12.26,
+    },
+    AbsThrEntry {
+        line_lower: 8,
+        line_higher: 8,
+        threshold_db: 11.01,
+    },
+    AbsThrEntry {
+        line_lower: 9,
+        line_higher: 9,
+        threshold_db: 10.01,
+    },
+    AbsThrEntry {
+        line_lower: 10,
+        line_higher: 10,
+        threshold_db: 9.20,
+    },
+    AbsThrEntry {
+        line_lower: 11,
+        line_higher: 11,
+        threshold_db: 8.52,
+    },
+    AbsThrEntry {
+        line_lower: 12,
+        line_higher: 12,
+        threshold_db: 7.94,
+    },
+    AbsThrEntry {
+        line_lower: 13,
+        line_higher: 13,
+        threshold_db: 7.44,
+    },
+    AbsThrEntry {
+        line_lower: 14,
+        line_higher: 14,
+        threshold_db: 7.00,
+    },
+    AbsThrEntry {
+        line_lower: 15,
+        line_higher: 15,
+        threshold_db: 6.62,
+    },
+    AbsThrEntry {
+        line_lower: 16,
+        line_higher: 16,
+        threshold_db: 6.28,
+    },
+    AbsThrEntry {
+        line_lower: 17,
+        line_higher: 17,
+        threshold_db: 5.97,
+    },
+    AbsThrEntry {
+        line_lower: 18,
+        line_higher: 18,
+        threshold_db: 5.70,
+    },
+    AbsThrEntry {
+        line_lower: 19,
+        line_higher: 19,
+        threshold_db: 5.44,
+    },
+    AbsThrEntry {
+        line_lower: 20,
+        line_higher: 20,
+        threshold_db: 5.21,
+    },
+    AbsThrEntry {
+        line_lower: 21,
+        line_higher: 21,
+        threshold_db: 5.00,
+    },
+    AbsThrEntry {
+        line_lower: 22,
+        line_higher: 22,
+        threshold_db: 4.80,
+    },
+    AbsThrEntry {
+        line_lower: 23,
+        line_higher: 23,
+        threshold_db: 4.62,
+    },
+    AbsThrEntry {
+        line_lower: 24,
+        line_higher: 24,
+        threshold_db: 4.45,
+    },
+    AbsThrEntry {
+        line_lower: 25,
+        line_higher: 25,
+        threshold_db: 4.29,
+    },
+    AbsThrEntry {
+        line_lower: 26,
+        line_higher: 26,
+        threshold_db: 4.14,
+    },
+    AbsThrEntry {
+        line_lower: 27,
+        line_higher: 27,
+        threshold_db: 4.00,
+    },
+    AbsThrEntry {
+        line_lower: 28,
+        line_higher: 28,
+        threshold_db: 3.86,
+    },
+    AbsThrEntry {
+        line_lower: 29,
+        line_higher: 29,
+        threshold_db: 3.73,
+    },
+    AbsThrEntry {
+        line_lower: 30,
+        line_higher: 30,
+        threshold_db: 3.61,
+    },
+    AbsThrEntry {
+        line_lower: 31,
+        line_higher: 31,
+        threshold_db: 3.49,
+    },
+    AbsThrEntry {
+        line_lower: 32,
+        line_higher: 32,
+        threshold_db: 3.37,
+    },
+    AbsThrEntry {
+        line_lower: 33,
+        line_higher: 33,
+        threshold_db: 3.26,
+    },
+    AbsThrEntry {
+        line_lower: 34,
+        line_higher: 34,
+        threshold_db: 3.15,
+    },
+    AbsThrEntry {
+        line_lower: 35,
+        line_higher: 35,
+        threshold_db: 3.04,
+    },
+    AbsThrEntry {
+        line_lower: 36,
+        line_higher: 36,
+        threshold_db: 2.93,
+    },
+    AbsThrEntry {
+        line_lower: 37,
+        line_higher: 37,
+        threshold_db: 2.83,
+    },
+    AbsThrEntry {
+        line_lower: 38,
+        line_higher: 38,
+        threshold_db: 2.73,
+    },
+    AbsThrEntry {
+        line_lower: 39,
+        line_higher: 39,
+        threshold_db: 2.63,
+    },
+    AbsThrEntry {
+        line_lower: 40,
+        line_higher: 40,
+        threshold_db: 2.53,
+    },
+    AbsThrEntry {
+        line_lower: 41,
+        line_higher: 41,
+        threshold_db: 2.42,
+    },
+    AbsThrEntry {
+        line_lower: 42,
+        line_higher: 42,
+        threshold_db: 2.32,
+    },
+    AbsThrEntry {
+        line_lower: 43,
+        line_higher: 43,
+        threshold_db: 2.22,
+    },
+    AbsThrEntry {
+        line_lower: 44,
+        line_higher: 44,
+        threshold_db: 2.12,
+    },
+    AbsThrEntry {
+        line_lower: 45,
+        line_higher: 45,
+        threshold_db: 2.02,
+    },
+    AbsThrEntry {
+        line_lower: 46,
+        line_higher: 46,
+        threshold_db: 1.92,
+    },
+    AbsThrEntry {
+        line_lower: 47,
+        line_higher: 47,
+        threshold_db: 1.81,
+    },
+    AbsThrEntry {
+        line_lower: 48,
+        line_higher: 48,
+        threshold_db: 1.71,
+    },
+    AbsThrEntry {
+        line_lower: 49,
+        line_higher: 50,
+        threshold_db: 1.49,
+    },
+    AbsThrEntry {
+        line_lower: 51,
+        line_higher: 52,
+        threshold_db: 1.27,
+    },
+    AbsThrEntry {
+        line_lower: 53,
+        line_higher: 54,
+        threshold_db: 1.04,
+    },
+    AbsThrEntry {
+        line_lower: 55,
+        line_higher: 56,
+        threshold_db: 0.80,
+    },
+    AbsThrEntry {
+        line_lower: 57,
+        line_higher: 58,
+        threshold_db: 0.55,
+    },
+    AbsThrEntry {
+        line_lower: 59,
+        line_higher: 60,
+        threshold_db: 0.29,
+    },
+    AbsThrEntry {
+        line_lower: 61,
+        line_higher: 62,
+        threshold_db: 0.02,
+    },
+    AbsThrEntry {
+        line_lower: 63,
+        line_higher: 64,
+        threshold_db: -0.25,
+    },
+    AbsThrEntry {
+        line_lower: 65,
+        line_higher: 66,
+        threshold_db: -0.54,
+    },
+    AbsThrEntry {
+        line_lower: 67,
+        line_higher: 68,
+        threshold_db: -0.83,
+    },
+    AbsThrEntry {
+        line_lower: 69,
+        line_higher: 70,
+        threshold_db: -1.12,
+    },
+    AbsThrEntry {
+        line_lower: 71,
+        line_higher: 72,
+        threshold_db: -1.43,
+    },
+    AbsThrEntry {
+        line_lower: 73,
+        line_higher: 74,
+        threshold_db: -1.73,
+    },
+    AbsThrEntry {
+        line_lower: 75,
+        line_higher: 76,
+        threshold_db: -2.04,
+    },
+    AbsThrEntry {
+        line_lower: 77,
+        line_higher: 78,
+        threshold_db: -2.34,
+    },
+    AbsThrEntry {
+        line_lower: 79,
+        line_higher: 80,
+        threshold_db: -2.64,
+    },
+    AbsThrEntry {
+        line_lower: 81,
+        line_higher: 82,
+        threshold_db: -2.93,
+    },
+    AbsThrEntry {
+        line_lower: 83,
+        line_higher: 84,
+        threshold_db: -3.22,
+    },
+    AbsThrEntry {
+        line_lower: 85,
+        line_higher: 86,
+        threshold_db: -3.49,
+    },
+    AbsThrEntry {
+        line_lower: 87,
+        line_higher: 88,
+        threshold_db: -3.74,
+    },
+    AbsThrEntry {
+        line_lower: 89,
+        line_higher: 90,
+        threshold_db: -3.98,
+    },
+    AbsThrEntry {
+        line_lower: 91,
+        line_higher: 92,
+        threshold_db: -4.20,
+    },
+    AbsThrEntry {
+        line_lower: 93,
+        line_higher: 94,
+        threshold_db: -4.40,
+    },
+    AbsThrEntry {
+        line_lower: 95,
+        line_higher: 96,
+        threshold_db: -4.57,
+    },
+    AbsThrEntry {
+        line_lower: 97,
+        line_higher: 100,
+        threshold_db: -4.82,
+    },
+    AbsThrEntry {
+        line_lower: 101,
+        line_higher: 104,
+        threshold_db: -4.96,
+    },
+    AbsThrEntry {
+        line_lower: 105,
+        line_higher: 108,
+        threshold_db: -4.97,
+    },
+    AbsThrEntry {
+        line_lower: 109,
+        line_higher: 112,
+        threshold_db: -4.86,
+    },
+    AbsThrEntry {
+        line_lower: 113,
+        line_higher: 116,
+        threshold_db: -4.63,
+    },
+    AbsThrEntry {
+        line_lower: 117,
+        line_higher: 120,
+        threshold_db: -4.29,
+    },
+    AbsThrEntry {
+        line_lower: 121,
+        line_higher: 124,
+        threshold_db: -3.87,
+    },
+    AbsThrEntry {
+        line_lower: 125,
+        line_higher: 128,
+        threshold_db: -3.39,
+    },
+    AbsThrEntry {
+        line_lower: 129,
+        line_higher: 132,
+        threshold_db: -2.86,
+    },
+    AbsThrEntry {
+        line_lower: 133,
+        line_higher: 136,
+        threshold_db: -2.31,
+    },
+    AbsThrEntry {
+        line_lower: 137,
+        line_higher: 140,
+        threshold_db: -1.77,
+    },
+    AbsThrEntry {
+        line_lower: 141,
+        line_higher: 144,
+        threshold_db: -1.24,
+    },
+    AbsThrEntry {
+        line_lower: 145,
+        line_higher: 148,
+        threshold_db: -0.74,
+    },
+    AbsThrEntry {
+        line_lower: 149,
+        line_higher: 152,
+        threshold_db: -0.29,
+    },
+    AbsThrEntry {
+        line_lower: 153,
+        line_higher: 156,
+        threshold_db: 0.12,
+    },
+    AbsThrEntry {
+        line_lower: 157,
+        line_higher: 160,
+        threshold_db: 0.48,
+    },
+    AbsThrEntry {
+        line_lower: 161,
+        line_higher: 164,
+        threshold_db: 0.79,
+    },
+    AbsThrEntry {
+        line_lower: 165,
+        line_higher: 168,
+        threshold_db: 1.06,
+    },
+    AbsThrEntry {
+        line_lower: 169,
+        line_higher: 172,
+        threshold_db: 1.29,
+    },
+    AbsThrEntry {
+        line_lower: 173,
+        line_higher: 176,
+        threshold_db: 1.49,
+    },
+    AbsThrEntry {
+        line_lower: 177,
+        line_higher: 180,
+        threshold_db: 1.66,
+    },
+    AbsThrEntry {
+        line_lower: 181,
+        line_higher: 184,
+        threshold_db: 1.81,
+    },
+    AbsThrEntry {
+        line_lower: 185,
+        line_higher: 188,
+        threshold_db: 1.95,
+    },
+    AbsThrEntry {
+        line_lower: 189,
+        line_higher: 192,
+        threshold_db: 2.08,
+    },
+    AbsThrEntry {
+        line_lower: 193,
+        line_higher: 200,
+        threshold_db: 2.33,
+    },
+    AbsThrEntry {
+        line_lower: 201,
+        line_higher: 208,
+        threshold_db: 2.59,
+    },
+    AbsThrEntry {
+        line_lower: 209,
+        line_higher: 216,
+        threshold_db: 2.86,
+    },
+    AbsThrEntry {
+        line_lower: 217,
+        line_higher: 224,
+        threshold_db: 3.17,
+    },
+    AbsThrEntry {
+        line_lower: 225,
+        line_higher: 232,
+        threshold_db: 3.51,
+    },
+    AbsThrEntry {
+        line_lower: 233,
+        line_higher: 240,
+        threshold_db: 3.89,
+    },
+    AbsThrEntry {
+        line_lower: 241,
+        line_higher: 248,
+        threshold_db: 4.31,
+    },
+    AbsThrEntry {
+        line_lower: 249,
+        line_higher: 256,
+        threshold_db: 4.79,
+    },
+    AbsThrEntry {
+        line_lower: 257,
+        line_higher: 264,
+        threshold_db: 5.31,
+    },
+    AbsThrEntry {
+        line_lower: 265,
+        line_higher: 272,
+        threshold_db: 5.88,
+    },
+    AbsThrEntry {
+        line_lower: 273,
+        line_higher: 280,
+        threshold_db: 6.50,
+    },
+    AbsThrEntry {
+        line_lower: 281,
+        line_higher: 288,
+        threshold_db: 7.19,
+    },
+    AbsThrEntry {
+        line_lower: 289,
+        line_higher: 296,
+        threshold_db: 7.93,
+    },
+    AbsThrEntry {
+        line_lower: 297,
+        line_higher: 304,
+        threshold_db: 8.75,
+    },
+    AbsThrEntry {
+        line_lower: 305,
+        line_higher: 312,
+        threshold_db: 9.63,
+    },
+    AbsThrEntry {
+        line_lower: 313,
+        line_higher: 320,
+        threshold_db: 10.58,
+    },
+    AbsThrEntry {
+        line_lower: 321,
+        line_higher: 328,
+        threshold_db: 11.60,
+    },
+    AbsThrEntry {
+        line_lower: 329,
+        line_higher: 336,
+        threshold_db: 12.71,
+    },
+    AbsThrEntry {
+        line_lower: 337,
+        line_higher: 344,
+        threshold_db: 13.90,
+    },
+    AbsThrEntry {
+        line_lower: 345,
+        line_higher: 352,
+        threshold_db: 15.18,
+    },
+    AbsThrEntry {
+        line_lower: 353,
+        line_higher: 360,
+        threshold_db: 16.54,
+    },
+    AbsThrEntry {
+        line_lower: 361,
+        line_higher: 368,
+        threshold_db: 18.01,
+    },
+    AbsThrEntry {
+        line_lower: 369,
+        line_higher: 376,
+        threshold_db: 19.57,
+    },
+    AbsThrEntry {
+        line_lower: 377,
+        line_higher: 384,
+        threshold_db: 21.23,
+    },
+    AbsThrEntry {
+        line_lower: 385,
+        line_higher: 392,
+        threshold_db: 23.01,
+    },
+    AbsThrEntry {
+        line_lower: 393,
+        line_higher: 400,
+        threshold_db: 24.90,
+    },
+    AbsThrEntry {
+        line_lower: 401,
+        line_higher: 408,
+        threshold_db: 26.90,
+    },
+    AbsThrEntry {
+        line_lower: 409,
+        line_higher: 416,
+        threshold_db: 29.03,
+    },
+    AbsThrEntry {
+        line_lower: 417,
+        line_higher: 424,
+        threshold_db: 31.28,
+    },
+    AbsThrEntry {
+        line_lower: 425,
+        line_higher: 432,
+        threshold_db: 33.67,
+    },
+    AbsThrEntry {
+        line_lower: 433,
+        line_higher: 440,
+        threshold_db: 36.19,
+    },
+    AbsThrEntry {
+        line_lower: 441,
+        line_higher: 448,
+        threshold_db: 38.86,
+    },
+    AbsThrEntry {
+        line_lower: 449,
+        line_higher: 456,
+        threshold_db: 41.67,
+    },
+    AbsThrEntry {
+        line_lower: 457,
+        line_higher: 464,
+        threshold_db: 44.63,
+    },
+    AbsThrEntry {
+        line_lower: 465,
+        line_higher: 472,
+        threshold_db: 47.76,
+    },
+    AbsThrEntry {
+        line_lower: 473,
+        line_higher: 480,
+        threshold_db: 51.03,
+    },
+];
+
+/// Annex D Table **D.4b** — Model 2 absolute threshold table, Fs = 44,1 kHz.
+///
+/// 130 rows; the FFT-line ranges run 1…464 (the topmost row covers lines
+/// 457–464). Source: the staged CSV
+/// `docs/audio/mp3/annex-d-table-D4b-absolute-threshold-44k1Hz.csv`
+/// (text transcription of ISO/IEC 11172-3:1993 Annex D Table D.4b, PDF
+/// printed page 137 / PDF p.143), cross-checked against the page render
+/// `docs/audio/mp3/annex-d-renders/Table-D.4b-absolute-threshold-44k1Hz-p137.png`.
+///
+/// The `threshold_db` column matches the Layer II D.1e threshold-in-quiet
+/// sequence through i ≈ 103, then diverges: a run of cells print `0.01` dB
+/// **lower** than their D.1e twins, and the saturation ceiling differs —
+/// D.4b caps at `69.13` dB (the top of the band, lines ≈ 369–464) where
+/// D.1e caps at `68.00` dB. The values below are the as-printed **D.4b**
+/// figures, not the D.1e twins; this is a documented ISO last-digit /
+/// ceiling print divergence.
+pub static TABLE_D_4B_ABSTHR_LAYER2_44K1: [AbsThrEntry; 130] = [
+    AbsThrEntry {
+        line_lower: 1,
+        line_higher: 1,
+        threshold_db: 45.05,
+    },
+    AbsThrEntry {
+        line_lower: 2,
+        line_higher: 2,
+        threshold_db: 25.87,
+    },
+    AbsThrEntry {
+        line_lower: 3,
+        line_higher: 3,
+        threshold_db: 18.70,
+    },
+    AbsThrEntry {
+        line_lower: 4,
+        line_higher: 4,
+        threshold_db: 14.85,
+    },
+    AbsThrEntry {
+        line_lower: 5,
+        line_higher: 5,
+        threshold_db: 12.41,
+    },
+    AbsThrEntry {
+        line_lower: 6,
+        line_higher: 6,
+        threshold_db: 10.72,
+    },
+    AbsThrEntry {
+        line_lower: 7,
+        line_higher: 7,
+        threshold_db: 9.47,
+    },
+    AbsThrEntry {
+        line_lower: 8,
+        line_higher: 8,
+        threshold_db: 8.50,
+    },
+    AbsThrEntry {
+        line_lower: 9,
+        line_higher: 9,
+        threshold_db: 7.73,
+    },
+    AbsThrEntry {
+        line_lower: 10,
+        line_higher: 10,
+        threshold_db: 7.10,
+    },
+    AbsThrEntry {
+        line_lower: 11,
+        line_higher: 11,
+        threshold_db: 6.56,
+    },
+    AbsThrEntry {
+        line_lower: 12,
+        line_higher: 12,
+        threshold_db: 6.11,
+    },
+    AbsThrEntry {
+        line_lower: 13,
+        line_higher: 13,
+        threshold_db: 5.72,
+    },
+    AbsThrEntry {
+        line_lower: 14,
+        line_higher: 14,
+        threshold_db: 5.37,
+    },
+    AbsThrEntry {
+        line_lower: 15,
+        line_higher: 15,
+        threshold_db: 5.07,
+    },
+    AbsThrEntry {
+        line_lower: 16,
+        line_higher: 16,
+        threshold_db: 4.79,
+    },
+    AbsThrEntry {
+        line_lower: 17,
+        line_higher: 17,
+        threshold_db: 4.55,
+    },
+    AbsThrEntry {
+        line_lower: 18,
+        line_higher: 18,
+        threshold_db: 4.32,
+    },
+    AbsThrEntry {
+        line_lower: 19,
+        line_higher: 19,
+        threshold_db: 4.11,
+    },
+    AbsThrEntry {
+        line_lower: 20,
+        line_higher: 20,
+        threshold_db: 3.92,
+    },
+    AbsThrEntry {
+        line_lower: 21,
+        line_higher: 21,
+        threshold_db: 3.74,
+    },
+    AbsThrEntry {
+        line_lower: 22,
+        line_higher: 22,
+        threshold_db: 3.57,
+    },
+    AbsThrEntry {
+        line_lower: 23,
+        line_higher: 23,
+        threshold_db: 3.40,
+    },
+    AbsThrEntry {
+        line_lower: 24,
+        line_higher: 24,
+        threshold_db: 3.25,
+    },
+    AbsThrEntry {
+        line_lower: 25,
+        line_higher: 25,
+        threshold_db: 3.10,
+    },
+    AbsThrEntry {
+        line_lower: 26,
+        line_higher: 26,
+        threshold_db: 2.95,
+    },
+    AbsThrEntry {
+        line_lower: 27,
+        line_higher: 27,
+        threshold_db: 2.81,
+    },
+    AbsThrEntry {
+        line_lower: 28,
+        line_higher: 28,
+        threshold_db: 2.67,
+    },
+    AbsThrEntry {
+        line_lower: 29,
+        line_higher: 29,
+        threshold_db: 2.53,
+    },
+    AbsThrEntry {
+        line_lower: 30,
+        line_higher: 30,
+        threshold_db: 2.39,
+    },
+    AbsThrEntry {
+        line_lower: 31,
+        line_higher: 31,
+        threshold_db: 2.25,
+    },
+    AbsThrEntry {
+        line_lower: 32,
+        line_higher: 32,
+        threshold_db: 2.11,
+    },
+    AbsThrEntry {
+        line_lower: 33,
+        line_higher: 33,
+        threshold_db: 1.97,
+    },
+    AbsThrEntry {
+        line_lower: 34,
+        line_higher: 34,
+        threshold_db: 1.83,
+    },
+    AbsThrEntry {
+        line_lower: 35,
+        line_higher: 35,
+        threshold_db: 1.68,
+    },
+    AbsThrEntry {
+        line_lower: 36,
+        line_higher: 36,
+        threshold_db: 1.53,
+    },
+    AbsThrEntry {
+        line_lower: 37,
+        line_higher: 37,
+        threshold_db: 1.38,
+    },
+    AbsThrEntry {
+        line_lower: 38,
+        line_higher: 38,
+        threshold_db: 1.23,
+    },
+    AbsThrEntry {
+        line_lower: 39,
+        line_higher: 39,
+        threshold_db: 1.07,
+    },
+    AbsThrEntry {
+        line_lower: 40,
+        line_higher: 40,
+        threshold_db: 0.90,
+    },
+    AbsThrEntry {
+        line_lower: 41,
+        line_higher: 41,
+        threshold_db: 0.74,
+    },
+    AbsThrEntry {
+        line_lower: 42,
+        line_higher: 42,
+        threshold_db: 0.56,
+    },
+    AbsThrEntry {
+        line_lower: 43,
+        line_higher: 43,
+        threshold_db: 0.39,
+    },
+    AbsThrEntry {
+        line_lower: 44,
+        line_higher: 44,
+        threshold_db: 0.21,
+    },
+    AbsThrEntry {
+        line_lower: 45,
+        line_higher: 45,
+        threshold_db: 0.02,
+    },
+    AbsThrEntry {
+        line_lower: 46,
+        line_higher: 46,
+        threshold_db: -0.17,
+    },
+    AbsThrEntry {
+        line_lower: 47,
+        line_higher: 47,
+        threshold_db: -0.36,
+    },
+    AbsThrEntry {
+        line_lower: 48,
+        line_higher: 48,
+        threshold_db: -0.56,
+    },
+    AbsThrEntry {
+        line_lower: 49,
+        line_higher: 50,
+        threshold_db: -0.96,
+    },
+    AbsThrEntry {
+        line_lower: 51,
+        line_higher: 52,
+        threshold_db: -1.38,
+    },
+    AbsThrEntry {
+        line_lower: 53,
+        line_higher: 54,
+        threshold_db: -1.79,
+    },
+    AbsThrEntry {
+        line_lower: 55,
+        line_higher: 56,
+        threshold_db: -2.21,
+    },
+    AbsThrEntry {
+        line_lower: 57,
+        line_higher: 58,
+        threshold_db: -2.63,
+    },
+    AbsThrEntry {
+        line_lower: 59,
+        line_higher: 60,
+        threshold_db: -3.03,
+    },
+    AbsThrEntry {
+        line_lower: 61,
+        line_higher: 62,
+        threshold_db: -3.41,
+    },
+    AbsThrEntry {
+        line_lower: 63,
+        line_higher: 64,
+        threshold_db: -3.77,
+    },
+    AbsThrEntry {
+        line_lower: 65,
+        line_higher: 66,
+        threshold_db: -4.09,
+    },
+    AbsThrEntry {
+        line_lower: 67,
+        line_higher: 68,
+        threshold_db: -4.37,
+    },
+    AbsThrEntry {
+        line_lower: 69,
+        line_higher: 70,
+        threshold_db: -4.60,
+    },
+    AbsThrEntry {
+        line_lower: 71,
+        line_higher: 72,
+        threshold_db: -4.78,
+    },
+    AbsThrEntry {
+        line_lower: 73,
+        line_higher: 74,
+        threshold_db: -4.91,
+    },
+    AbsThrEntry {
+        line_lower: 75,
+        line_higher: 76,
+        threshold_db: -4.97,
+    },
+    AbsThrEntry {
+        line_lower: 77,
+        line_higher: 78,
+        threshold_db: -4.98,
+    },
+    AbsThrEntry {
+        line_lower: 79,
+        line_higher: 80,
+        threshold_db: -4.92,
+    },
+    AbsThrEntry {
+        line_lower: 81,
+        line_higher: 82,
+        threshold_db: -4.81,
+    },
+    AbsThrEntry {
+        line_lower: 83,
+        line_higher: 84,
+        threshold_db: -4.65,
+    },
+    AbsThrEntry {
+        line_lower: 85,
+        line_higher: 86,
+        threshold_db: -4.43,
+    },
+    AbsThrEntry {
+        line_lower: 87,
+        line_higher: 88,
+        threshold_db: -4.17,
+    },
+    AbsThrEntry {
+        line_lower: 89,
+        line_higher: 90,
+        threshold_db: -3.87,
+    },
+    AbsThrEntry {
+        line_lower: 91,
+        line_higher: 92,
+        threshold_db: -3.54,
+    },
+    AbsThrEntry {
+        line_lower: 93,
+        line_higher: 94,
+        threshold_db: -3.19,
+    },
+    AbsThrEntry {
+        line_lower: 95,
+        line_higher: 96,
+        threshold_db: -2.82,
+    },
+    AbsThrEntry {
+        line_lower: 97,
+        line_higher: 100,
+        threshold_db: -2.06,
+    },
+    AbsThrEntry {
+        line_lower: 101,
+        line_higher: 104,
+        threshold_db: -1.32,
+    },
+    AbsThrEntry {
+        line_lower: 105,
+        line_higher: 108,
+        threshold_db: -0.64,
+    },
+    AbsThrEntry {
+        line_lower: 109,
+        line_higher: 112,
+        threshold_db: -0.04,
+    },
+    AbsThrEntry {
+        line_lower: 113,
+        line_higher: 116,
+        threshold_db: 0.47,
+    },
+    AbsThrEntry {
+        line_lower: 117,
+        line_higher: 120,
+        threshold_db: 0.89,
+    },
+    AbsThrEntry {
+        line_lower: 121,
+        line_higher: 124,
+        threshold_db: 1.23,
+    },
+    AbsThrEntry {
+        line_lower: 125,
+        line_higher: 128,
+        threshold_db: 1.51,
+    },
+    AbsThrEntry {
+        line_lower: 129,
+        line_higher: 132,
+        threshold_db: 1.74,
+    },
+    AbsThrEntry {
+        line_lower: 133,
+        line_higher: 136,
+        threshold_db: 1.93,
+    },
+    AbsThrEntry {
+        line_lower: 137,
+        line_higher: 140,
+        threshold_db: 2.11,
+    },
+    AbsThrEntry {
+        line_lower: 141,
+        line_higher: 144,
+        threshold_db: 2.28,
+    },
+    AbsThrEntry {
+        line_lower: 145,
+        line_higher: 148,
+        threshold_db: 2.46,
+    },
+    AbsThrEntry {
+        line_lower: 149,
+        line_higher: 152,
+        threshold_db: 2.63,
+    },
+    AbsThrEntry {
+        line_lower: 153,
+        line_higher: 156,
+        threshold_db: 2.82,
+    },
+    AbsThrEntry {
+        line_lower: 157,
+        line_higher: 160,
+        threshold_db: 3.03,
+    },
+    AbsThrEntry {
+        line_lower: 161,
+        line_higher: 164,
+        threshold_db: 3.25,
+    },
+    AbsThrEntry {
+        line_lower: 165,
+        line_higher: 168,
+        threshold_db: 3.49,
+    },
+    AbsThrEntry {
+        line_lower: 169,
+        line_higher: 172,
+        threshold_db: 3.74,
+    },
+    AbsThrEntry {
+        line_lower: 173,
+        line_higher: 176,
+        threshold_db: 4.02,
+    },
+    AbsThrEntry {
+        line_lower: 177,
+        line_higher: 180,
+        threshold_db: 4.32,
+    },
+    AbsThrEntry {
+        line_lower: 181,
+        line_higher: 184,
+        threshold_db: 4.64,
+    },
+    AbsThrEntry {
+        line_lower: 185,
+        line_higher: 188,
+        threshold_db: 4.98,
+    },
+    AbsThrEntry {
+        line_lower: 189,
+        line_higher: 192,
+        threshold_db: 5.35,
+    },
+    AbsThrEntry {
+        line_lower: 193,
+        line_higher: 200,
+        threshold_db: 6.15,
+    },
+    AbsThrEntry {
+        line_lower: 201,
+        line_higher: 208,
+        threshold_db: 7.07,
+    },
+    AbsThrEntry {
+        line_lower: 209,
+        line_higher: 216,
+        threshold_db: 8.10,
+    },
+    AbsThrEntry {
+        line_lower: 217,
+        line_higher: 224,
+        threshold_db: 9.25,
+    },
+    AbsThrEntry {
+        line_lower: 225,
+        line_higher: 232,
+        threshold_db: 10.54,
+    },
+    AbsThrEntry {
+        line_lower: 233,
+        line_higher: 240,
+        threshold_db: 11.97,
+    },
+    AbsThrEntry {
+        line_lower: 241,
+        line_higher: 248,
+        threshold_db: 13.56,
+    },
+    AbsThrEntry {
+        line_lower: 249,
+        line_higher: 256,
+        threshold_db: 15.30,
+    },
+    AbsThrEntry {
+        line_lower: 257,
+        line_higher: 264,
+        threshold_db: 17.23,
+    },
+    AbsThrEntry {
+        line_lower: 265,
+        line_higher: 272,
+        threshold_db: 19.33,
+    },
+    AbsThrEntry {
+        line_lower: 273,
+        line_higher: 280,
+        threshold_db: 21.64,
+    },
+    AbsThrEntry {
+        line_lower: 281,
+        line_higher: 288,
+        threshold_db: 24.15,
+    },
+    AbsThrEntry {
+        line_lower: 289,
+        line_higher: 296,
+        threshold_db: 26.88,
+    },
+    AbsThrEntry {
+        line_lower: 297,
+        line_higher: 304,
+        threshold_db: 29.84,
+    },
+    AbsThrEntry {
+        line_lower: 305,
+        line_higher: 312,
+        threshold_db: 33.04,
+    },
+    AbsThrEntry {
+        line_lower: 313,
+        line_higher: 320,
+        threshold_db: 36.51,
+    },
+    AbsThrEntry {
+        line_lower: 321,
+        line_higher: 328,
+        threshold_db: 40.24,
+    },
+    AbsThrEntry {
+        line_lower: 329,
+        line_higher: 336,
+        threshold_db: 44.26,
+    },
+    AbsThrEntry {
+        line_lower: 337,
+        line_higher: 344,
+        threshold_db: 48.58,
+    },
+    AbsThrEntry {
+        line_lower: 345,
+        line_higher: 352,
+        threshold_db: 53.21,
+    },
+    AbsThrEntry {
+        line_lower: 353,
+        line_higher: 360,
+        threshold_db: 58.17,
+    },
+    AbsThrEntry {
+        line_lower: 361,
+        line_higher: 368,
+        threshold_db: 63.48,
+    },
+    AbsThrEntry {
+        line_lower: 369,
+        line_higher: 376,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 377,
+        line_higher: 384,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 385,
+        line_higher: 392,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 393,
+        line_higher: 400,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 401,
+        line_higher: 408,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 409,
+        line_higher: 416,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 417,
+        line_higher: 424,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 425,
+        line_higher: 432,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 433,
+        line_higher: 440,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 441,
+        line_higher: 448,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 449,
+        line_higher: 456,
+        threshold_db: 69.13,
+    },
+    AbsThrEntry {
+        line_lower: 457,
+        line_higher: 464,
+        threshold_db: 69.13,
+    },
+];
+
+/// Annex D Table **D.4c** — Model 2 absolute threshold table, Fs = 48 kHz.
+///
+/// 126 rows; the FFT-line ranges run 1…432 (the topmost row covers lines
+/// 425–432). Source: the staged CSV
+/// `docs/audio/mp3/annex-d-table-D4c-absolute-threshold-48kHz.csv`
+/// (text transcription of ISO/IEC 11172-3:1993 Annex D Table D.4c, PDF
+/// printed page 138 / PDF p.144), cross-checked against the page render
+/// `docs/audio/mp3/annex-d-renders/Table-D.4c-absolute-threshold-48kHz-p138.png`.
+///
+/// The `threshold_db` column matches the Layer II D.1f threshold-in-quiet
+/// sequence entry-for-entry, including the `68.00` dB ceiling at the top
+/// of the band (lines ≈ 333–432).
+pub static TABLE_D_4C_ABSTHR_LAYER2_48: [AbsThrEntry; 126] = [
+    AbsThrEntry {
+        line_lower: 1,
+        line_higher: 1,
+        threshold_db: 42.10,
+    },
+    AbsThrEntry {
+        line_lower: 2,
+        line_higher: 2,
+        threshold_db: 24.17,
+    },
+    AbsThrEntry {
+        line_lower: 3,
+        line_higher: 3,
+        threshold_db: 17.47,
+    },
+    AbsThrEntry {
+        line_lower: 4,
+        line_higher: 4,
+        threshold_db: 13.87,
+    },
+    AbsThrEntry {
+        line_lower: 5,
+        line_higher: 5,
+        threshold_db: 11.60,
+    },
+    AbsThrEntry {
+        line_lower: 6,
+        line_higher: 6,
+        threshold_db: 10.01,
+    },
+    AbsThrEntry {
+        line_lower: 7,
+        line_higher: 7,
+        threshold_db: 8.84,
+    },
+    AbsThrEntry {
+        line_lower: 8,
+        line_higher: 8,
+        threshold_db: 7.94,
+    },
+    AbsThrEntry {
+        line_lower: 9,
+        line_higher: 9,
+        threshold_db: 7.22,
+    },
+    AbsThrEntry {
+        line_lower: 10,
+        line_higher: 10,
+        threshold_db: 6.62,
+    },
+    AbsThrEntry {
+        line_lower: 11,
+        line_higher: 11,
+        threshold_db: 6.12,
+    },
+    AbsThrEntry {
+        line_lower: 12,
+        line_higher: 12,
+        threshold_db: 5.70,
+    },
+    AbsThrEntry {
+        line_lower: 13,
+        line_higher: 13,
+        threshold_db: 5.33,
+    },
+    AbsThrEntry {
+        line_lower: 14,
+        line_higher: 14,
+        threshold_db: 5.00,
+    },
+    AbsThrEntry {
+        line_lower: 15,
+        line_higher: 15,
+        threshold_db: 4.71,
+    },
+    AbsThrEntry {
+        line_lower: 16,
+        line_higher: 16,
+        threshold_db: 4.45,
+    },
+    AbsThrEntry {
+        line_lower: 17,
+        line_higher: 17,
+        threshold_db: 4.21,
+    },
+    AbsThrEntry {
+        line_lower: 18,
+        line_higher: 18,
+        threshold_db: 4.00,
+    },
+    AbsThrEntry {
+        line_lower: 19,
+        line_higher: 19,
+        threshold_db: 3.79,
+    },
+    AbsThrEntry {
+        line_lower: 20,
+        line_higher: 20,
+        threshold_db: 3.61,
+    },
+    AbsThrEntry {
+        line_lower: 21,
+        line_higher: 21,
+        threshold_db: 3.43,
+    },
+    AbsThrEntry {
+        line_lower: 22,
+        line_higher: 22,
+        threshold_db: 3.26,
+    },
+    AbsThrEntry {
+        line_lower: 23,
+        line_higher: 23,
+        threshold_db: 3.09,
+    },
+    AbsThrEntry {
+        line_lower: 24,
+        line_higher: 24,
+        threshold_db: 2.93,
+    },
+    AbsThrEntry {
+        line_lower: 25,
+        line_higher: 25,
+        threshold_db: 2.78,
+    },
+    AbsThrEntry {
+        line_lower: 26,
+        line_higher: 26,
+        threshold_db: 2.63,
+    },
+    AbsThrEntry {
+        line_lower: 27,
+        line_higher: 27,
+        threshold_db: 2.47,
+    },
+    AbsThrEntry {
+        line_lower: 28,
+        line_higher: 28,
+        threshold_db: 2.32,
+    },
+    AbsThrEntry {
+        line_lower: 29,
+        line_higher: 29,
+        threshold_db: 2.17,
+    },
+    AbsThrEntry {
+        line_lower: 30,
+        line_higher: 30,
+        threshold_db: 2.02,
+    },
+    AbsThrEntry {
+        line_lower: 31,
+        line_higher: 31,
+        threshold_db: 1.86,
+    },
+    AbsThrEntry {
+        line_lower: 32,
+        line_higher: 32,
+        threshold_db: 1.71,
+    },
+    AbsThrEntry {
+        line_lower: 33,
+        line_higher: 33,
+        threshold_db: 1.55,
+    },
+    AbsThrEntry {
+        line_lower: 34,
+        line_higher: 34,
+        threshold_db: 1.38,
+    },
+    AbsThrEntry {
+        line_lower: 35,
+        line_higher: 35,
+        threshold_db: 1.21,
+    },
+    AbsThrEntry {
+        line_lower: 36,
+        line_higher: 36,
+        threshold_db: 1.04,
+    },
+    AbsThrEntry {
+        line_lower: 37,
+        line_higher: 37,
+        threshold_db: 0.86,
+    },
+    AbsThrEntry {
+        line_lower: 38,
+        line_higher: 38,
+        threshold_db: 0.67,
+    },
+    AbsThrEntry {
+        line_lower: 39,
+        line_higher: 39,
+        threshold_db: 0.49,
+    },
+    AbsThrEntry {
+        line_lower: 40,
+        line_higher: 40,
+        threshold_db: 0.29,
+    },
+    AbsThrEntry {
+        line_lower: 41,
+        line_higher: 41,
+        threshold_db: 0.09,
+    },
+    AbsThrEntry {
+        line_lower: 42,
+        line_higher: 42,
+        threshold_db: -0.11,
+    },
+    AbsThrEntry {
+        line_lower: 43,
+        line_higher: 43,
+        threshold_db: -0.32,
+    },
+    AbsThrEntry {
+        line_lower: 44,
+        line_higher: 44,
+        threshold_db: -0.54,
+    },
+    AbsThrEntry {
+        line_lower: 45,
+        line_higher: 45,
+        threshold_db: -0.75,
+    },
+    AbsThrEntry {
+        line_lower: 46,
+        line_higher: 46,
+        threshold_db: -0.97,
+    },
+    AbsThrEntry {
+        line_lower: 47,
+        line_higher: 47,
+        threshold_db: -1.20,
+    },
+    AbsThrEntry {
+        line_lower: 48,
+        line_higher: 48,
+        threshold_db: -1.43,
+    },
+    AbsThrEntry {
+        line_lower: 49,
+        line_higher: 50,
+        threshold_db: -1.88,
+    },
+    AbsThrEntry {
+        line_lower: 51,
+        line_higher: 52,
+        threshold_db: -2.34,
+    },
+    AbsThrEntry {
+        line_lower: 53,
+        line_higher: 54,
+        threshold_db: -2.79,
+    },
+    AbsThrEntry {
+        line_lower: 55,
+        line_higher: 56,
+        threshold_db: -3.22,
+    },
+    AbsThrEntry {
+        line_lower: 57,
+        line_higher: 58,
+        threshold_db: -3.62,
+    },
+    AbsThrEntry {
+        line_lower: 59,
+        line_higher: 60,
+        threshold_db: -3.98,
+    },
+    AbsThrEntry {
+        line_lower: 61,
+        line_higher: 62,
+        threshold_db: -4.30,
+    },
+    AbsThrEntry {
+        line_lower: 63,
+        line_higher: 64,
+        threshold_db: -4.57,
+    },
+    AbsThrEntry {
+        line_lower: 65,
+        line_higher: 66,
+        threshold_db: -4.77,
+    },
+    AbsThrEntry {
+        line_lower: 67,
+        line_higher: 68,
+        threshold_db: -4.91,
+    },
+    AbsThrEntry {
+        line_lower: 69,
+        line_higher: 70,
+        threshold_db: -4.98,
+    },
+    AbsThrEntry {
+        line_lower: 71,
+        line_higher: 72,
+        threshold_db: -4.97,
+    },
+    AbsThrEntry {
+        line_lower: 73,
+        line_higher: 74,
+        threshold_db: -4.90,
+    },
+    AbsThrEntry {
+        line_lower: 75,
+        line_higher: 76,
+        threshold_db: -4.76,
+    },
+    AbsThrEntry {
+        line_lower: 77,
+        line_higher: 78,
+        threshold_db: -4.55,
+    },
+    AbsThrEntry {
+        line_lower: 79,
+        line_higher: 80,
+        threshold_db: -4.29,
+    },
+    AbsThrEntry {
+        line_lower: 81,
+        line_higher: 82,
+        threshold_db: -3.99,
+    },
+    AbsThrEntry {
+        line_lower: 83,
+        line_higher: 84,
+        threshold_db: -3.64,
+    },
+    AbsThrEntry {
+        line_lower: 85,
+        line_higher: 86,
+        threshold_db: -3.26,
+    },
+    AbsThrEntry {
+        line_lower: 87,
+        line_higher: 88,
+        threshold_db: -2.86,
+    },
+    AbsThrEntry {
+        line_lower: 89,
+        line_higher: 90,
+        threshold_db: -2.45,
+    },
+    AbsThrEntry {
+        line_lower: 91,
+        line_higher: 92,
+        threshold_db: -2.04,
+    },
+    AbsThrEntry {
+        line_lower: 93,
+        line_higher: 94,
+        threshold_db: -1.63,
+    },
+    AbsThrEntry {
+        line_lower: 95,
+        line_higher: 96,
+        threshold_db: -1.24,
+    },
+    AbsThrEntry {
+        line_lower: 97,
+        line_higher: 100,
+        threshold_db: -0.51,
+    },
+    AbsThrEntry {
+        line_lower: 101,
+        line_higher: 104,
+        threshold_db: 0.12,
+    },
+    AbsThrEntry {
+        line_lower: 105,
+        line_higher: 108,
+        threshold_db: 0.64,
+    },
+    AbsThrEntry {
+        line_lower: 109,
+        line_higher: 112,
+        threshold_db: 1.06,
+    },
+    AbsThrEntry {
+        line_lower: 113,
+        line_higher: 116,
+        threshold_db: 1.39,
+    },
+    AbsThrEntry {
+        line_lower: 117,
+        line_higher: 120,
+        threshold_db: 1.66,
+    },
+    AbsThrEntry {
+        line_lower: 121,
+        line_higher: 124,
+        threshold_db: 1.88,
+    },
+    AbsThrEntry {
+        line_lower: 125,
+        line_higher: 128,
+        threshold_db: 2.08,
+    },
+    AbsThrEntry {
+        line_lower: 129,
+        line_higher: 132,
+        threshold_db: 2.27,
+    },
+    AbsThrEntry {
+        line_lower: 133,
+        line_higher: 136,
+        threshold_db: 2.46,
+    },
+    AbsThrEntry {
+        line_lower: 137,
+        line_higher: 140,
+        threshold_db: 2.65,
+    },
+    AbsThrEntry {
+        line_lower: 141,
+        line_higher: 144,
+        threshold_db: 2.86,
+    },
+    AbsThrEntry {
+        line_lower: 145,
+        line_higher: 148,
+        threshold_db: 3.09,
+    },
+    AbsThrEntry {
+        line_lower: 149,
+        line_higher: 152,
+        threshold_db: 3.33,
+    },
+    AbsThrEntry {
+        line_lower: 153,
+        line_higher: 156,
+        threshold_db: 3.60,
+    },
+    AbsThrEntry {
+        line_lower: 157,
+        line_higher: 160,
+        threshold_db: 3.89,
+    },
+    AbsThrEntry {
+        line_lower: 161,
+        line_higher: 164,
+        threshold_db: 4.20,
+    },
+    AbsThrEntry {
+        line_lower: 165,
+        line_higher: 168,
+        threshold_db: 4.54,
+    },
+    AbsThrEntry {
+        line_lower: 169,
+        line_higher: 172,
+        threshold_db: 4.91,
+    },
+    AbsThrEntry {
+        line_lower: 173,
+        line_higher: 176,
+        threshold_db: 5.31,
+    },
+    AbsThrEntry {
+        line_lower: 177,
+        line_higher: 180,
+        threshold_db: 5.73,
+    },
+    AbsThrEntry {
+        line_lower: 181,
+        line_higher: 184,
+        threshold_db: 6.18,
+    },
+    AbsThrEntry {
+        line_lower: 185,
+        line_higher: 188,
+        threshold_db: 6.67,
+    },
+    AbsThrEntry {
+        line_lower: 189,
+        line_higher: 192,
+        threshold_db: 7.19,
+    },
+    AbsThrEntry {
+        line_lower: 193,
+        line_higher: 200,
+        threshold_db: 8.33,
+    },
+    AbsThrEntry {
+        line_lower: 201,
+        line_higher: 208,
+        threshold_db: 9.63,
+    },
+    AbsThrEntry {
+        line_lower: 209,
+        line_higher: 216,
+        threshold_db: 11.08,
+    },
+    AbsThrEntry {
+        line_lower: 217,
+        line_higher: 224,
+        threshold_db: 12.71,
+    },
+    AbsThrEntry {
+        line_lower: 225,
+        line_higher: 232,
+        threshold_db: 14.53,
+    },
+    AbsThrEntry {
+        line_lower: 233,
+        line_higher: 240,
+        threshold_db: 16.54,
+    },
+    AbsThrEntry {
+        line_lower: 241,
+        line_higher: 248,
+        threshold_db: 18.77,
+    },
+    AbsThrEntry {
+        line_lower: 249,
+        line_higher: 256,
+        threshold_db: 21.23,
+    },
+    AbsThrEntry {
+        line_lower: 257,
+        line_higher: 264,
+        threshold_db: 23.94,
+    },
+    AbsThrEntry {
+        line_lower: 265,
+        line_higher: 272,
+        threshold_db: 26.90,
+    },
+    AbsThrEntry {
+        line_lower: 273,
+        line_higher: 280,
+        threshold_db: 30.14,
+    },
+    AbsThrEntry {
+        line_lower: 281,
+        line_higher: 288,
+        threshold_db: 33.67,
+    },
+    AbsThrEntry {
+        line_lower: 289,
+        line_higher: 296,
+        threshold_db: 37.51,
+    },
+    AbsThrEntry {
+        line_lower: 297,
+        line_higher: 304,
+        threshold_db: 41.67,
+    },
+    AbsThrEntry {
+        line_lower: 305,
+        line_higher: 312,
+        threshold_db: 46.17,
+    },
+    AbsThrEntry {
+        line_lower: 313,
+        line_higher: 320,
+        threshold_db: 51.04,
+    },
+    AbsThrEntry {
+        line_lower: 321,
+        line_higher: 328,
+        threshold_db: 56.29,
+    },
+    AbsThrEntry {
+        line_lower: 329,
+        line_higher: 336,
+        threshold_db: 61.94,
+    },
+    AbsThrEntry {
+        line_lower: 337,
+        line_higher: 344,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 345,
+        line_higher: 352,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 353,
+        line_higher: 360,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 361,
+        line_higher: 368,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 369,
+        line_higher: 376,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 377,
+        line_higher: 384,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 385,
+        line_higher: 392,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 393,
+        line_higher: 400,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 401,
+        line_higher: 408,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 409,
+        line_higher: 416,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 417,
+        line_higher: 424,
+        threshold_db: 68.00,
+    },
+    AbsThrEntry {
+        line_lower: 425,
+        line_higher: 432,
+        threshold_db: 68.00,
+    },
+];
+
+/// Returns the Model-2 absolute-threshold table (Annex D Table D.4a /
+/// D.4b / D.4c) for the given sampling rate.
+///
+/// This is the per-rate dispatcher for the clause D.2.4 step-(l)
+/// absolute-threshold floor: [`absolute_threshold_db_per_line`] expands
+/// the chosen table into a per-FFT-line dB slice, and the caller converts
+/// that into the energy domain before handing it to
+/// [`include_absolute_threshold`].
+///
+/// The three Layer II sampling rates tabulate **132 / 130 / 126** entries
+/// respectively, the ranges topping out at FFT lines **480 / 464 / 432**
+/// (the audio band of interest at each rate; the remaining lines up to
+/// the Nyquist line 513 are above every tabulated range — see
+/// [`absolute_threshold_db_per_line`] for how those trailing lines are
+/// filled).
+#[must_use]
+pub fn abs_threshold_table_for_rate(rate: SamplingRate) -> &'static [AbsThrEntry] {
+    match rate {
+        SamplingRate::Fs32kHz => &TABLE_D_4A_ABSTHR_LAYER2_32,
+        SamplingRate::Fs44k1Hz => &TABLE_D_4B_ABSTHR_LAYER2_44K1,
+        SamplingRate::Fs48kHz => &TABLE_D_4C_ABSTHR_LAYER2_48,
+    }
+}
+
+/// Expands an Annex D Table D.4 absolute-threshold table into a
+/// per-FFT-line threshold-in-dB slice over the 1024-point-analysis-FFT
+/// working range (FFT lines `1 ..= line_count`, returned 0-based so
+/// `out[ω − 1]` is the threshold of FFT line `ω`).
+///
+/// Each table row `(line_lower ..= line_higher, threshold_db)` broadcasts
+/// its single `threshold_db` across every FFT line in its inclusive
+/// range — the spec shares one absolute-threshold value across a range of
+/// lines exactly as Table D.4 is printed. The output length is
+/// `line_count` (pass `513` to cover the full analysis FFT through the
+/// Nyquist line so the result lines up with
+/// [`line_energy_threshold`]'s per-line buffer).
+///
+/// **Trailing lines.** The D.4 tables top out below the Nyquist line
+/// (480 / 464 / 432 at 32 / 44,1 / 48 kHz). FFT lines above the last
+/// tabulated range have no spec-provided threshold; this function fills
+/// them by holding the **last tabulated `threshold_db`** (the top-of-band
+/// ceiling — `51.03` / `69.13` / `68.00` dB respectively). The held
+/// ceiling is the most conservative (highest) absolute threshold in each
+/// table, so the step-(l) `max(nb_ω, absthr_ω)` floor remains a valid
+/// audibility floor for those lines; the caller's energy-domain
+/// conversion applies uniformly.
+///
+/// The result is still in **dB** — the caller performs the
+/// dB→energy conversion (per the table's `0 dB = 96 dB below a ±32 760
+/// sine`) before calling [`include_absolute_threshold`]. An empty input
+/// table, or `line_count == 0`, yields an empty vector.
+#[must_use]
+pub fn absolute_threshold_db_per_line(table: &[AbsThrEntry], line_count: usize) -> Vec<f64> {
+    if table.is_empty() || line_count == 0 {
+        return Vec::new();
+    }
+    // Hold the top-of-band ceiling for any FFT line above the last
+    // tabulated range.
+    let ceiling = table[table.len() - 1].threshold_db;
+    let mut out = vec![ceiling; line_count];
+    for entry in table {
+        // 1-based inclusive [line_lower, line_higher] → 0-based buffer.
+        let lo = entry.line_lower as usize;
+        let hi = entry.line_higher as usize;
+        for omega in lo..=hi {
+            if omega >= 1 && omega <= line_count {
+                out[omega - 1] = entry.threshold_db;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2786,5 +4889,179 @@ mod tests {
         }
         let smr = signal_to_mask_ratio_db(20, &r2, &thr).unwrap();
         assert!(smr.is_finite());
+    }
+
+    // ---- Annex D Table D.4a / D.4b / D.4c absolute-threshold tables ----
+
+    #[test]
+    fn table_d4_row_counts_match_spec() {
+        // Entry counts from Annex D Tables D.4a / D.4b / D.4c
+        // (docs/audio/mp3/annex-d-table-D4{a,b,c}-*.csv).
+        assert_eq!(TABLE_D_4A_ABSTHR_LAYER2_32.len(), 132);
+        assert_eq!(TABLE_D_4B_ABSTHR_LAYER2_44K1.len(), 130);
+        assert_eq!(TABLE_D_4C_ABSTHR_LAYER2_48.len(), 126);
+    }
+
+    #[test]
+    fn table_d4_ranges_are_contiguous_and_one_based() {
+        // Each table tiles the FFT-line axis with no gaps:
+        // line_lower[0] == 1 and line_lower[k] == line_higher[k-1] + 1.
+        for table in [
+            &TABLE_D_4A_ABSTHR_LAYER2_32[..],
+            &TABLE_D_4B_ABSTHR_LAYER2_44K1[..],
+            &TABLE_D_4C_ABSTHR_LAYER2_48[..],
+        ] {
+            assert_eq!(table[0].line_lower, 1);
+            for w in table.windows(2) {
+                assert!(w[0].line_higher >= w[0].line_lower);
+                assert_eq!(w[1].line_lower, w[0].line_higher + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn table_d4_top_lines_match_spec() {
+        // Topmost tabulated FFT line per rate: 480 / 464 / 432.
+        assert_eq!(TABLE_D_4A_ABSTHR_LAYER2_32.last().unwrap().line_higher, 480);
+        assert_eq!(
+            TABLE_D_4B_ABSTHR_LAYER2_44K1.last().unwrap().line_higher,
+            464
+        );
+        assert_eq!(TABLE_D_4C_ABSTHR_LAYER2_48.last().unwrap().line_higher, 432);
+    }
+
+    #[test]
+    fn table_d4_low_lines_are_single_line_groups() {
+        // The low FFT lines each get their own one-line entry
+        // (line_lower == line_higher) in every table.
+        for table in [
+            &TABLE_D_4A_ABSTHR_LAYER2_32[..],
+            &TABLE_D_4B_ABSTHR_LAYER2_44K1[..],
+            &TABLE_D_4C_ABSTHR_LAYER2_48[..],
+        ] {
+            let first = table[0];
+            assert_eq!(first.line_lower, first.line_higher);
+            assert_eq!(first.line_count(), 1);
+        }
+    }
+
+    #[test]
+    fn table_d4a_spot_cells() {
+        // Verbatim head / tail cells from D.4a (32 kHz).
+        let head = TABLE_D_4A_ABSTHR_LAYER2_32[0];
+        assert_eq!(head.line_lower, 1);
+        assert_eq!(head.line_higher, 1);
+        assert!((head.threshold_db - 58.23).abs() < 1e-9);
+        let tail = *TABLE_D_4A_ABSTHR_LAYER2_32.last().unwrap();
+        assert_eq!((tail.line_lower, tail.line_higher), (473, 480));
+        // As-printed D.4a ceiling 51.03 dB (D.1d's twin prints 51.04).
+        assert!((tail.threshold_db - 51.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn table_d4b_uses_69_13_ceiling() {
+        // The D.4b (44,1 kHz) saturation ceiling is the surprising
+        // 69.13 dB (D.1e's twin caps at 68.00). The top run holds it.
+        let tail = *TABLE_D_4B_ABSTHR_LAYER2_44K1.last().unwrap();
+        assert_eq!((tail.line_lower, tail.line_higher), (457, 464));
+        assert!((tail.threshold_db - 69.13).abs() < 1e-9);
+        // First entry that reaches the ceiling covers lines 369-376.
+        let first_ceiling = TABLE_D_4B_ABSTHR_LAYER2_44K1
+            .iter()
+            .find(|e| (e.threshold_db - 69.13).abs() < 1e-9)
+            .unwrap();
+        assert_eq!(
+            (first_ceiling.line_lower, first_ceiling.line_higher),
+            (369, 376)
+        );
+    }
+
+    #[test]
+    fn table_d4c_uses_68_00_ceiling() {
+        // D.4c (48 kHz) matches D.1f including the 68.00 dB ceiling.
+        let tail = *TABLE_D_4C_ABSTHR_LAYER2_48.last().unwrap();
+        assert_eq!((tail.line_lower, tail.line_higher), (425, 432));
+        assert!((tail.threshold_db - 68.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn abs_threshold_dispatcher_returns_the_right_table() {
+        assert!(std::ptr::eq(
+            abs_threshold_table_for_rate(SamplingRate::Fs32kHz),
+            &TABLE_D_4A_ABSTHR_LAYER2_32[..]
+        ));
+        assert!(std::ptr::eq(
+            abs_threshold_table_for_rate(SamplingRate::Fs44k1Hz),
+            &TABLE_D_4B_ABSTHR_LAYER2_44K1[..]
+        ));
+        assert!(std::ptr::eq(
+            abs_threshold_table_for_rate(SamplingRate::Fs48kHz),
+            &TABLE_D_4C_ABSTHR_LAYER2_48[..]
+        ));
+    }
+
+    #[test]
+    fn absolute_threshold_per_line_broadcasts_ranges() {
+        // The single-line low entries map straight through; the wider
+        // top-of-band entries broadcast one value across every line.
+        let out = absolute_threshold_db_per_line(&TABLE_D_4A_ABSTHR_LAYER2_32, 513);
+        assert_eq!(out.len(), 513);
+        // FFT line 1 -> 58.23 dB (0-based index 0).
+        assert!((out[0] - 58.23).abs() < 1e-9);
+        // Lines 473..=480 all hold 51.03 dB.
+        for omega in 473..=480 {
+            assert!((out[omega - 1] - 51.03).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn absolute_threshold_per_line_holds_ceiling_above_last_range() {
+        // D.4a tops out at line 480; lines 481..=513 hold the last
+        // tabulated threshold (the 51.03 dB ceiling).
+        let out = absolute_threshold_db_per_line(&TABLE_D_4A_ABSTHR_LAYER2_32, 513);
+        for omega in 481..=513 {
+            assert!((out[omega - 1] - 51.03).abs() < 1e-9);
+        }
+        // 44,1 kHz holds 69.13 above line 464; 48 kHz holds 68.00 above 432.
+        let out_b = absolute_threshold_db_per_line(&TABLE_D_4B_ABSTHR_LAYER2_44K1, 513);
+        assert!((out_b[512] - 69.13).abs() < 1e-9);
+        let out_c = absolute_threshold_db_per_line(&TABLE_D_4C_ABSTHR_LAYER2_48, 513);
+        assert!((out_c[512] - 68.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn absolute_threshold_per_line_length_follows_caller() {
+        // line_count drives the output length; a short request truncates
+        // to the requested working range.
+        let out = absolute_threshold_db_per_line(&TABLE_D_4A_ABSTHR_LAYER2_32, 64);
+        assert_eq!(out.len(), 64);
+        assert!((out[0] - 58.23).abs() < 1e-9);
+    }
+
+    #[test]
+    fn absolute_threshold_per_line_safe_responses() {
+        // Empty table or zero line_count -> empty vector.
+        assert!(absolute_threshold_db_per_line(&[], 513).is_empty());
+        assert!(absolute_threshold_db_per_line(&TABLE_D_4A_ABSTHR_LAYER2_32, 0).is_empty());
+    }
+
+    #[test]
+    fn absolute_threshold_per_line_feeds_step_l_floor() {
+        // End-to-end: the expanded per-line dB table, converted into the
+        // energy domain, is a valid step-(l) absthr_omega for
+        // include_absolute_threshold (both 513-long, all finite).
+        let db = absolute_threshold_db_per_line(&TABLE_D_4C_ABSTHR_LAYER2_48, 513);
+        let absthr_energy: Vec<f64> = db.iter().map(|&d| 10.0_f64.powf(d / 10.0)).collect();
+        let table = &TABLE_D_3C_CALC_PARTITION_48KHZ;
+        let en = vec![1.0_f64; table.len()];
+        let cb = vec![0.5_f64; table.len()];
+        let nb_omega = line_energy_threshold(table, &en, &cb);
+        assert_eq!(nb_omega.len(), absthr_energy.len());
+        let thr = include_absolute_threshold(&nb_omega, &absthr_energy);
+        assert_eq!(thr.len(), 513);
+        assert!(thr.iter().all(|t| t.is_finite()));
+        for (t, a) in thr.iter().zip(&absthr_energy) {
+            assert!(*t >= *a - 1e-9);
+        }
     }
 }
