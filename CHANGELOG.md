@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2 Model-2 calculation-partition tables D.3b / D.3c (44,1 / 48 kHz)
+  + rate dispatcher** (`tables_model2`). The Annex D Table D.3b (57
+  partitions, 44,1 kHz) and Table D.3c (58 partitions, 48 kHz)
+  calculation-partition tables are transcribed verbatim from the staged
+  CSVs `docs/audio/mp3/annex-d-table-D3{b,c}-calc-partition-*.csv`
+  (`omega_low`/`omega_high`/`bval`/`minval`/`tmn` per partition), joining
+  the existing 32 kHz Table D.3a. New `calc_partition_table_for_rate`
+  dispatches the `&[CalcPartition]` table on the `SamplingRate` enum, so
+  the step-(f) spreading convolution and the step-(g)…(n) threshold loop
+  now run for **all three** Layer II sampling rates instead of 32 kHz
+  only. 7 new unit tests: partition counts (49/57/58), contiguity +
+  Nyquist coverage (lines tile 1..=513 exactly), non-decreasing `bval`,
+  the single-FFT-line low-partition runs (16 for D.3b, 17 for D.3c),
+  verbatim tail-cell spot checks, dispatcher pointer identity, and an
+  all-rates spreading-convolution smoke. Only the D.4 per-line
+  absolute-threshold tables remain un-transcribed.
 - **§D.2.4 Model-2 threshold-calculation loop, steps (g)…(n)**
   (`tables_model2`). The Model-2 chain now continues past the step-(f)
   spreading convolution to the signal-to-mask ratio. New primitives,

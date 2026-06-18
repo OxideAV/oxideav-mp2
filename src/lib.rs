@@ -287,10 +287,11 @@ pub use tables_d2::{
     TABLE_D_2E_LAYER_II_44K1HZ, TABLE_D_2F_LAYER_II_48KHZ,
 };
 pub use tables_model2::{
-    coder_partition_of_line, coder_partition_span, convolve_partition_spreading,
-    normalize_spread_energy, renormalize_unpredictability, rnorm_coefficient, spreading_function,
-    CalcPartition, CoderPartition, CODER_PARTITION_COUNT, TABLE_D_3A_CALC_PARTITION_32KHZ,
-    TABLE_D_5_CODER_PARTITION,
+    calc_partition_table_for_rate, coder_partition_of_line, coder_partition_span,
+    convolve_partition_spreading, normalize_spread_energy, renormalize_unpredictability,
+    rnorm_coefficient, spreading_function, CalcPartition, CoderPartition, CODER_PARTITION_COUNT,
+    TABLE_D_3A_CALC_PARTITION_32KHZ, TABLE_D_3B_CALC_PARTITION_44K1HZ,
+    TABLE_D_3C_CALC_PARTITION_48KHZ, TABLE_D_5_CODER_PARTITION,
 };
 pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 

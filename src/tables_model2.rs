@@ -24,8 +24,9 @@
 //! * `tmn` — the tone-masking-noise offset, dB.
 //!
 //! The 32 kHz table has **49 partitions** (`bmax`); the 44,1 kHz and
-//! 48 kHz tables (D.3b / D.3c) have 57 and 58 partitions respectively
-//! and are not yet transcribed here — see the followup note below.
+//! 48 kHz tables (D.3b / D.3c) have 57 and 58 partitions respectively.
+//! All three are transcribed below; [`calc_partition_table_for_rate`]
+//! dispatches on the [`SamplingRate`] enum.
 //!
 //! ## Spreading function (clause D.2.3)
 //!
@@ -95,17 +96,17 @@
 //!
 //! ## Followups
 //!
-//! Two pieces of per-rate Model-2 data remain un-transcribed into Rust,
-//! confining the end-to-end Model-2 chain to 32 kHz for now:
+//! The calculation-partition tables are now complete for all three
+//! Layer II sampling rates (D.3a/b/c). One piece of per-rate Model-2
+//! data remains un-transcribed into Rust:
 //!
-//! * The D.3b / D.3c calculation-partition tables (44,1 / 48 kHz,
-//!   57 / 58 partitions). Their CSVs are staged at
-//!   `docs/audio/mp3/annex-d-table-D3{b,c}-calc-partition-*.csv`.
 //! * The Table D.4a–c per-FFT-line absolute-threshold tables (the
 //!   `absthr_ω` of step l). Staged at
 //!   `docs/audio/mp3/annex-d-table-D4{a,b,c}-absolute-threshold-*.csv`;
 //!   [`include_absolute_threshold`] already accepts a caller-supplied
 //!   `absthr_ω` slice so the structural step is in place.
+
+use crate::tables_d2::SamplingRate;
 
 /// One row of an Annex D Table D.3 Model-2 *calculation partition
 /// table*.
@@ -486,6 +487,858 @@ pub const TABLE_D_3A_CALC_PARTITION_32KHZ: [CalcPartition; 49] = [
         tmn: 38.6,
     },
 ];
+
+/// Annex D Table **D.3b** — Model-2 calculation partition table,
+/// Fs = 44,1 kHz. 57 partitions (`bmax = 57`). The 44,1 kHz analysis
+/// has finer Bark resolution at low frequency, so the first 16
+/// partitions each cover a single FFT line, and the final partition
+/// reaches the Nyquist line `ωhigh = 513` of the 1024-point analysis
+/// FFT. Source: ISO/IEC 11172-3:1993 Annex D Table D.3b, transcribed
+/// from the staged CSV
+/// `docs/audio/mp3/annex-d-table-D3b-calc-partition-44k1Hz.csv`
+/// (itself extracted from the PDF page following Table D.3a; the
+/// markdown extract `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md`
+/// is the cross-checked secondary copy).
+pub const TABLE_D_3B_CALC_PARTITION_44K1HZ: [CalcPartition; 57] = [
+    CalcPartition {
+        omega_low: 1,
+        omega_high: 1,
+        bval: 0.00,
+        minval: 0.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 2,
+        omega_high: 2,
+        bval: 0.43,
+        minval: 0.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 3,
+        omega_high: 3,
+        bval: 0.86,
+        minval: 0.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 4,
+        omega_high: 4,
+        bval: 1.29,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 5,
+        omega_high: 5,
+        bval: 1.72,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 6,
+        omega_high: 6,
+        bval: 2.15,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 7,
+        omega_high: 7,
+        bval: 2.58,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 8,
+        omega_high: 8,
+        bval: 3.01,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 9,
+        omega_high: 9,
+        bval: 3.45,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 10,
+        omega_high: 10,
+        bval: 3.88,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 11,
+        omega_high: 11,
+        bval: 4.28,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 12,
+        omega_high: 12,
+        bval: 4.67,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 13,
+        omega_high: 13,
+        bval: 5.06,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 14,
+        omega_high: 14,
+        bval: 5.42,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 15,
+        omega_high: 15,
+        bval: 5.77,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 16,
+        omega_high: 16,
+        bval: 6.11,
+        minval: 17.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 17,
+        omega_high: 19,
+        bval: 6.73,
+        minval: 17.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 20,
+        omega_high: 22,
+        bval: 7.61,
+        minval: 15.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 23,
+        omega_high: 25,
+        bval: 8.44,
+        minval: 10.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 26,
+        omega_high: 28,
+        bval: 9.21,
+        minval: 7.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 29,
+        omega_high: 31,
+        bval: 9.88,
+        minval: 7.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 32,
+        omega_high: 34,
+        bval: 10.51,
+        minval: 4.4,
+        tmn: 25.0,
+    },
+    CalcPartition {
+        omega_low: 35,
+        omega_high: 37,
+        bval: 11.11,
+        minval: 4.5,
+        tmn: 25.6,
+    },
+    CalcPartition {
+        omega_low: 38,
+        omega_high: 40,
+        bval: 11.65,
+        minval: 4.5,
+        tmn: 26.2,
+    },
+    CalcPartition {
+        omega_low: 41,
+        omega_high: 44,
+        bval: 12.24,
+        minval: 4.5,
+        tmn: 26.7,
+    },
+    CalcPartition {
+        omega_low: 45,
+        omega_high: 48,
+        bval: 12.85,
+        minval: 4.5,
+        tmn: 27.4,
+    },
+    CalcPartition {
+        omega_low: 49,
+        omega_high: 52,
+        bval: 13.41,
+        minval: 4.5,
+        tmn: 27.9,
+    },
+    CalcPartition {
+        omega_low: 53,
+        omega_high: 56,
+        bval: 13.94,
+        minval: 4.5,
+        tmn: 28.4,
+    },
+    CalcPartition {
+        omega_low: 57,
+        omega_high: 60,
+        bval: 14.42,
+        minval: 4.5,
+        tmn: 28.9,
+    },
+    CalcPartition {
+        omega_low: 61,
+        omega_high: 64,
+        bval: 14.86,
+        minval: 4.5,
+        tmn: 29.4,
+    },
+    CalcPartition {
+        omega_low: 65,
+        omega_high: 69,
+        bval: 15.32,
+        minval: 4.5,
+        tmn: 29.8,
+    },
+    CalcPartition {
+        omega_low: 70,
+        omega_high: 74,
+        bval: 15.79,
+        minval: 4.5,
+        tmn: 30.3,
+    },
+    CalcPartition {
+        omega_low: 75,
+        omega_high: 80,
+        bval: 16.26,
+        minval: 4.5,
+        tmn: 30.8,
+    },
+    CalcPartition {
+        omega_low: 81,
+        omega_high: 86,
+        bval: 16.73,
+        minval: 4.5,
+        tmn: 31.2,
+    },
+    CalcPartition {
+        omega_low: 87,
+        omega_high: 93,
+        bval: 17.19,
+        minval: 4.5,
+        tmn: 31.7,
+    },
+    CalcPartition {
+        omega_low: 94,
+        omega_high: 100,
+        bval: 17.62,
+        minval: 4.5,
+        tmn: 32.1,
+    },
+    CalcPartition {
+        omega_low: 101,
+        omega_high: 108,
+        bval: 18.05,
+        minval: 4.5,
+        tmn: 32.5,
+    },
+    CalcPartition {
+        omega_low: 109,
+        omega_high: 116,
+        bval: 18.45,
+        minval: 4.5,
+        tmn: 32.9,
+    },
+    CalcPartition {
+        omega_low: 117,
+        omega_high: 124,
+        bval: 18.83,
+        minval: 4.5,
+        tmn: 33.3,
+    },
+    CalcPartition {
+        omega_low: 125,
+        omega_high: 134,
+        bval: 19.21,
+        minval: 4.5,
+        tmn: 33.7,
+    },
+    CalcPartition {
+        omega_low: 135,
+        omega_high: 144,
+        bval: 19.60,
+        minval: 4.5,
+        tmn: 34.1,
+    },
+    CalcPartition {
+        omega_low: 145,
+        omega_high: 155,
+        bval: 20.00,
+        minval: 4.5,
+        tmn: 34.5,
+    },
+    CalcPartition {
+        omega_low: 156,
+        omega_high: 166,
+        bval: 20.38,
+        minval: 4.5,
+        tmn: 34.9,
+    },
+    CalcPartition {
+        omega_low: 167,
+        omega_high: 177,
+        bval: 20.74,
+        minval: 4.5,
+        tmn: 35.2,
+    },
+    CalcPartition {
+        omega_low: 178,
+        omega_high: 192,
+        bval: 21.12,
+        minval: 4.5,
+        tmn: 35.6,
+    },
+    CalcPartition {
+        omega_low: 193,
+        omega_high: 207,
+        bval: 21.48,
+        minval: 4.5,
+        tmn: 36.0,
+    },
+    CalcPartition {
+        omega_low: 208,
+        omega_high: 222,
+        bval: 21.84,
+        minval: 4.5,
+        tmn: 36.3,
+    },
+    CalcPartition {
+        omega_low: 223,
+        omega_high: 243,
+        bval: 22.20,
+        minval: 4.5,
+        tmn: 36.7,
+    },
+    CalcPartition {
+        omega_low: 244,
+        omega_high: 264,
+        bval: 22.56,
+        minval: 4.5,
+        tmn: 37.1,
+    },
+    CalcPartition {
+        omega_low: 265,
+        omega_high: 286,
+        bval: 22.91,
+        minval: 4.5,
+        tmn: 37.4,
+    },
+    CalcPartition {
+        omega_low: 287,
+        omega_high: 314,
+        bval: 23.26,
+        minval: 4.5,
+        tmn: 37.8,
+    },
+    CalcPartition {
+        omega_low: 315,
+        omega_high: 342,
+        bval: 23.60,
+        minval: 4.5,
+        tmn: 38.1,
+    },
+    CalcPartition {
+        omega_low: 343,
+        omega_high: 371,
+        bval: 23.95,
+        minval: 4.5,
+        tmn: 38.4,
+    },
+    CalcPartition {
+        omega_low: 372,
+        omega_high: 401,
+        bval: 24.30,
+        minval: 4.5,
+        tmn: 38.8,
+    },
+    CalcPartition {
+        omega_low: 402,
+        omega_high: 431,
+        bval: 24.65,
+        minval: 4.5,
+        tmn: 39.1,
+    },
+    CalcPartition {
+        omega_low: 432,
+        omega_high: 469,
+        bval: 25.00,
+        minval: 4.5,
+        tmn: 39.5,
+    },
+    CalcPartition {
+        omega_low: 470,
+        omega_high: 513,
+        bval: 25.33,
+        minval: 3.5,
+        tmn: 39.8,
+    },
+];
+
+/// Annex D Table **D.3c** — Model-2 calculation partition table,
+/// Fs = 48 kHz. 58 partitions (`bmax = 58`). Like D.3b the first 17
+/// partitions cover single FFT lines; the final partition reaches the
+/// Nyquist line `ωhigh = 513`. Source: ISO/IEC 11172-3:1993 Annex D
+/// Table D.3c, transcribed from the staged CSV
+/// `docs/audio/mp3/annex-d-table-D3c-calc-partition-48kHz.csv`,
+/// cross-checked against
+/// `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md`.
+pub const TABLE_D_3C_CALC_PARTITION_48KHZ: [CalcPartition; 58] = [
+    CalcPartition {
+        omega_low: 1,
+        omega_high: 1,
+        bval: 0.00,
+        minval: 0.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 2,
+        omega_high: 2,
+        bval: 0.47,
+        minval: 0.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 3,
+        omega_high: 3,
+        bval: 0.94,
+        minval: 0.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 4,
+        omega_high: 4,
+        bval: 1.41,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 5,
+        omega_high: 5,
+        bval: 1.88,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 6,
+        omega_high: 6,
+        bval: 2.34,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 7,
+        omega_high: 7,
+        bval: 2.81,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 8,
+        omega_high: 8,
+        bval: 3.28,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 9,
+        omega_high: 9,
+        bval: 3.75,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 10,
+        omega_high: 10,
+        bval: 4.20,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 11,
+        omega_high: 11,
+        bval: 4.63,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 12,
+        omega_high: 12,
+        bval: 5.05,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 13,
+        omega_high: 13,
+        bval: 5.44,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 14,
+        omega_high: 14,
+        bval: 5.83,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 15,
+        omega_high: 15,
+        bval: 6.19,
+        minval: 20.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 16,
+        omega_high: 16,
+        bval: 6.52,
+        minval: 17.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 17,
+        omega_high: 17,
+        bval: 6.86,
+        minval: 17.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 18,
+        omega_high: 20,
+        bval: 7.49,
+        minval: 15.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 21,
+        omega_high: 23,
+        bval: 8.40,
+        minval: 10.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 24,
+        omega_high: 26,
+        bval: 9.24,
+        minval: 7.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 27,
+        omega_high: 29,
+        bval: 9.97,
+        minval: 7.0,
+        tmn: 24.5,
+    },
+    CalcPartition {
+        omega_low: 30,
+        omega_high: 32,
+        bval: 10.65,
+        minval: 4.4,
+        tmn: 25.1,
+    },
+    CalcPartition {
+        omega_low: 33,
+        omega_high: 35,
+        bval: 11.28,
+        minval: 4.5,
+        tmn: 25.8,
+    },
+    CalcPartition {
+        omega_low: 36,
+        omega_high: 38,
+        bval: 11.86,
+        minval: 4.5,
+        tmn: 26.4,
+    },
+    CalcPartition {
+        omega_low: 39,
+        omega_high: 41,
+        bval: 12.39,
+        minval: 4.5,
+        tmn: 26.9,
+    },
+    CalcPartition {
+        omega_low: 42,
+        omega_high: 45,
+        bval: 12.96,
+        minval: 4.5,
+        tmn: 27.5,
+    },
+    CalcPartition {
+        omega_low: 46,
+        omega_high: 49,
+        bval: 13.56,
+        minval: 4.5,
+        tmn: 28.1,
+    },
+    CalcPartition {
+        omega_low: 50,
+        omega_high: 53,
+        bval: 14.12,
+        minval: 4.5,
+        tmn: 28.6,
+    },
+    CalcPartition {
+        omega_low: 54,
+        omega_high: 57,
+        bval: 14.62,
+        minval: 4.5,
+        tmn: 29.1,
+    },
+    CalcPartition {
+        omega_low: 58,
+        omega_high: 62,
+        bval: 15.14,
+        minval: 4.5,
+        tmn: 29.6,
+    },
+    CalcPartition {
+        omega_low: 63,
+        omega_high: 67,
+        bval: 15.67,
+        minval: 4.5,
+        tmn: 30.2,
+    },
+    CalcPartition {
+        omega_low: 68,
+        omega_high: 72,
+        bval: 16.15,
+        minval: 4.5,
+        tmn: 30.7,
+    },
+    CalcPartition {
+        omega_low: 73,
+        omega_high: 77,
+        bval: 16.58,
+        minval: 4.5,
+        tmn: 31.1,
+    },
+    CalcPartition {
+        omega_low: 78,
+        omega_high: 83,
+        bval: 17.02,
+        minval: 4.5,
+        tmn: 31.5,
+    },
+    CalcPartition {
+        omega_low: 84,
+        omega_high: 89,
+        bval: 17.44,
+        minval: 4.5,
+        tmn: 31.9,
+    },
+    CalcPartition {
+        omega_low: 90,
+        omega_high: 95,
+        bval: 17.84,
+        minval: 4.5,
+        tmn: 32.3,
+    },
+    CalcPartition {
+        omega_low: 96,
+        omega_high: 103,
+        bval: 18.24,
+        minval: 4.5,
+        tmn: 32.7,
+    },
+    CalcPartition {
+        omega_low: 104,
+        omega_high: 111,
+        bval: 18.66,
+        minval: 4.5,
+        tmn: 33.2,
+    },
+    CalcPartition {
+        omega_low: 112,
+        omega_high: 120,
+        bval: 19.07,
+        minval: 4.5,
+        tmn: 33.6,
+    },
+    CalcPartition {
+        omega_low: 121,
+        omega_high: 129,
+        bval: 19.47,
+        minval: 4.5,
+        tmn: 34.0,
+    },
+    CalcPartition {
+        omega_low: 130,
+        omega_high: 138,
+        bval: 19.85,
+        minval: 4.5,
+        tmn: 34.3,
+    },
+    CalcPartition {
+        omega_low: 139,
+        omega_high: 149,
+        bval: 20.23,
+        minval: 4.5,
+        tmn: 34.7,
+    },
+    CalcPartition {
+        omega_low: 150,
+        omega_high: 160,
+        bval: 20.63,
+        minval: 4.5,
+        tmn: 35.1,
+    },
+    CalcPartition {
+        omega_low: 161,
+        omega_high: 173,
+        bval: 21.02,
+        minval: 4.5,
+        tmn: 35.5,
+    },
+    CalcPartition {
+        omega_low: 174,
+        omega_high: 187,
+        bval: 21.40,
+        minval: 4.5,
+        tmn: 35.9,
+    },
+    CalcPartition {
+        omega_low: 188,
+        omega_high: 201,
+        bval: 21.76,
+        minval: 4.5,
+        tmn: 36.3,
+    },
+    CalcPartition {
+        omega_low: 202,
+        omega_high: 219,
+        bval: 22.12,
+        minval: 4.5,
+        tmn: 36.6,
+    },
+    CalcPartition {
+        omega_low: 220,
+        omega_high: 238,
+        bval: 22.47,
+        minval: 4.5,
+        tmn: 37.0,
+    },
+    CalcPartition {
+        omega_low: 239,
+        omega_high: 257,
+        bval: 22.83,
+        minval: 4.5,
+        tmn: 37.3,
+    },
+    CalcPartition {
+        omega_low: 258,
+        omega_high: 283,
+        bval: 23.18,
+        minval: 4.5,
+        tmn: 37.7,
+    },
+    CalcPartition {
+        omega_low: 284,
+        omega_high: 309,
+        bval: 23.53,
+        minval: 4.5,
+        tmn: 38.0,
+    },
+    CalcPartition {
+        omega_low: 310,
+        omega_high: 335,
+        bval: 23.88,
+        minval: 4.5,
+        tmn: 38.4,
+    },
+    CalcPartition {
+        omega_low: 336,
+        omega_high: 363,
+        bval: 24.23,
+        minval: 4.5,
+        tmn: 38.7,
+    },
+    CalcPartition {
+        omega_low: 364,
+        omega_high: 391,
+        bval: 24.58,
+        minval: 4.5,
+        tmn: 39.1,
+    },
+    CalcPartition {
+        omega_low: 392,
+        omega_high: 423,
+        bval: 24.93,
+        minval: 4.5,
+        tmn: 39.4,
+    },
+    CalcPartition {
+        omega_low: 424,
+        omega_high: 465,
+        bval: 25.27,
+        minval: 4.5,
+        tmn: 39.8,
+    },
+    CalcPartition {
+        omega_low: 466,
+        omega_high: 507,
+        bval: 25.61,
+        minval: 3.5,
+        tmn: 40.1,
+    },
+    CalcPartition {
+        omega_low: 508,
+        omega_high: 513,
+        bval: 25.81,
+        minval: 3.5,
+        tmn: 40.3,
+    },
+];
+
+/// Returns the Model-2 calculation-partition table (Annex D Table
+/// D.3a / D.3b / D.3c) for the given sampling rate.
+///
+/// This is the rate dispatcher for the clause D.2.4 threshold loop:
+/// the step-(f) spreading convolution
+/// ([`convolve_partition_spreading`]) and the per-partition threshold
+/// functions all take a `&[CalcPartition]`, so a caller wires the
+/// whole Model-2 chain for an arbitrary Layer II sampling rate by
+/// fetching the table here once and threading it through.
+///
+/// The three Layer II sampling rates have **49 / 57 / 58** partitions
+/// respectively (the `bmax` of each table); all three terminate at the
+/// Nyquist line `ωhigh = 513` of the 1024-point analysis FFT.
+#[must_use]
+pub fn calc_partition_table_for_rate(rate: SamplingRate) -> &'static [CalcPartition] {
+    match rate {
+        SamplingRate::Fs32kHz => &TABLE_D_3A_CALC_PARTITION_32KHZ,
+        SamplingRate::Fs44k1Hz => &TABLE_D_3B_CALC_PARTITION_44K1HZ,
+        SamplingRate::Fs48kHz => &TABLE_D_3C_CALC_PARTITION_48KHZ,
+    }
+}
 
 /// Annex D clause **D.2.3** Model-2 spreading function `sprdngf(i, j)`.
 ///
@@ -1193,6 +2046,129 @@ mod tests {
             .map(|p| p.line_count())
             .sum();
         assert_eq!(total, 513);
+    }
+
+    #[test]
+    fn table_d3b_d3c_have_expected_partition_counts() {
+        assert_eq!(TABLE_D_3B_CALC_PARTITION_44K1HZ.len(), 57);
+        assert_eq!(TABLE_D_3C_CALC_PARTITION_48KHZ.len(), 58);
+    }
+
+    #[test]
+    fn table_d3b_d3c_are_contiguous_and_cover_to_nyquist() {
+        for table in [
+            &TABLE_D_3B_CALC_PARTITION_44K1HZ[..],
+            &TABLE_D_3C_CALC_PARTITION_48KHZ[..],
+        ] {
+            assert_eq!(
+                table[0].omega_low, 1,
+                "first partition starts at FFT line 1"
+            );
+            for w in table.windows(2) {
+                assert_eq!(
+                    w[1].omega_low,
+                    w[0].omega_high + 1,
+                    "partition boundaries must be contiguous"
+                );
+            }
+            assert_eq!(
+                table[table.len() - 1].omega_high,
+                513,
+                "last ωhigh is the Nyquist line 513"
+            );
+            let total: u32 = table.iter().map(|p| p.line_count()).sum();
+            assert_eq!(total, 513, "partitions must tile lines 1..=513 exactly");
+        }
+    }
+
+    #[test]
+    fn table_d3b_d3c_bval_monotonic_nondecreasing() {
+        for table in [
+            &TABLE_D_3B_CALC_PARTITION_44K1HZ[..],
+            &TABLE_D_3C_CALC_PARTITION_48KHZ[..],
+        ] {
+            assert_eq!(table[0].bval, 0.00);
+            for w in table.windows(2) {
+                assert!(
+                    w[1].bval >= w[0].bval,
+                    "bval must be non-decreasing: {} then {}",
+                    w[0].bval,
+                    w[1].bval
+                );
+            }
+        }
+        // Highest-Bark partition of each table (last row of the CSV).
+        assert_eq!(TABLE_D_3B_CALC_PARTITION_44K1HZ[56].bval, 25.33);
+        assert_eq!(TABLE_D_3C_CALC_PARTITION_48KHZ[57].bval, 25.81);
+    }
+
+    #[test]
+    fn table_d3b_d3c_low_partitions_are_single_lines() {
+        // The finer-resolution 44,1 / 48 kHz tables open with a run of
+        // single-FFT-line partitions: 16 for D.3b, 17 for D.3c.
+        for p in &TABLE_D_3B_CALC_PARTITION_44K1HZ[..16] {
+            assert_eq!(p.line_count(), 1);
+        }
+        assert!(TABLE_D_3B_CALC_PARTITION_44K1HZ[16].line_count() > 1);
+        for p in &TABLE_D_3C_CALC_PARTITION_48KHZ[..17] {
+            assert_eq!(p.line_count(), 1);
+        }
+        assert!(TABLE_D_3C_CALC_PARTITION_48KHZ[17].line_count() > 1);
+    }
+
+    #[test]
+    fn table_d3b_d3c_spot_check_tail_cells() {
+        // Verbatim final rows of the staged CSVs.
+        let b = TABLE_D_3B_CALC_PARTITION_44K1HZ[56];
+        assert_eq!((b.omega_low, b.omega_high), (470, 513));
+        assert_eq!((b.minval, b.tmn), (3.5, 39.8));
+        let c = TABLE_D_3C_CALC_PARTITION_48KHZ[57];
+        assert_eq!((c.omega_low, c.omega_high), (508, 513));
+        assert_eq!((c.minval, c.tmn), (3.5, 40.3));
+    }
+
+    #[test]
+    fn calc_partition_table_for_rate_dispatches_each_rate() {
+        assert_eq!(
+            calc_partition_table_for_rate(SamplingRate::Fs32kHz).len(),
+            49
+        );
+        assert_eq!(
+            calc_partition_table_for_rate(SamplingRate::Fs44k1Hz).len(),
+            57
+        );
+        assert_eq!(
+            calc_partition_table_for_rate(SamplingRate::Fs48kHz).len(),
+            58
+        );
+        // Each rate routes to its own table (content equality — the
+        // tables are `const`, so the compiler may duplicate them and
+        // pointer identity is not guaranteed).
+        assert_eq!(
+            calc_partition_table_for_rate(SamplingRate::Fs44k1Hz),
+            &TABLE_D_3B_CALC_PARTITION_44K1HZ[..]
+        );
+        assert_eq!(
+            calc_partition_table_for_rate(SamplingRate::Fs48kHz),
+            &TABLE_D_3C_CALC_PARTITION_48KHZ[..]
+        );
+    }
+
+    #[test]
+    fn d3_threshold_loop_runs_for_all_three_rates() {
+        // End-to-end smoke: the step-(f) spreading convolution must
+        // accept the 44,1 / 48 kHz partition tables, not only 32 kHz.
+        for rate in [
+            SamplingRate::Fs32kHz,
+            SamplingRate::Fs44k1Hz,
+            SamplingRate::Fs48kHz,
+        ] {
+            let table = calc_partition_table_for_rate(rate);
+            let energy = vec![1.0_f64; table.len()];
+            let spread = convolve_partition_spreading(table, &energy);
+            assert_eq!(spread.len(), table.len());
+            assert!(spread.iter().all(|v| v.is_finite() && *v >= 0.0));
+        }
     }
 
     #[test]
