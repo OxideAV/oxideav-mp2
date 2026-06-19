@@ -162,19 +162,29 @@ impl Mp2CoreDecoder {
 
     /// Convert a per-channel `Vec<f64>` PCM plane in the §2.4.3.4.7.1
     /// nominal `[-1.0, +1.0]` range to planar little-endian `i16`
-    /// bytes. Out-of-range samples are clamped to `[i16::MIN, i16::MAX]`
-    /// (the §2.4.3.4.7.1 prose treats anything beyond ±1 as a clipped
-    /// peak; the polyphase filter's anti-mirror identity means the
-    /// physically realisable range stays within ±1 in practice).
+    /// bytes.
+    ///
+    /// The §2.4.3.3.4 requantizer interprets each codeword as a two's
+    /// complement fractional number "where the MSB represents the value
+    /// −1" (PDF page 31). The matching integer full-scale map is the
+    /// symmetric `−1.0 ↦ −32768`, i.e. multiply by `2^15 = 32768` and
+    /// round to nearest. This places `0.0 ↦ 0` and `+1.0 ↦ +32768`,
+    /// the latter clamped to `i16::MAX`; out-of-range peaks clip to
+    /// `[i16::MIN, i16::MAX]`. (Using `i16::MAX` as the scale instead
+    /// biases every nonzero sample toward zero by a fraction of an LSB,
+    /// which measurably widens the conformance error against a
+    /// reference decoder's output; the `2^15` scale is the standard
+    /// fractional-to-integer convention.)
     fn float_plane_to_s16_le(plane: &[f64]) -> Vec<u8> {
+        const FULL_SCALE: f64 = 32768.0; // 2^15 — MSB == −1.0 (§2.4.3.3.4)
         let mut bytes = Vec::with_capacity(plane.len() * 2);
         for &s in plane {
-            let scaled = s * f64::from(i16::MAX);
-            let clamped = scaled.clamp(f64::from(i16::MIN), f64::from(i16::MAX));
-            // `as i16` truncates toward zero; round-to-nearest gives a
-            // slightly lower noise floor for samples near the integer
-            // grid without changing peak-clip behaviour.
-            let v = clamped.round() as i16;
+            let scaled = s * FULL_SCALE;
+            // Round to nearest, then clamp into the i16 range so that a
+            // full-scale `+1.0` (→ +32768) saturates at `i16::MAX`.
+            let v = scaled
+                .round()
+                .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         bytes
@@ -626,8 +636,9 @@ mod tests {
 
     #[test]
     fn float_plane_to_s16_le_clamps_and_round_trips_endpoints() {
-        // ±1.0 → exactly ±i16::MAX (rounded). Slightly-overshoot inputs
-        // clamp at the endpoints without panicking.
+        // 2^15 full-scale map: −1.0 → i16::MIN exactly; +1.0 → +32768
+        // clamps to i16::MAX. Slightly-overshoot inputs clamp at the
+        // endpoints without panicking.
         let plane = vec![0.0, 0.5, 1.0, -1.0, 1.5, -2.0];
         let bytes = Mp2CoreDecoder::float_plane_to_s16_le(&plane);
         assert_eq!(bytes.len(), plane.len() * 2);
@@ -636,10 +647,12 @@ mod tests {
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(words[0], 0);
-        // 0.5 * 32767 = 16383.5 → rounds to 16384.
+        // 0.5 * 32768 = 16384 exactly.
         assert_eq!(words[1], 16384);
+        // +1.0 * 32768 = 32768 → clamps to i16::MAX.
         assert_eq!(words[2], i16::MAX);
-        assert_eq!(words[3], -i16::MAX);
+        // −1.0 * 32768 = −32768 = i16::MIN exactly (the symmetric map).
+        assert_eq!(words[3], i16::MIN);
         // Overshoots clamp at the i16 range.
         assert_eq!(words[4], i16::MAX);
         assert_eq!(words[5], i16::MIN);

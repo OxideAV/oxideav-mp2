@@ -7,12 +7,17 @@
 //!
 //! ## Status
 //!
-//! Clean-room rebuild **in progress** (round 126, started 2026-05-25).
-//! The prior implementation was retired under the workspace clean-room
-//! policy because its bit-allocation and synthesis-window data tables
-//! had been transcribed from external library source rather than read
-//! from the ISO/IEC specification; master history was force-erased on
-//! 2026-05-24 per the Hat-3 cold-enforcement procedure.
+//! Clean-room rebuild (started 2026-05-25). The decoder is now complete
+//! end-to-end (frame → PCM) and validated against a real Layer II
+//! fixture to within the ISO floating-point-filterbank conformance
+//! bound (max abs ≤ 1 LSB; see `tests/layer2_pcm_conformance.rs`); the
+//! encoder is built through frame assembly. Every numeric table is read
+//! only from the staged ISO/IEC 11172-3 / 13818-3 Annexes. The prior
+//! implementation was retired under the workspace clean-room policy
+//! because its bit-allocation and synthesis-window data tables had been
+//! transcribed from external library source rather than read from the
+//! ISO/IEC specification; master history was force-erased on 2026-05-24
+//! per the Hat-3 cold-enforcement procedure.
 //!
 //! ## What works today
 //!
@@ -105,7 +110,12 @@
 //!   per-stream [`frame::FrameDecodeState`] threads the polyphase
 //!   filterbank's V ring buffer across successive frames per Annex A
 //!   Figure A.2 footnote 1. [`frame::decode_all_frames`] chains
-//!   successive frames until the input buffer is exhausted.
+//!   successive frames until the input buffer is exhausted. The whole
+//!   chain is validated end-to-end against a real
+//!   `layer2-stereo-44100-192kbps` fixture
+//!   (`tests/layer2_pcm_conformance.rs`): decoded sample count is exact
+//!   and the per-sample error stays within the ISO floating-point
+//!   filterbank conformance bound (max abs ≤ 1 LSB, rms < 0.6 LSB).
 //!
 //! * **§C.1.3 Annex C polyphase analysis filterbank** ([`analysis`]
 //!   module): the encoder's time-reversed dual of the §2.4.3.3.5

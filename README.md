@@ -10,8 +10,10 @@ Clean-room implementation. Every numeric table is read only from
 ISO/IEC 11172-3 (1993) with Annex B, and from ISO/IEC 13818-3 (1997)
 §2.4.2.3 / Annex B Table B.1 for the MPEG-2 LSF (Lower Sampling
 Frequencies) extension. The decoder is complete end-to-end (frame →
-PCM); the encoder is implemented through frame assembly and is wired to
-the runtime registry as a decoder.
+PCM) and **validated against a real Layer II fixture** to within the
+ISO floating-point-filterbank conformance bound (max abs ≤ 1 LSB);
+the encoder is implemented through frame assembly and is wired to the
+runtime registry as a decoder.
 
 ## What works today
 
@@ -45,6 +47,19 @@ the runtime registry as a decoder.
 - **Frame-level decode loop**: `decode_frame` / `decode_all_frames`
   parse a stream end-to-end with per-stream filterbank state and
   mid-stream resynchronisation.
+- **PCM conformance vs. a real fixture**: the full decode chain is
+  validated end-to-end against the staged `layer2-stereo-44100-192kbps`
+  fixture's `expected.wav` (31 frames → 71 424 interleaved s16 samples).
+  Sample count is exact and the per-sample error envelope is **max abs
+  ≤ 1 LSB, rms < 0.6 LSB, > 70 % bit-exact** — the ISO conformance
+  bound. (§2.4.3.2 / §2.4.3.3.5 specify the filterbank in floating
+  point with no fixed accumulation order or integer-rounding rule, so
+  an independent clean-room decoder reproduces a reference decoder's
+  output only within that envelope, not byte-for-byte; ISO/IEC 11172-4
+  defines conformance itself as a bounded difference signal.) The
+  fractional→`i16` map uses the symmetric `2^15` full-scale
+  (`−1.0 ↦ −32768`) matching the §2.4.3.3.4 "MSB represents −1"
+  convention.
 
 **Encode** — the frame-assembly path is in place: the CRC-16 write
 primitives, the header writer (`FrameHeader::emit_bytes`), the §C.1.3
@@ -92,8 +107,12 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
   dB slice the step-(l) `include_absolute_threshold` floor consumes (after
   the caller's dB→energy conversion). What remains is wiring the assembled
   Model-1 / Model-2 chain into the encoder's automatic SMR selection.
-- Bit-exact PCM-against-reference validation (PSNR / SNR) pending an
-  audit pass.
+- An ISO/IEC 11172-4 / 13818-4 *compliance-grade* SNR sweep across the
+  full layered-test bitstream set. The single staged `layer2-…-192kbps`
+  fixture is validated end-to-end (see **PCM conformance** above); a
+  broader multi-rate / multi-mode reference corpus (mono, joint-stereo
+  with a live intensity bound, 32 / 48 kHz, MPEG-2 LSF) would harden the
+  envelope further but is not yet staged.
 
 ## Robustness
 

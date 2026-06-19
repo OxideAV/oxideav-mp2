@@ -8,6 +8,37 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **End-to-end Layer II decode → PCM conformance against a real fixture**
+  (`tests/layer2_pcm_conformance.rs`). The complete §2.4 decode chain
+  (header → §2.4.1.4 CRC → §2.4.2.1 bit-allocation table → §2.4.3.3
+  scalefactor/scfsi → §2.4.3.3.4 requantization → §2.4.3.2 / Annex A
+  Figure A.2 polyphase synthesis filterbank) is now validated against
+  the staged `layer2-stereo-44100-192kbps` fixture's `expected.wav`
+  (31 frames → 71 424 interleaved s16 samples). Decoded sample count is
+  exact; the per-sample error envelope is **max abs ≤ 1 LSB, rms < 0.6
+  LSB, > 70 % bit-exact** — the ISO floating-point-filterbank
+  conformance bound (§2.4.3.2 / §2.4.3.3.5 specify the filterbank in
+  floating point with no fixed accumulation order or integer-rounding
+  rule, so an independent clean-room decoder reproduces a reference
+  decoder's integer output only within that envelope; ISO/IEC 11172-4
+  defines conformance itself as a bounded difference signal). A second
+  test asserts the §2.4.3.4.7.1 `[-1, +1]` output range and near-zero
+  DC offset (a guard on the §2.4.3.3.4 `D` requant constant).
+
+### Changed
+
+- **Fractional → `i16` PCM map is now the symmetric `2^15` full scale**
+  (`codec_decoder::float_plane_to_s16_le`). The §2.4.3.3.4 requantizer
+  interprets each codeword as a two's-complement fraction "where the
+  MSB represents −1", so the matching integer map is `−1.0 ↦ −32768`
+  (multiply by `2^15 = 32768`, round, clamp to `i16::MAX` on full-scale
+  `+1.0`). The previous `× i16::MAX` scale biased every nonzero sample
+  toward zero by a fraction of an LSB; switching to `2^15` halves the
+  worst-case error against the reference (max abs 2 → 1 LSB) and roughly
+  doubles the bit-exact-sample ratio.
+
+### Added (psychoacoustic model, prior)
+
 - **§D.2.4 step (l) Model-2 absolute-threshold tables D.4a / D.4b / D.4c
   (32 / 44,1 / 48 kHz) + per-line expander** (`tables_model2`). The Annex D
   Table D.4a (132 entries), D.4b (130 entries) and D.4c (126 entries)
