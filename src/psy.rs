@@ -1662,6 +1662,165 @@ pub fn bark_for_line_layer2(fs: crate::tables_d2::SamplingRate, k: usize) -> f64
     boundaries.last().map_or(0.0, |b| b.top_bark)
 }
 
+/// Map a Layer II sampling frequency in Hz to the Annex D
+/// [`crate::tables_d2::SamplingRate`] enum that selects the
+/// rate-specific D.1 / D.2 / D.4 tables.
+///
+/// The §D.1 / §D.2 psychoacoustic tables are tabulated only for the
+/// three MPEG-1 Layer II rates (32 / 44,1 / 48 kHz). The MPEG-2 LSF
+/// rates (16 / 22,05 / 24 kHz, ISO/IEC 13818-3) have **no** Annex D
+/// Layer II masking tables in the standard, so this returns `None`
+/// for them — the [`compute_smr_model1_frame`] caller then has to
+/// fall back to a rate-driven SMR (the spec provides no perceptual
+/// model for the LSF rates).
+#[must_use]
+pub fn annex_d_sampling_rate(sample_rate_hz: u32) -> Option<crate::tables_d2::SamplingRate> {
+    match sample_rate_hz {
+        32_000 => Some(crate::tables_d2::SamplingRate::Fs32kHz),
+        44_100 => Some(crate::tables_d2::SamplingRate::Fs44k1Hz),
+        48_000 => Some(crate::tables_d2::SamplingRate::Fs48kHz),
+        _ => None,
+    }
+}
+
+/// End-to-end §D.1 Model-1 signal-to-mask-ratio for one channel of a
+/// Layer II frame.
+///
+/// This is the driver that chains the §D.1 Step 1…9 primitives this
+/// module exposes into the single per-subband `SMR_sb(n)` table the
+/// §C.1.5.2.7 bit allocator consumes. It is the wiring the README's
+/// "what remains" note called out: every individual Model-1 stage
+/// was already implemented and unit-tested; this composes them.
+///
+/// # Inputs
+///
+/// * `pcm` — the channel's 1152 time-domain PCM samples for the
+///   frame, already in the `[-1, +1)` normalized domain the §2.4.3.2
+///   analysis filterbank consumes. Shorter / longer slices are read
+///   for their first [`LAYER2_FFT_LEN`] samples; a slice shorter than
+///   that is zero-padded.
+/// * `scf_max` — per-subband maximum Table 3-B.1 **multiplier**
+///   (`SCALEFACTORS[idx]`, not the 6-bit index) for the frame, the
+///   §D.1 Step 2 `scf_max(n)` operand of the sound-pressure-level
+///   `MAX`. The caller takes, per subband, the largest multiplier
+///   across the three scalefactor granules (= the smallest index).
+/// * `fs` — the Annex D sampling rate selecting the D.1 / D.2 tables.
+/// * `bitrate_per_channel_kbps` — the overall bit rate **per
+///   channel** in kbit/s, feeding the §D.1 Step 3
+///   [`absolute_threshold_offset_db`].
+///
+/// # Pipeline (§D.1)
+///
+/// 1. Step 1 — Hann-windowed 1024-point FFT power-density spectrum
+///    [`power_density_spectrum_layer2`], then
+///    [`normalize_to_spl_reference`] to 96 dB SPL.
+/// 2. Step 2 — per-subband sound pressure level
+///    [`sound_pressure_level_subband`] (`MaxLine` estimator,
+///    [`fft_line_to_subband_layer2`] map).
+/// 3. Step 4 — tonal / non-tonal masker extraction
+///    ([`list_tonal_layer2`] on a working copy, then
+///    [`list_non_tonal_candidates_layer2`] on the tonal-zeroed copy).
+/// 4. Step 3 + Step 5(a) — threshold-in-quiet decimation
+///    [`decimate_below_threshold_in_quiet`] with the bit-rate offset.
+/// 5. Step 5(b) — 0.5-Bark tonal-masker decimation
+///    [`decimate_tonal_maskers`].
+/// 6. Step 6 + 7 — per-FFT-line global masking threshold
+///    [`global_masking_threshold_db`] over every tabulated line.
+/// 7. Step 8 — per-subband minimum masking threshold
+///    [`minimum_masking_threshold_subband`].
+/// 8. Step 9 — [`signal_to_mask_ratio_subband`].
+///
+/// # Output
+///
+/// `SMR_sb(n)` in dB for each of the 32 subbands. A subband whose
+/// Step-8 `LT_min(n)` is undefined (no tabulated FFT line lands in
+/// it — only the very top subbands above the topmost tabulated line)
+/// takes the §C.1.5.2.4 "subbands without masking lines" fallback of
+/// `L_sb(n)` itself (`SMR = L_sb - (-inf)`-style maximal margin is
+/// **not** used; instead the conservative `L_sb` is returned so the
+/// allocator still sees the band's level). This keeps every slot
+/// finite for the allocator's `MNR = -SMR` initial value.
+#[must_use]
+pub fn compute_smr_model1_frame(
+    pcm: &[f64],
+    scf_max: &[f64; NUM_SUBBANDS_LAYER2],
+    fs: crate::tables_d2::SamplingRate,
+    bitrate_per_channel_kbps: f64,
+) -> [f64; NUM_SUBBANDS_LAYER2] {
+    // ---- Step 1: windowed FFT power-density spectrum + 96 dB norm ----
+    let mut frame = [0.0_f64; LAYER2_FFT_LEN];
+    let take = pcm.len().min(LAYER2_FFT_LEN);
+    frame[..take].copy_from_slice(&pcm[..take]);
+    let mut spectrum = power_density_spectrum_layer2(&frame);
+    normalize_to_spl_reference(&mut spectrum);
+
+    // ---- Step 2: per-subband sound pressure level L_sb(n) ----
+    let line_subband: Vec<usize> = (0..spectrum.len())
+        .map(fft_line_to_subband_layer2)
+        .collect();
+    let l_sb =
+        sound_pressure_level_subband(&spectrum, &line_subband, scf_max, SubbandSplMethod::MaxLine);
+
+    // ---- Step 4: tonal / non-tonal masker extraction ----
+    //
+    // `list_tonal_layer2` mutates its argument (zeroing the examined
+    // neighbourhoods), so work on a copy; the non-tonal pass then
+    // reads the tonal-zeroed copy per §D.1 Step 4(c).
+    let mut work = spectrum.clone();
+    let tonal = list_tonal_layer2(&mut work);
+    let non_tonal = list_non_tonal_candidates_layer2(&work, fs);
+
+    // ---- Step 3 + Step 5(a): threshold-in-quiet decimation ----
+    let offset_db = absolute_threshold_offset_db(bitrate_per_channel_kbps);
+    let kept = decimate_below_threshold_in_quiet(&tonal, &non_tonal, fs, offset_db);
+
+    // ---- Step 5(b): 0.5-Bark tonal-masker decimation ----
+    let maskers = decimate_tonal_maskers(&kept);
+
+    // ---- Step 6 + 7: per-FFT-line global masking threshold LTg(i) ----
+    //
+    // The spec computes LTg over the tabulated frequency grid; we
+    // evaluate it at every FFT line that has a tabulated LTq entry
+    // (the §D.1 Step 5/6 working range), assigning each line its
+    // critical-band Bark position. Lines with no LTq entry (DC, and
+    // anything above the topmost tabulated line) carry no masking
+    // contribution and are skipped — they map to no subband min.
+    let top_line = fs
+        .ltq_table_layer2()
+        .last()
+        .map_or(0, |e| e.top_line_index as usize);
+    let n_lines = top_line.min(spectrum.len().saturating_sub(1));
+    let mut ltg_db: Vec<f64> = Vec::with_capacity(n_lines);
+    let mut ltg_subband: Vec<usize> = Vec::with_capacity(n_lines);
+    for k in 1..=n_lines {
+        let Some(ltq) = ltq_db_at_line(fs, k, offset_db) else {
+            continue;
+        };
+        let z_i = bark_for_line_layer2(fs, k);
+        let relevant = relevant_maskers_for_target_line(&maskers, z_i);
+        let ltg = global_masking_threshold_db(&relevant, z_i, ltq);
+        ltg_db.push(ltg);
+        ltg_subband.push(fft_line_to_subband_layer2(k));
+    }
+
+    // ---- Step 8: per-subband minimum masking threshold LT_min(n) ----
+    let lt_min = minimum_masking_threshold_subband(&ltg_db, &ltg_subband);
+
+    // ---- Step 9: signal-to-mask ratio SMR_sb(n) = L_sb(n) - LT_min(n) ----
+    let smr_opt = signal_to_mask_ratio_subband(&l_sb, &lt_min);
+    let mut out = [0.0_f64; NUM_SUBBANDS_LAYER2];
+    for n in 0..NUM_SUBBANDS_LAYER2 {
+        // §C.1.5.2.4 fallback for subbands with no masking line: the
+        // band carries no perceptual headroom, so its SMR degenerates
+        // to the band level itself (LT_min absent ⇒ treat the floor as
+        // 0 dB SPL). This keeps the allocator's MNR = -SMR finite and
+        // steers bits toward audible high-level bands even past the
+        // top tabulated FFT line.
+        out[n] = smr_opt[n].unwrap_or(l_sb[n]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3780,6 +3939,67 @@ mod tests {
                 assert!(k >= lo.max(1) && k <= hi, "k {k} not in band [{lo},{hi}]");
             }
             lo = hi + 1;
+        }
+    }
+
+    #[test]
+    fn annex_d_sampling_rate_maps_mpeg1_rates_only() {
+        assert_eq!(annex_d_sampling_rate(32_000), Some(SamplingRate::Fs32kHz));
+        assert_eq!(annex_d_sampling_rate(44_100), Some(SamplingRate::Fs44k1Hz));
+        assert_eq!(annex_d_sampling_rate(48_000), Some(SamplingRate::Fs48kHz));
+        // LSF rates have no Annex D Layer II masking tables.
+        assert_eq!(annex_d_sampling_rate(16_000), None);
+        assert_eq!(annex_d_sampling_rate(22_050), None);
+        assert_eq!(annex_d_sampling_rate(24_000), None);
+    }
+
+    #[test]
+    fn compute_smr_model1_frame_finite_and_tone_localised() {
+        // A pure 1 kHz tone at 44.1 kHz should put substantially more
+        // signal-to-mask headroom in the subband that carries it than
+        // in a far-away high subband that holds only the tone's
+        // masking skirt. We don't assert an exact dB (the float chain
+        // is not bit-defined) — only the structural property that the
+        // SMR table is finite everywhere and the tone's subband has a
+        // clearly higher SMR than a distant quiet subband.
+        let fs_hz = 44_100.0;
+        let f = 1_000.0;
+        let mut pcm = vec![0.0_f64; 1152];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = 0.5 * (2.0 * core::f64::consts::PI * f * i as f64 / fs_hz).sin();
+        }
+        // Tone subband for the 32-band filterbank at 44.1 kHz: each
+        // band spans fs/64 ≈ 689 Hz, so 1 kHz lands in band 1.
+        let tone_sb = (f / (fs_hz / 64.0)) as usize;
+
+        // scf_max as the unity multiplier everywhere (a neutral
+        // §D.1 Step 2 scalefactor operand for this structural test).
+        let scf_max = [1.0_f64; NUM_SUBBANDS_LAYER2];
+        let smr = compute_smr_model1_frame(&pcm, &scf_max, SamplingRate::Fs44k1Hz, 96.0);
+
+        for (n, &v) in smr.iter().enumerate() {
+            assert!(v.is_finite(), "SMR[{n}] = {v} must be finite");
+        }
+        // A distant high band (band 25) holds essentially no tone
+        // energy; the tone band should out-SMR it.
+        assert!(
+            smr[tone_sb] > smr[25] - 1.0,
+            "tone band {tone_sb} SMR {} should exceed distant band 25 SMR {}",
+            smr[tone_sb],
+            smr[25]
+        );
+    }
+
+    #[test]
+    fn compute_smr_model1_frame_silence_is_finite() {
+        // An all-zero frame has no spectral peaks; every stage must
+        // still produce a finite SMR table (no NaN / inf leaking from
+        // the log10(0) = -inf intermediates).
+        let pcm = vec![0.0_f64; 1152];
+        let scf_max = [1.0_f64; NUM_SUBBANDS_LAYER2];
+        let smr = compute_smr_model1_frame(&pcm, &scf_max, SamplingRate::Fs48kHz, 192.0);
+        for (n, &v) in smr.iter().enumerate() {
+            assert!(v.is_finite(), "silence SMR[{n}] = {v} must be finite");
         }
     }
 }

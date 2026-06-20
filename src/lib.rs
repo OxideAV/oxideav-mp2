@@ -275,10 +275,11 @@ pub use header::{
     ModeExtension, SYNCWORD,
 };
 pub use psy::{
-    decimate_tonal_maskers, fft_line_to_subband_layer2, global_masking_threshold_db,
-    hann_window_layer2, individual_masking_threshold_db, is_local_maximum, is_tonal_layer2,
-    list_non_tonal_layer2, masker_in_target_window, masking_function_vf, masking_index_non_tonal,
-    masking_index_tonal, minimum_masking_threshold_subband, non_tonal_band_index, non_tonal_spl_db,
+    annex_d_sampling_rate, compute_smr_model1_frame, decimate_tonal_maskers,
+    fft_line_to_subband_layer2, global_masking_threshold_db, hann_window_layer2,
+    individual_masking_threshold_db, is_local_maximum, is_tonal_layer2, list_non_tonal_layer2,
+    masker_in_target_window, masking_function_vf, masking_index_non_tonal, masking_index_tonal,
+    minimum_masking_threshold_subband, non_tonal_band_index, non_tonal_spl_db,
     normalize_to_spl_reference, power_density_spectrum_layer2, relevant_maskers_for_target_line,
     scalefactor_spl_term_db, signal_to_mask_ratio_subband, sound_pressure_level_subband,
     tonal_neighbourhood_layer2, tonal_spl_db, zero_tonal_neighbourhood_layer2, Masker, MaskerKind,

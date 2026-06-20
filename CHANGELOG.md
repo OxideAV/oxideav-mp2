@@ -8,6 +8,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.1 Model-1 signal-to-mask-ratio driver `psy::compute_smr_model1_frame`**.
+  Chains the previously-isolated §D.1 Step 1…9 primitives into the single
+  per-subband `SMR_sb(n)` table the §C.1.5.2.7 bit allocator consumes:
+  Hann-windowed 1024-point FFT power-density spectrum (Step 1) → 96 dB SPL
+  normalisation → per-subband sound pressure level `L_sb(n)` (Step 2) →
+  tonal / non-tonal masker extraction (Step 4) → threshold-in-quiet +
+  bit-rate-offset decimation (Step 3 + Step 5a) → 0.5-Bark tonal decimation
+  (Step 5b) → per-FFT-line global masking threshold `LTg(i)` (Step 6/7) →
+  per-subband minimum masking threshold `LT_min(n)` (Step 8) →
+  `SMR_sb(n) = L_sb(n) − LT_min(n)` (Step 9), with the §C.1.5.2.4 fallback
+  for subbands carrying no masking line. `psy::annex_d_sampling_rate` maps a
+  Layer II sampling frequency to the Annex D table selector (MPEG-1 rates
+  only; the LSF rates have no Annex D Layer II masking tables).
+
 - **End-to-end Layer II decode → PCM conformance against a real fixture**
   (`tests/layer2_pcm_conformance.rs`). The complete §2.4 decode chain
   (header → §2.4.1.4 CRC → §2.4.2.1 bit-allocation table → §2.4.3.3
