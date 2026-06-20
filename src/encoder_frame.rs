@@ -1641,4 +1641,72 @@ mod tests {
             "auto-SMR reconstruction error energy {err_energy:.4} exceeds signal energy {sig_energy:.4}"
         );
     }
+
+    #[test]
+    fn auto_smr_round_trips_at_every_mpeg1_rate() {
+        // The §D.1 driver selects rate-specific D.1 / D.2 / D.4 tables
+        // via psy::annex_d_sampling_rate; exercise all three MPEG-1
+        // Layer II rates to confirm the table selection + FFT-line maps
+        // are wired correctly at each, and that each emitted frame
+        // round-trips through the decoder.
+        for sample_rate in [32_000u32, 44_100, 48_000] {
+            let header = FrameHeader {
+                sample_rate,
+                ..canonical_stereo_header()
+            };
+            let pcm = tone_pcm(2, 1_000.0, 0.6);
+            let bytes = encode_frame_auto(&header, &pcm, 0)
+                .unwrap_or_else(|e| panic!("auto encode at {sample_rate} Hz: {e:?}"));
+            assert_eq!(bytes.len(), header.frame_size_bytes());
+            let decoded = decode_frame(&bytes)
+                .unwrap_or_else(|e| panic!("decode at {sample_rate} Hz: {e:?}"));
+            assert_eq!(decoded.header.sample_rate, sample_rate);
+            // The loud tone must still draw a non-zero allocation.
+            let mut reader = BitReader::with_position(&bytes, 6);
+            let (audio, _, _) =
+                parse_audio_data_with_section_bits(&decoded.header, &mut reader).unwrap();
+            let any = (0..audio.channels)
+                .any(|ch| (0..audio.sblimit).any(|sb| audio.nb_steps[ch][sb] != 0));
+            assert!(any, "all-zero allocation at {sample_rate} Hz");
+        }
+    }
+
+    #[test]
+    fn auto_smr_lsf_rate_falls_back_and_round_trips() {
+        // MPEG-2 LSF rates have no Annex D Layer II masking tables, so
+        // the §D.1 driver returns a flat 0 dB SMR (rate-driven
+        // allocation). The auto path must still produce a well-formed,
+        // decodable frame — equivalent to a flat-SMR encode.
+        let header = FrameHeader {
+            lsf: true,
+            sample_rate: 24_000,
+            bit_rate: 64_000,
+            ..canonical_stereo_header()
+        };
+        let pcm = tone_pcm(2, 1_000.0, 0.5);
+        let auto = encode_frame_auto(&header, &pcm, 0).expect("LSF auto encode");
+        assert_eq!(auto.len(), header.frame_size_bytes());
+        let decoded = decode_frame(&auto).expect("LSF decode");
+        assert!(decoded.header.lsf);
+        assert_eq!(decoded.header.sample_rate, 24_000);
+        // Flat-SMR encode of the same input must be byte-identical: the
+        // LSF fallback path is exactly an all-zero SMR table.
+        let flat = encode_frame(&header, &pcm, &zero_smr(), 0).expect("LSF flat encode");
+        assert_eq!(
+            auto, flat,
+            "LSF auto-SMR must equal a flat 0 dB SMR encode (no Annex D tables)"
+        );
+    }
+
+    #[test]
+    fn auto_smr_is_deterministic() {
+        // The §D.1 chain has no hidden state beyond the persistent X
+        // ring buffer; a stateless auto-encode of the same input must
+        // be byte-reproducible across calls.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_234.0, 0.45);
+        let a = encode_frame_auto(&header, &pcm, 0).expect("encode a");
+        let b = encode_frame_auto(&header, &pcm, 0).expect("encode b");
+        assert_eq!(a, b, "auto-SMR encode must be deterministic");
+    }
 }
