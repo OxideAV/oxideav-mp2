@@ -137,6 +137,23 @@ pub enum EncodeError {
         /// Byte length of the rejected payload.
         got: usize,
     },
+    /// A batch encode entry point ([`encode_all_frames`] /
+    /// [`encode_all_frames_auto`]) was handed a per-channel PCM stream
+    /// whose length is not a whole multiple of
+    /// [`PCM_SAMPLES_PER_CHANNEL`]. One Layer II frame consumes exactly
+    /// 1152 samples per channel (§2.4.1.6); a partial trailing frame
+    /// has no defined Layer II encoding, so the batch path rejects it
+    /// rather than silently dropping or zero-padding the tail. `have`
+    /// is the supplied per-channel sample count; `frame` is
+    /// [`PCM_SAMPLES_PER_CHANNEL`].
+    ShortPcmTail {
+        /// Channel index whose stream length was not a 1152 multiple.
+        channel: usize,
+        /// Actual per-channel sample count supplied.
+        have: usize,
+        /// The per-frame block size ([`PCM_SAMPLES_PER_CHANNEL`]).
+        frame: usize,
+    },
 }
 
 impl core::fmt::Display for EncodeError {
@@ -165,6 +182,14 @@ impl core::fmt::Display for EncodeError {
             EncodeError::AncillaryTooLarge { space, got } => write!(
                 f,
                 "encode_frame: ancillary_data() payload of {got} bytes exceeds the {space}-byte §2.4.1.8 tail capacity"
+            ),
+            EncodeError::ShortPcmTail {
+                channel,
+                have,
+                frame,
+            } => write!(
+                f,
+                "encode_all_frames: pcm[{channel}].len() = {have} is not a whole multiple of {frame} samples/frame"
             ),
         }
     }
@@ -470,6 +495,140 @@ pub fn encode_frame_with_state_and_ancillary(
         ancillary,
         state,
     )
+}
+
+/// Encode an entire multi-frame Layer II stream from one continuous
+/// per-channel PCM buffer, deriving the §C.1.5.2.7 allocator's SMR
+/// table automatically per frame via the §D.1 Model-1 chain.
+///
+/// This is the encode-side counterpart of
+/// [`crate::frame::decode_all_frames`]: the decoder turns a byte
+/// stream into per-channel PCM planes; this turns per-channel PCM
+/// planes into the concatenated Layer II byte stream.
+///
+/// `pcm[ch]` is the full time-domain signal for channel `ch`; its
+/// length **must** be a whole multiple of [`PCM_SAMPLES_PER_CHANNEL`]
+/// (= 1152) because one Layer II frame consumes exactly 1152 samples
+/// per channel (§2.4.1.6) and a partial trailing frame has no defined
+/// Layer II encoding. A non-multiple length is rejected with
+/// [`EncodeError::ShortPcmTail`]; callers that need to flush a short
+/// tail must zero-pad it to a frame boundary themselves so the
+/// padding policy is theirs, not the encoder's.
+///
+/// A single persistent [`EncodeFrameState`] threads the §C.1.3
+/// analysis filterbank's X ring buffer through every frame, so the
+/// inter-frame filterbank continuity is identical to a hand-rolled
+/// [`encode_frame_auto_with`] loop. The returned `Vec<u8>` is the
+/// concatenation of every frame's [`encode_frame_auto`] output, ready
+/// to feed straight back into [`crate::frame::decode_all_frames`].
+///
+/// `banc` is the per-frame §2.4.1.10 ancillary reservation in bits;
+/// pass `0` for none.
+pub fn encode_all_frames(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::Auto)
+}
+
+/// Like [`encode_all_frames`] but with a caller-supplied per-frame
+/// signal-to-mask-ratio table used verbatim for every frame (the
+/// batch counterpart of [`encode_frame`]).
+///
+/// The same `smr_db` is applied to each frame; callers needing a
+/// per-frame perceptual table should drive [`encode_frame_with`] in
+/// their own loop, or use [`encode_all_frames`] for the §D.1
+/// automatic path. Length rules and the [`EncodeError::ShortPcmTail`]
+/// rejection are identical to [`encode_all_frames`].
+pub fn encode_all_frames_with_smr(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    smr_db: &SmrTable,
+    banc: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::Provided(smr_db))
+}
+
+/// Per-frame SMR policy for the [`encode_all_frames`] family.
+enum SmrChoice<'a> {
+    Auto,
+    Provided(&'a SmrTable),
+}
+
+/// Shared body of the [`encode_all_frames`] entry points: validate the
+/// stream shape, then drive one frame at a time through a persistent
+/// [`EncodeFrameState`] and concatenate.
+fn encode_all_frames_inner(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    smr: SmrChoice<'_>,
+) -> Result<Vec<u8>, EncodeError> {
+    let channels = header.channels();
+    if pcm.len() != channels {
+        return Err(EncodeError::BadPcmChannelCount {
+            have: pcm.len(),
+            need: channels,
+        });
+    }
+
+    // Every channel must carry the same whole number of frames.
+    let mut n_frames: Option<usize> = None;
+    for (ch, buf) in pcm.iter().enumerate() {
+        if buf.len() % PCM_SAMPLES_PER_CHANNEL != 0 {
+            return Err(EncodeError::ShortPcmTail {
+                channel: ch,
+                have: buf.len(),
+                frame: PCM_SAMPLES_PER_CHANNEL,
+            });
+        }
+        let frames = buf.len() / PCM_SAMPLES_PER_CHANNEL;
+        match n_frames {
+            None => n_frames = Some(frames),
+            Some(prev) if prev != frames => {
+                // Channels of unequal length: report the offending
+                // channel's count against the established frame block
+                // so the caller sees which plane is mis-sized.
+                return Err(EncodeError::BadPcmLen {
+                    channel: ch,
+                    have: buf.len(),
+                    need: prev * PCM_SAMPLES_PER_CHANNEL,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    let n_frames = n_frames.unwrap_or(0);
+    let mut state = EncodeFrameState::new();
+    // Pre-size: each frame is exactly `frame_size_bytes()` long.
+    let mut out = Vec::with_capacity(n_frames * header.frame_size_bytes());
+    let mut frame_pcm: Vec<Vec<f64>> = vec![Vec::with_capacity(PCM_SAMPLES_PER_CHANNEL); channels];
+
+    for f in 0..n_frames {
+        let base = f * PCM_SAMPLES_PER_CHANNEL;
+        for (ch, plane) in pcm.iter().enumerate() {
+            frame_pcm[ch].clear();
+            frame_pcm[ch].extend_from_slice(&plane[base..base + PCM_SAMPLES_PER_CHANNEL]);
+        }
+        let bytes = match smr {
+            SmrChoice::Auto => {
+                encode_frame_inner(header, &frame_pcm, SmrSource::Auto, banc, &[], &mut state)?
+            }
+            SmrChoice::Provided(table) => encode_frame_inner(
+                header,
+                &frame_pcm,
+                SmrSource::Provided(table),
+                banc,
+                &[],
+                &mut state,
+            )?,
+        };
+        out.extend_from_slice(&bytes);
+    }
+
+    Ok(out)
 }
 
 /// Shared implementation of the four public encode entry points.
@@ -1708,5 +1867,138 @@ mod tests {
         let a = encode_frame_auto(&header, &pcm, 0).expect("encode a");
         let b = encode_frame_auto(&header, &pcm, 0).expect("encode b");
         assert_eq!(a, b, "auto-SMR encode must be deterministic");
+    }
+
+    /// Build `n_frames` worth of a continuous per-channel tone.
+    fn tone_stream(channels: usize, freq_hz: f64, amp: f64, n_frames: usize) -> Vec<Vec<f64>> {
+        let omega = 2.0 * core::f64::consts::PI * freq_hz / 44_100.0;
+        let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        (0..channels)
+            .map(|ch| {
+                (0..total)
+                    .map(|i| amp * (omega * (i as f64 + ch as f64 * 64.0)).sin())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn encode_all_frames_equals_a_persistent_encode_frame_auto_loop() {
+        // The batch path must be byte-identical to driving
+        // `encode_frame_auto_with` with one persistent state — same
+        // §C.1.3 X-buffer continuity, same §D.1 SMR per frame.
+        let header = canonical_stereo_header();
+        let n_frames = 5;
+        let stream = tone_stream(2, 1_000.0, 0.5, n_frames);
+
+        let batch = encode_all_frames(&header, &stream, 0).expect("batch encode");
+
+        let mut state = EncodeFrameState::new();
+        let mut manual = Vec::new();
+        for f in 0..n_frames {
+            let base = f * PCM_SAMPLES_PER_CHANNEL;
+            let frame_pcm: Vec<Vec<f64>> = stream
+                .iter()
+                .map(|ch| ch[base..base + PCM_SAMPLES_PER_CHANNEL].to_vec())
+                .collect();
+            let bytes =
+                encode_frame_auto_with(&header, &frame_pcm, 0, &mut state).expect("manual encode");
+            manual.extend_from_slice(&bytes);
+        }
+
+        assert_eq!(
+            batch, manual,
+            "encode_all_frames must equal a persistent encode_frame_auto_with loop"
+        );
+        assert_eq!(batch.len(), n_frames * header.frame_size_bytes());
+    }
+
+    #[test]
+    fn encode_all_frames_with_smr_matches_a_persistent_provided_loop() {
+        let header = canonical_single_channel_header();
+        let n_frames = 4;
+        let stream = tone_stream(1, 1_500.0, 0.4, n_frames);
+        let smr: SmrTable = [[30.0f64; NUM_SUBBANDS]; 2];
+
+        let batch = encode_all_frames_with_smr(&header, &stream, &smr, 0).expect("batch smr");
+
+        let mut state = EncodeFrameState::new();
+        let mut manual = Vec::new();
+        for f in 0..n_frames {
+            let base = f * PCM_SAMPLES_PER_CHANNEL;
+            let frame_pcm: Vec<Vec<f64>> =
+                vec![stream[0][base..base + PCM_SAMPLES_PER_CHANNEL].to_vec()];
+            let bytes =
+                encode_frame_with(&header, &frame_pcm, &smr, 0, &mut state).expect("manual smr");
+            manual.extend_from_slice(&bytes);
+        }
+        assert_eq!(batch, manual);
+    }
+
+    #[test]
+    fn encode_all_frames_rejects_a_partial_trailing_frame() {
+        let header = canonical_stereo_header();
+        // 2.5 frames' worth of samples per channel — not a 1152 multiple.
+        let len = 2 * PCM_SAMPLES_PER_CHANNEL + PCM_SAMPLES_PER_CHANNEL / 2;
+        let pcm: Vec<Vec<f64>> = vec![vec![0.0; len]; 2];
+        match encode_all_frames(&header, &pcm, 0) {
+            Err(EncodeError::ShortPcmTail {
+                channel,
+                have,
+                frame,
+            }) => {
+                assert_eq!(channel, 0);
+                assert_eq!(have, len);
+                assert_eq!(frame, PCM_SAMPLES_PER_CHANNEL);
+            }
+            other => panic!("expected ShortPcmTail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_all_frames_rejects_mismatched_channel_lengths() {
+        let header = canonical_stereo_header();
+        let pcm: Vec<Vec<f64>> = vec![
+            vec![0.0; 2 * PCM_SAMPLES_PER_CHANNEL],
+            vec![0.0; 3 * PCM_SAMPLES_PER_CHANNEL],
+        ];
+        match encode_all_frames(&header, &pcm, 0) {
+            Err(EncodeError::BadPcmLen { channel, .. }) => assert_eq!(channel, 1),
+            other => panic!("expected BadPcmLen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_all_frames_rejects_wrong_channel_count() {
+        let header = canonical_stereo_header(); // expects 2 channels
+        let pcm: Vec<Vec<f64>> = vec![vec![0.0; PCM_SAMPLES_PER_CHANNEL]];
+        match encode_all_frames(&header, &pcm, 0) {
+            Err(EncodeError::BadPcmChannelCount { have, need }) => {
+                assert_eq!(have, 1);
+                assert_eq!(need, 2);
+            }
+            other => panic!("expected BadPcmChannelCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_all_frames_empty_stream_is_empty_output() {
+        let header = canonical_stereo_header();
+        let pcm: Vec<Vec<f64>> = vec![Vec::new(), Vec::new()];
+        let bytes = encode_all_frames(&header, &pcm, 0).expect("empty batch");
+        assert!(bytes.is_empty(), "empty stream encodes to no bytes");
+    }
+
+    #[test]
+    fn encode_all_frames_output_decodes_back_to_the_right_sample_count() {
+        let header = canonical_stereo_header();
+        let n_frames = 3;
+        let stream = tone_stream(2, 1_000.0, 0.5, n_frames);
+        let bytes = encode_all_frames(&header, &stream, 0).expect("batch encode");
+        let planes = crate::frame::decode_all_frames(&bytes).expect("decode batch");
+        assert_eq!(planes.len(), 2);
+        for plane in &planes {
+            assert_eq!(plane.len(), n_frames * PCM_SAMPLES_PER_CHANNEL);
+        }
     }
 }

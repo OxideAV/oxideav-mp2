@@ -8,6 +8,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Batch stream encode: `encode_all_frames` / `encode_all_frames_with_smr`**.
+  The encode-side counterpart of `decode_all_frames`: turns one continuous
+  per-channel PCM buffer into the concatenated Layer II byte stream, threading
+  a single persistent `EncodeFrameState` (the §C.1.3 analysis-filterbank X ring
+  buffer) through every frame so inter-frame continuity is byte-identical to a
+  hand-rolled `encode_frame_auto_with` loop. `encode_all_frames` derives each
+  frame's SMR via the §D.1 Model-1 chain; `encode_all_frames_with_smr` applies
+  a caller table verbatim. A per-channel length that is not a whole multiple of
+  `PCM_SAMPLES_PER_CHANNEL` (1152) is rejected with the new
+  `EncodeError::ShortPcmTail` (the partial trailing frame has no defined Layer II
+  encoding — callers own any zero-pad-to-boundary policy); unequal channel
+  lengths surface as `EncodeError::BadPcmLen`. Output feeds straight back into
+  `decode_all_frames`.
+
 - **Auto-SMR encode path: `encode_frame_auto` / `encode_frame_auto_with`**.
   The encoder now computes the §C.1.5.2.7 bit-allocator's
   signal-to-mask-ratio table **automatically** from each frame's PCM via the
