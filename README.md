@@ -92,6 +92,32 @@ original caller-supplied-SMR entry points (`encode_frame`,
 a constant table still produces a syntactically valid, rate-driven
 frame.
 
+**Batch stream encode** — `encode_all_frames` / `encode_all_frames_with_smr`
+are the encode-side counterpart of `decode_all_frames`: they turn one
+continuous per-channel PCM buffer into the concatenated Layer II byte
+stream, threading a single persistent `EncodeFrameState` (the §C.1.3
+analysis-filterbank X ring buffer) through every frame so the
+inter-frame continuity is byte-identical to a hand-rolled
+`encode_frame_auto_with` loop. A per-channel length that is not a whole
+multiple of 1152 samples is rejected with `EncodeError::ShortPcmTail`
+(the partial trailing frame has no defined Layer II encoding); the
+output feeds straight back into `decode_all_frames`.
+
+**Full-matrix encode → decode round-trip.** The complete public
+pipeline (`encode_all_frames` → `decode_all_frames`) is validated end
+to end across **every** Layer II sampling rate — the three MPEG-1 rates
+(32 / 44,1 / 48 kHz) **and** the three MPEG-2 LSF rates (16 / 22,05 /
+24 kHz) — for a continuous multi-frame tone
+(`tests/roundtrip_multirate.rs`). Per rate the test pins four envelope
+properties: exact sample count (`n_frames × 1152` per channel),
+reconstruction residual energy below half the signal energy after the
+filterbank group delay, Goertzel-bin spectral localisation (the tone
+bin dominates an unrelated probe bin by &gt;100×, proving the *right*
+tone is reproduced rather than broadband noise), and bit-exact-zero
+silence round-trip. Conformance is asserted as a bounded difference
+signal per ISO/IEC 11172-4, consistent with the floating-point
+filterbank definition.
+
 ## API
 
 The crate exposes both the registry path
