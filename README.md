@@ -66,10 +66,31 @@ primitives, the header writer (`FrameHeader::emit_bytes`), the §C.1.3
 polyphase analysis filterbank, scalefactor extraction, the SCFSI
 Table-C.4 selection, the §2.4.1.6 audio-data writer, the §C.1.5.2.7
 iterative bit allocator, the §2.4.3.3.4 quantizer, and the frame-level
-orchestrator (`encode_frame` / `encoder_frame` module). The encoder
-accepts a caller-supplied per-(channel, sub-band) signal-to-mask-ratio
-table; a constant table produces a syntactically valid frame whose
-quality is rate-driven.
+orchestrator (`encode_frame` / `encoder_frame` module).
+
+The encoder now has an **auto-SMR (psychoacoustically-driven) encode
+path** — `encode_frame_auto` / `encode_frame_auto_with` — that derives
+the §C.1.5.2.7 bit-allocator's signal-to-mask-ratio table automatically
+from each frame's PCM through the §D.1 Model-1 chain
+(`psy::compute_smr_model1_frame`): a Hann-windowed 1024-point FFT
+power-density spectrum (Step 1) → 96 dB SPL normalisation → per-subband
+sound-pressure level `L_sb(n)` (Step 2) → tonal / non-tonal masker
+extraction (Step 4) → threshold-in-quiet + bit-rate-offset decimation
+(Step 3 + 5a) → 0.5-Bark tonal decimation (Step 5b) → per-line global
+masking threshold `LTg(i)` (Step 6/7) → per-subband minimum masking
+threshold `LT_min(n)` (Step 8) → `SMR_sb(n) = L_sb(n) − LT_min(n)`
+(Step 9). For the MPEG-1 Layer II rates (32 / 44,1 / 48 kHz) the
+allocation is psychoacoustically driven; a multi-frame streaming
+auto-SMR encode round-trips through this crate's own decoder with the
+reconstructed-tone residual energy a fraction of the signal energy, and
+the auto allocation is verified to diverge from a flat-SMR allocation
+on spectrally-uneven input. For the MPEG-2 LSF rates — which the
+standard tabulates no Annex D Layer II masking curves for — the SMR
+degenerates to a flat 0 dB table (rate-driven allocation). The four
+original caller-supplied-SMR entry points (`encode_frame`,
+`encode_frame_with`, and the two `_ancillary` variants) are unchanged;
+a constant table still produces a syntactically valid, rate-driven
+frame.
 
 ## API
 
@@ -82,31 +103,30 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
 
 ## Not yet supported
 
-- A full Annex D §D.1 / §D.2 psychoacoustic model to drive the encoder's
-  SMR table automatically. The Model 1 §D.1 chain is now staged in `psy`
-  end-to-end through Step 9 — including **Step 3** (the overall-bit-rate
-  absolute-threshold offset, −12 dB ≥ 96 kbit/s/ch) and **Step 5(a)**
-  threshold-in-quiet decimation (`X(k) ≥ LTq(k)`), reading the Layer II
-  Annex D Table D.1d / D.1e / D.1f `LTq` curves now text-transcribed into
-  `tables_d2` (`LtqEntry`). The Model 2 §D.2 chain in `tables_model2` now
-  reaches the **signal-to-mask ratio** end to end: past the §D.2.4
-  step-(f) spreading convolution it runs the step-(g)…(n) threshold loop
-  — tonality index (g), required SNR (h), power ratio (i), per-partition
-  threshold (j), per-FFT-line spread (k), the absolute-threshold floor
-  (l), and the per-coder-partition `SMR_n` (n, with the Table D.5
-  narrow/wide-band rule). The §D.2 calc-partition tables are now
-  complete for all three Layer II sampling rates — Table D.3a (32 kHz,
-  49 partitions), **D.3b (44,1 kHz, 57 partitions)** and **D.3c (48 kHz,
-  58 partitions)** — selected by `calc_partition_table_for_rate`, so the
-  step-(f) spreading convolution and the step-(g)…(n) threshold loop run
-  at every rate. The §D.2.4 step-(l) **absolute-threshold tables D.4a /
-  D.4b / D.4c** (32 / 44,1 / 48 kHz) are now text-transcribed into
-  `tables_model2` as `AbsThrEntry` ranges, with
-  `abs_threshold_table_for_rate` selecting per rate and
-  `absolute_threshold_db_per_line` expanding a table into the per-FFT-line
-  dB slice the step-(l) `include_absolute_threshold` floor consumes (after
-  the caller's dB→energy conversion). What remains is wiring the assembled
-  Model-1 / Model-2 chain into the encoder's automatic SMR selection.
+- The §D.1 **Model 1** chain is now wired end-to-end into the encoder's
+  automatic SMR selection (see **Encode** above): `encode_frame_auto`
+  drives `psy::compute_smr_model1_frame` per frame to feed the
+  §C.1.5.2.7 bit allocator. What remains on the perceptual side:
+  - **Model 2 (§D.2)** is staged in `tables_model2` end-to-end to the
+    signal-to-mask ratio — past the §D.2.4 step-(f) spreading convolution
+    it runs the step-(g)…(n) threshold loop (tonality index (g), required
+    SNR (h), power ratio (i), per-partition threshold (j), per-FFT-line
+    spread (k), the absolute-threshold floor (l), and the
+    per-coder-partition `SMR_n` (n) with the Table D.5 narrow/wide-band
+    rule). Its calc-partition tables (D.3a/b/c) and absolute-threshold
+    tables (D.4a/b/c) are complete for all three Layer II rates, selected
+    by `calc_partition_table_for_rate` / `abs_threshold_table_for_rate`.
+    A `compute_smr_model2_frame` driver + an `encode_frame_auto`-style
+    Model-2 entry point is the next wiring step (Model 1 is wired; Model 2
+    is staged but not yet driven from the encoder).
+  - The §D.1 driver uses the current frame's first 1024 samples for the
+    FFT; the §D.1 Step 1 net +192-sample window shift (which needs the
+    next frame's lookahead) is a refinement that would tighten the
+    time-alignment of the masking estimate to the allocated subband
+    samples.
+  - The MPEG-2 **LSF** rates (16 / 22,05 / 24 kHz) fall back to a flat
+    0 dB SMR — the standard provides no Annex D Layer II masking tables
+    for them (a docs/spec gap, not an implementation one).
 - An ISO/IEC 11172-4 / 13818-4 *compliance-grade* SNR sweep across the
   full layered-test bitstream set. The single staged `layer2-…-192kbps`
   fixture is validated end-to-end (see **PCM conformance** above); a

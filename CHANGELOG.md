@@ -8,6 +8,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Auto-SMR encode path: `encode_frame_auto` / `encode_frame_auto_with`**.
+  The encoder now computes the §C.1.5.2.7 bit-allocator's
+  signal-to-mask-ratio table **automatically** from each frame's PCM via the
+  §D.1 Model-1 chain (`psy::compute_smr_model1_frame`), instead of requiring
+  a caller-supplied table. For the MPEG-1 Layer II rates (32 / 44,1 / 48 kHz)
+  the allocation is psychoacoustically driven; the §D.1 Step 2 `scf_max(n)`
+  operand is taken from the encoder's independently-extracted scalefactors
+  (largest Table 3-B.1 multiplier across the three granules) and the
+  Step 3 offset from `bit_rate / channels`. For the MPEG-2 LSF rates — which
+  the standard tabulates no Annex D Layer II masking curves for — the SMR
+  degenerates to a flat 0 dB table (rate-driven allocation). A multi-frame
+  streaming auto-SMR encode now round-trips through the decoder, with the
+  reconstructed-tone residual energy a fraction of the signal energy
+  (`tests::auto_smr_stream_round_trips_within_bound`); the auto allocation is
+  verified to differ from the flat-SMR allocation for spectrally-uneven
+  input (`tests::auto_smr_shapes_allocation_differently_from_flat_smr`). The
+  four existing caller-supplied-SMR entry points are unchanged.
+
 - **§D.1 Model-1 signal-to-mask-ratio driver `psy::compute_smr_model1_frame`**.
   Chains the previously-isolated §D.1 Step 1…9 primitives into the single
   per-subband `SMR_sb(n)` table the §C.1.5.2.7 bit allocator consumes:

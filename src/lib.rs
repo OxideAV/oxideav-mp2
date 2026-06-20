@@ -252,8 +252,9 @@ pub use encoder_bit_allocator::{
     SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
 pub use encoder_frame::{
-    encode_frame, encode_frame_with, encode_frame_with_ancillary,
-    encode_frame_with_state_and_ancillary, EncodeError, EncodeFrameState,
+    encode_frame, encode_frame_auto, encode_frame_auto_with, encode_frame_with,
+    encode_frame_with_ancillary, encode_frame_with_state_and_ancillary, EncodeError,
+    EncodeFrameState,
 };
 pub use encoder_samples::{
     quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,

@@ -66,6 +66,8 @@ use crate::encoder_scalefactors::{compute_scalefactors, SUBBAND_SAMPLES_PER_FRAM
 use crate::encoder_scfsi::select_scfsi;
 use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME};
 use crate::header::{FrameHeader, HeaderError};
+use crate::psy::{annex_d_sampling_rate, compute_smr_model1_frame, NUM_SUBBANDS_LAYER2};
+use crate::tables::SCALEFACTORS;
 
 /// Errors raised by the §2.4 / Annex C frame-level encode loop.
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +241,74 @@ impl EncodeFrameState {
     }
 }
 
+/// Where the §C.1.5.2.7 allocator's signal-to-mask-ratio table comes
+/// from for one [`encode_frame_inner`] call.
+enum SmrSource<'a> {
+    /// The caller passed an explicit per-(channel, sub-band) SMR table.
+    Provided(&'a SmrTable),
+    /// Compute the SMR automatically from this frame's PCM via the
+    /// §D.1 Model-1 psychoacoustic chain
+    /// ([`compute_smr_model1_frame`]).
+    Auto,
+}
+
+/// Derive the per-(channel, sub-band) §D.1 Model-1 SMR table for the
+/// frame from its PCM and the analysis-filterbank subband samples.
+///
+/// The §D.1 Step 2 `scf_max(n)` operand is the **largest** Table 3-B.1
+/// multiplier across the three scalefactor granules of subband `n` —
+/// equivalently `SCALEFACTORS[min_index]`, because Table 3-B.1 is
+/// monotonically decreasing (index 0 is the largest multiplier). We
+/// run [`compute_scalefactors`] over all 32 subbands (passing
+/// `sblimit = NUM_SUBBANDS` so every band is active) and take the
+/// smallest index per band.
+///
+/// The §D.1 Step 3 overall-bit-rate offset wants the bit rate **per
+/// channel** in kbit/s; that is `header.bit_rate / 1000 / channels`.
+///
+/// For MPEG-2 LSF sampling rates (16 / 22,05 / 24 kHz) the standard
+/// provides **no** Annex D Layer II masking tables, so
+/// [`annex_d_sampling_rate`] returns `None` and we fall back to an
+/// all-zero SMR table (a flat 0 dB SMR — the allocator then spends
+/// bits purely by the rate budget, the same behaviour as a
+/// caller-supplied constant table). The fallback keeps auto-encode
+/// usable at every rate; a perceptual model for the LSF rates is a
+/// documented spec gap, not an implementation one.
+fn compute_auto_smr_table(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    subband_samples: &[[[f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]],
+    channels: usize,
+) -> SmrTable {
+    let mut smr: SmrTable = [[0.0; NUM_SUBBANDS]; 2];
+
+    // No Annex D Layer II masking tables for the LSF rates: leave the
+    // table flat at 0 dB SMR (rate-driven allocation).
+    let Some(fs) = annex_d_sampling_rate(header.sample_rate) else {
+        return smr;
+    };
+
+    let bitrate_per_channel_kbps = f64::from(header.bit_rate) / 1000.0 / channels.max(1) as f64;
+
+    for ch in 0..channels {
+        // §D.1 Step 2 `scf_max(n)` per subband: the largest Table 3-B.1
+        // multiplier across the three granules.
+        let sf = compute_scalefactors(&subband_samples[ch], NUM_SUBBANDS);
+        let mut scf_max = [0.0f64; NUM_SUBBANDS_LAYER2];
+        for sb in 0..NUM_SUBBANDS_LAYER2 {
+            // Smallest index over the three granules ⇒ largest
+            // multiplier. `compute_scalefactors` yields valid 0..=62
+            // indices, every one a defined `SCALEFACTORS` entry.
+            let min_idx = sf[0][sb].min(sf[1][sb]).min(sf[2][sb]) as usize;
+            scf_max[sb] = SCALEFACTORS[min_idx];
+        }
+
+        let ch_smr = compute_smr_model1_frame(&pcm[ch], &scf_max, fs, bitrate_per_channel_kbps);
+        smr[ch][..NUM_SUBBANDS].copy_from_slice(&ch_smr[..NUM_SUBBANDS]);
+    }
+    smr
+}
+
 /// Encode one Layer II frame from `header.channels()` channels of
 /// [`PCM_SAMPLES_PER_CHANNEL`] samples each.
 ///
@@ -266,7 +336,14 @@ pub fn encode_frame(
     smr_db: &SmrTable,
     banc: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_frame_inner(header, pcm, smr_db, banc, &[], &mut EncodeFrameState::new())
+    encode_frame_inner(
+        header,
+        pcm,
+        SmrSource::Provided(smr_db),
+        banc,
+        &[],
+        &mut EncodeFrameState::new(),
+    )
 }
 
 /// Like [`encode_frame`] but with caller-supplied
@@ -279,7 +356,50 @@ pub fn encode_frame_with(
     banc: u32,
     state: &mut EncodeFrameState,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_frame_inner(header, pcm, smr_db, banc, &[], state)
+    encode_frame_inner(header, pcm, SmrSource::Provided(smr_db), banc, &[], state)
+}
+
+/// Encode one Layer II frame, computing the §C.1.5.2.7 allocator's
+/// signal-to-mask-ratio table **automatically** from the frame's PCM
+/// via the §D.1 Model-1 psychoacoustic chain
+/// ([`compute_smr_model1_frame`]) — the auto-SMR encode path.
+///
+/// This is the drop-in perceptual counterpart of [`encode_frame`]:
+/// the caller no longer supplies an SMR table; the encoder derives it
+/// per frame from the windowed FFT spectrum + the §D.1 masking model.
+/// For the MPEG-1 Layer II sampling rates (32 / 44,1 / 48 kHz) the
+/// allocation is psychoacoustically driven; for the MPEG-2 LSF rates
+/// (which the standard tabulates no Annex D Layer II masking curves
+/// for) the SMR degenerates to a flat 0 dB table and the allocation
+/// is rate-driven (see [`compute_auto_smr_table`]).
+///
+/// Builds a stateless analysis filterbank for the call; streaming
+/// callers should use [`encode_frame_auto_with`].
+pub fn encode_frame_auto(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(
+        header,
+        pcm,
+        SmrSource::Auto,
+        banc,
+        &[],
+        &mut EncodeFrameState::new(),
+    )
+}
+
+/// Like [`encode_frame_auto`] but with caller-supplied
+/// [`EncodeFrameState`] so the §C.1.3 analysis filterbank's X ring
+/// buffer persists across successive frames.
+pub fn encode_frame_auto_with(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(header, pcm, SmrSource::Auto, banc, &[], state)
 }
 
 /// Encode one Layer II frame and copy a §2.4.1.8 `ancillary_data()`
@@ -321,7 +441,7 @@ pub fn encode_frame_with_ancillary(
     encode_frame_inner(
         header,
         pcm,
-        smr_db,
+        SmrSource::Provided(smr_db),
         banc,
         ancillary,
         &mut EncodeFrameState::new(),
@@ -342,7 +462,14 @@ pub fn encode_frame_with_state_and_ancillary(
     ancillary: &[u8],
     state: &mut EncodeFrameState,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_frame_inner(header, pcm, smr_db, banc, ancillary, state)
+    encode_frame_inner(
+        header,
+        pcm,
+        SmrSource::Provided(smr_db),
+        banc,
+        ancillary,
+        state,
+    )
 }
 
 /// Shared implementation of the four public encode entry points.
@@ -353,7 +480,7 @@ pub fn encode_frame_with_state_and_ancillary(
 fn encode_frame_inner(
     header: &FrameHeader,
     pcm: &[Vec<f64>],
-    smr_db: &SmrTable,
+    smr_db: SmrSource<'_>,
     banc: u32,
     ancillary: &[u8],
     state: &mut EncodeFrameState,
@@ -405,6 +532,24 @@ fn encode_frame_inner(
             }
         }
     }
+
+    // ---- psychoacoustic SMR table (§D.1 Model-1, or caller-supplied) ----
+    //
+    // When the caller supplies an explicit table we use it verbatim;
+    // when they request `Auto` we drive the §D.1 Model-1 chain
+    // ([`psy::compute_smr_model1_frame`]) from this frame's PCM,
+    // deriving each subband's §D.1 Step 2 `scf_max(n)` from the
+    // scalefactors the encoder extracts independently of allocation
+    // (the largest Table 3-B.1 multiplier across the three granules =
+    // the smallest of the three scalefactor indices).
+    let owned_smr;
+    let smr_db: &SmrTable = match smr_db {
+        SmrSource::Provided(table) => table,
+        SmrSource::Auto => {
+            owned_smr = compute_auto_smr_table(header, pcm, &subband_samples, channels);
+            &owned_smr
+        }
+    };
 
     // ---- §C.1.5.2.7 bit allocation against the SMR table ----
     let mut audio = allocate_bits(header, smr_db, banc)?;
@@ -1356,5 +1501,144 @@ mod tests {
             }
             other => panic!("expected AncillaryTooLarge, got {other:?}"),
         }
+    }
+
+    // ---- Auto-SMR (§D.1 Model-1) encode path ----
+
+    #[test]
+    fn auto_smr_frame_is_well_formed_and_round_trips() {
+        // The auto-SMR path drives the §D.1 Model-1 chain to pick the
+        // allocation; the emitted frame must be the correct size, parse
+        // back, pass the §2.4.3.1 CRC, and reconstruct 1152 samples per
+        // channel.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.5);
+        let bytes = encode_frame_auto(&header, &pcm, 0).expect("auto encode");
+        assert_eq!(bytes.len(), header.frame_size_bytes());
+        let decoded = decode_frame(&bytes).expect("decode auto frame (with CRC)");
+        assert_eq!(decoded.header, header);
+        assert_eq!(decoded.pcm.len(), 2);
+        assert_eq!(decoded.pcm[0].len(), PCM_SAMPLES_PER_CHANNEL);
+    }
+
+    #[test]
+    fn auto_smr_allocation_is_nonzero_for_tonal_input() {
+        // A loud 1 kHz tone must receive a non-zero allocation in the
+        // band that carries it — the perceptual model has to spend bits
+        // where the audible signal is.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.8);
+        let bytes = encode_frame_auto(&header, &pcm, 0).expect("auto encode");
+        let mut reader = BitReader::with_position(&bytes, 6);
+        let (audio, _, _) =
+            parse_audio_data_with_section_bits(&header, &mut reader).expect("parse audio data");
+        let any_alloc =
+            (0..audio.channels).any(|ch| (0..audio.sblimit).any(|sb| audio.nb_steps[ch][sb] != 0));
+        assert!(
+            any_alloc,
+            "auto-SMR allocator produced an all-zero allocation for a loud tone"
+        );
+    }
+
+    #[test]
+    fn auto_smr_shapes_allocation_differently_from_flat_smr() {
+        // The whole point of wiring the psychoacoustic model in: a
+        // perceptually-shaped SMR must produce a DIFFERENT allocation
+        // than a flat 0 dB SMR for a spectrally-uneven input. We use a
+        // pure tone whose energy is concentrated in one subband; the
+        // Model-1 table raises that band's SMR well above the others,
+        // so the iterative allocator's choice of where to spend bits
+        // diverges from the flat-table allocator's choice.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.8);
+
+        let flat = encode_frame(&header, &pcm, &zero_smr(), 0).expect("flat encode");
+        let auto = encode_frame_auto(&header, &pcm, 0).expect("auto encode");
+
+        let parse_alloc = |bytes: &[u8]| {
+            let mut reader = BitReader::with_position(bytes, 6);
+            let (audio, _, _) = parse_audio_data_with_section_bits(&header, &mut reader).unwrap();
+            let mut v = Vec::new();
+            for ch in 0..audio.channels {
+                for sb in 0..audio.sblimit {
+                    v.push(audio.nb_steps[ch][sb]);
+                }
+            }
+            v
+        };
+        assert_ne!(
+            parse_alloc(&flat),
+            parse_alloc(&auto),
+            "auto-SMR allocation must differ from the flat-SMR allocation"
+        );
+    }
+
+    #[test]
+    fn auto_smr_stream_round_trips_within_bound() {
+        // Milestone check: an auto-SMR-driven multi-frame encode must
+        // round-trip through the decoder, reconstructing a tonal signal
+        // with bounded error. We encode several frames of a steady tone
+        // with the streaming `encode_frame_auto_with` (persistent X
+        // buffer), concatenate, decode the whole stream, and measure
+        // the residual against the input after the §C.1.3 / §2.4.3.2
+        // filterbank's combined analysis+synthesis delay.
+        let header = canonical_single_channel_header();
+        let freq = 1_000.0;
+        let amp = 0.5;
+        let omega = 2.0 * core::f64::consts::PI * freq / 44_100.0;
+
+        let n_frames = 8;
+        let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        // One long continuous tone split into frames.
+        let signal: Vec<f64> = (0..total).map(|i| amp * (omega * i as f64).sin()).collect();
+
+        let mut state = EncodeFrameState::new();
+        let mut stream = Vec::new();
+        for f in 0..n_frames {
+            let base = f * PCM_SAMPLES_PER_CHANNEL;
+            let frame_pcm = vec![signal[base..base + PCM_SAMPLES_PER_CHANNEL].to_vec()];
+            let bytes =
+                encode_frame_auto_with(&header, &frame_pcm, 0, &mut state).expect("auto encode");
+            assert_eq!(bytes.len(), header.frame_size_bytes());
+            stream.extend_from_slice(&bytes);
+        }
+
+        // Decode the whole stream back.
+        let planes = crate::frame::decode_all_frames(&stream).expect("decode stream");
+        assert_eq!(planes.len(), 1);
+        let out = &planes[0];
+        assert_eq!(out.len(), total);
+
+        // The combined analysis + synthesis filterbank delay is 480
+        // samples for Layer II (§2.4.3.2 / §C.1.3); compare the steady
+        // middle of the stream where the tone is fully established,
+        // accounting for that delay. We measure the correlation-style
+        // residual energy ratio rather than a per-sample bound, since
+        // the float filterbanks and the perceptual quantiser both add
+        // sub-LSB-scale shaping that is not bit-defined.
+        let delay = 480usize;
+        let lo = delay + PCM_SAMPLES_PER_CHANNEL; // skip the first frame's ramp-in
+        let hi = total - PCM_SAMPLES_PER_CHANNEL; // skip the trailing partial
+        assert!(hi > lo, "stream long enough to have a steady middle");
+
+        let mut sig_energy = 0.0_f64;
+        let mut err_energy = 0.0_f64;
+        for i in lo..hi {
+            let want = signal[i - delay];
+            let got = out[i];
+            sig_energy += want * want;
+            let e = got - want;
+            err_energy += e * e;
+        }
+        // A working perceptual encode reconstructs the tone with the
+        // error energy a fraction of the signal energy. We assert a
+        // generous bound (error < signal) — a broken allocation (e.g.
+        // all-zero, or the SMR sign inverted) blows past this because
+        // the band carrying the tone would receive too few steps and
+        // the reconstruction would be near-silent or noise-dominated.
+        assert!(
+            err_energy < sig_energy,
+            "auto-SMR reconstruction error energy {err_energy:.4} exceeds signal energy {sig_energy:.4}"
+        );
     }
 }
