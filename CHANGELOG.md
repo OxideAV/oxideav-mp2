@@ -8,6 +8,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Full Layer II decode-conformance matrix (`tests/decode_matrix_conformance.rs`)**.
+  The §2.4.3 decode chain (header → bit-allocation table → §2.4.3.3.4
+  requantization → §2.4.3.3.3 scalefactor rescaling → §2.4.3.2 / Annex A
+  Figure A.2 synthesis filterbank) is now validated against an independent
+  black-box reference decoder across **every** Layer II channel-mode ×
+  sampling-rate combination — MPEG-1 single-channel and stereo at 32 / 44.1 /
+  48 kHz, and MPEG-2 LSF at 16 / 22.05 / 24 kHz — not just the single staged
+  44.1 kHz stereo stream. Each fixture (`tests/fixtures/<name>.mp2` with its
+  reference `<name>.ref.wav`) decodes to within the ISO floating-point
+  filterbank conformance envelope (max abs ≤ 1 LSB, rms ≈ 0.5 LSB, ~75 %
+  bit-exact). The fixtures are opaque encode→decode products consumed only as
+  bytes — see `tests/fixtures/README.md`. A regression localised to one rate's
+  allocation table or LSF sizing can no longer hide behind the others.
+
 - **Batch stream encode: `encode_all_frames` / `encode_all_frames_with_smr`**.
   The encode-side counterpart of `decode_all_frames`: turns one continuous
   per-channel PCM buffer into the concatenated Layer II byte stream, threading
