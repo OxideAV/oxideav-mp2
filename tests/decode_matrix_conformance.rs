@@ -24,7 +24,9 @@
 //! rms well under 1 LSB, and a high exact-match ratio that collapses
 //! immediately if any decode stage regresses. See `fixtures/README.md`.
 
-use oxideav_mp2::decode_all_frames;
+use oxideav_mp2::frame::{decode_frame_with, FrameDecodeState};
+use oxideav_mp2::header::FrameHeader;
+use oxideav_mp2::{decode_all_frames, PCM_SAMPLES_PER_CHANNEL};
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
 
@@ -150,6 +152,80 @@ fn decode_matrix_matches_reference_within_iso_tolerance() {
             "{label}: only {:.1}% of samples bit-exact (expected > 70%)",
             exact_ratio * 100.0
         );
+    }
+}
+
+#[test]
+fn decode_matrix_is_within_bound_on_every_individual_frame() {
+    // A whole-stream rms/exact-ratio can mask a regression confined to
+    // one frame (e.g. a cold-start V-buffer slip on frame 0, or a
+    // padding-byte frame mis-sized). Pin the ISO ≤1 LSB envelope on
+    // *each* 1152-sample frame independently — including frame 0, where
+    // the §2.4.3.3.5 V ring buffer is cold (Annex A Figure A.2 footnote
+    // 1) exactly as the reference decoder's is.
+    for &(stem, channels, label) in MATRIX {
+        let Some((mp2, _ref_ch, expected)) = load(stem) else {
+            continue;
+        };
+        let planes = decode_all_frames(&mp2).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+        let per_channel = planes[0].len();
+        let n_frames = per_channel / PCM_SAMPLES_PER_CHANNEL;
+        assert!(n_frames > 0, "{label}: at least one frame");
+
+        for f in 0..n_frames {
+            let mut frame_max = 0i32;
+            for i in f * PCM_SAMPLES_PER_CHANNEL..(f + 1) * PCM_SAMPLES_PER_CHANNEL {
+                for (ch, plane) in planes.iter().enumerate() {
+                    let g = to_i16(plane[i]);
+                    let e = expected[i * channels + ch];
+                    frame_max = frame_max.max((g as i32 - e as i32).abs());
+                }
+            }
+            assert!(
+                frame_max <= 1,
+                "{label}: frame {f} max abs PCM error {frame_max} LSB exceeds the ≤1 bound"
+            );
+        }
+    }
+}
+
+#[test]
+fn streaming_decode_equals_batch_decode() {
+    // Decoding frame-by-frame through `decode_frame_with` with a single
+    // persisted `FrameDecodeState` must be byte-identical to the
+    // batch `decode_all_frames` path: both thread the same §2.4.3.3.5 V
+    // ring buffer across frames, so any divergence would mean the batch
+    // loop resets or mis-chains filterbank state.
+    for &(stem, channels, label) in MATRIX {
+        let Some((mp2, _ref_ch, _expected)) = load(stem) else {
+            continue;
+        };
+        let batch = decode_all_frames(&mp2).unwrap_or_else(|e| panic!("{label}: batch: {e:?}"));
+
+        let mut state = FrameDecodeState::new();
+        let mut streamed: Vec<Vec<f64>> = vec![Vec::new(); channels];
+        let mut offset = 0usize;
+        while offset + 4 <= mp2.len() {
+            if !(mp2[offset] == 0xFF && (mp2[offset + 1] & 0xF0) == 0xF0) {
+                offset += 1;
+                continue;
+            }
+            let header = FrameHeader::parse(&mp2[offset..]).expect("header");
+            let size = header.frame_size_bytes();
+            let frame = decode_frame_with(&mp2[offset..], &mut state).expect("decode_frame_with");
+            for (ch, samples) in frame.pcm.iter().enumerate() {
+                streamed[ch].extend_from_slice(samples);
+            }
+            offset += size;
+        }
+
+        assert_eq!(streamed.len(), batch.len(), "{label}: channel count");
+        for ch in 0..streamed.len() {
+            assert_eq!(
+                streamed[ch], batch[ch],
+                "{label}: ch {ch} streaming decode diverged from batch decode (bit-identical f64 expected)"
+            );
+        }
     }
 }
 

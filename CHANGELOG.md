@@ -20,7 +20,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   filterbank conformance envelope (max abs ≤ 1 LSB, rms ≈ 0.5 LSB, ~75 %
   bit-exact). The fixtures are opaque encode→decode products consumed only as
   bytes — see `tests/fixtures/README.md`. A regression localised to one rate's
-  allocation table or LSF sizing can no longer hide behind the others.
+  allocation table or LSF sizing can no longer hide behind the others. The
+  envelope is additionally pinned **per individual 1152-sample frame** (the
+  cold-start frame 0, where the §2.4.3.3.5 V ring buffer is zero per Annex A
+  Figure A.2 footnote 1, is already within ≤1 LSB on every fixture), and a
+  streaming-equivalence check confirms frame-by-frame `decode_frame_with` with
+  a persisted `FrameDecodeState` is bit-identical (f64) to the batch
+  `decode_all_frames` path — guarding the inter-frame V-buffer threading.
 
 - **Batch stream encode: `encode_all_frames` / `encode_all_frames_with_smr`**.
   The encode-side counterpart of `decode_all_frames`: turns one continuous
