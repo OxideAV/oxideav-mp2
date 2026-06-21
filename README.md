@@ -165,11 +165,15 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
     0 dB SMR — the standard provides no Annex D Layer II masking tables
     for them (a docs/spec gap, not an implementation one).
 - An ISO/IEC 11172-4 / 13818-4 *compliance-grade* SNR sweep across the
-  full layered-test bitstream set. The single staged `layer2-…-192kbps`
-  fixture is validated end-to-end (see **PCM conformance** above); a
-  broader multi-rate / multi-mode reference corpus (mono, joint-stereo
-  with a live intensity bound, 32 / 48 kHz, MPEG-2 LSF) would harden the
-  envelope further but is not yet staged.
+  full layered-test bitstream set. The decode path is now validated
+  end-to-end across the whole channel-mode × sampling-rate matrix —
+  MPEG-1 mono/stereo at 32 / 44,1 / 48 kHz and MPEG-2 LSF at
+  16 / 22,05 / 24 kHz (see **PCM conformance** above). The one remaining
+  decode-fixture gap is a stream with a **live intensity-stereo bound**
+  (`mode_extension != bound4`, so `bound < sblimit`): the available
+  black-box encoder only emits full stereo for Layer II, so this region
+  is currently exercised only by the crate's own encode→decode
+  round-trip rather than against an independent reference.
 
 ## Robustness
 
