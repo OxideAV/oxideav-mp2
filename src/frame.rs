@@ -517,7 +517,7 @@ mod tests {
         assert_eq!(frame.header.mode, Mode::Stereo);
         // protection_bit semantics per §2.4.2.3 are *active low*: the
         // wire bit `'1'` means "no CRC", `'0'` means "16-bit CRC slot
-        // follows the header". The staged ffmpeg-encoded fixture has
+        // follows the header". The staged black-box-encoded fixture has
         // the wire bit `'1'` → field `protection_bit == true` → no
         // CRC. The CRC verification path is exercised separately in
         // `crc_mismatch_is_detected` against a constructed fixture

@@ -10,8 +10,10 @@ Clean-room implementation. Every numeric table is read only from
 ISO/IEC 11172-3 (1993) with Annex B, and from ISO/IEC 13818-3 (1997)
 §2.4.2.3 / Annex B Table B.1 for the MPEG-2 LSF (Lower Sampling
 Frequencies) extension. The decoder is complete end-to-end (frame →
-PCM) and **validated against a real Layer II fixture** to within the
-ISO floating-point-filterbank conformance bound (max abs ≤ 1 LSB);
+PCM) and **validated against real Layer II fixtures spanning the whole
+channel-mode × sampling-rate matrix** (MPEG-1 mono/stereo at
+32/44,1/48 kHz + MPEG-2 LSF at 16/22,05/24 kHz) to within the ISO
+floating-point-filterbank conformance bound (max abs ≤ 1 LSB, per-frame);
 the encoder is implemented through frame assembly and is wired to the
 runtime registry as a decoder.
 
@@ -47,19 +49,28 @@ runtime registry as a decoder.
 - **Frame-level decode loop**: `decode_frame` / `decode_all_frames`
   parse a stream end-to-end with per-stream filterbank state and
   mid-stream resynchronisation.
-- **PCM conformance vs. a real fixture**: the full decode chain is
-  validated end-to-end against the staged `layer2-stereo-44100-192kbps`
-  fixture's `expected.wav` (31 frames → 71 424 interleaved s16 samples).
-  Sample count is exact and the per-sample error envelope is **max abs
-  ≤ 1 LSB, rms < 0.6 LSB, > 70 % bit-exact** — the ISO conformance
-  bound. (§2.4.3.2 / §2.4.3.3.5 specify the filterbank in floating
-  point with no fixed accumulation order or integer-rounding rule, so
-  an independent clean-room decoder reproduces a reference decoder's
-  output only within that envelope, not byte-for-byte; ISO/IEC 11172-4
-  defines conformance itself as a bounded difference signal.) The
-  fractional→`i16` map uses the symmetric `2^15` full-scale
-  (`−1.0 ↦ −32768`) matching the §2.4.3.3.4 "MSB represents −1"
-  convention.
+- **PCM conformance vs. real fixtures across the whole rate matrix**:
+  the full decode chain is validated end-to-end against the staged
+  `layer2-stereo-44100-192kbps` fixture's `expected.wav`
+  (31 frames → 71 424 interleaved s16 samples) **and** against an
+  independent black-box reference decoder over the complete Layer II
+  channel-mode × sampling-rate matrix — MPEG-1 single-channel and stereo
+  at 32 / 44,1 / 48 kHz, plus MPEG-2 LSF at 16 / 22,05 / 24 kHz
+  (`tests/decode_matrix_conformance.rs`, fixtures under
+  `tests/fixtures/`). Every fixture decodes with exact sample count and
+  a per-sample error envelope of **max abs ≤ 1 LSB, rms ≈ 0.5 LSB,
+  ~75 % bit-exact**, and the envelope holds **per individual 1152-sample
+  frame** (including the cold-start frame 0 whose §2.4.3.3.5 V buffer is
+  zero per Annex A Figure A.2 footnote 1). A streaming-equivalence check
+  confirms frame-by-frame `decode_frame_with` with persisted state is
+  bit-identical to the batch `decode_all_frames` path. (§2.4.3.2 /
+  §2.4.3.3.5 specify the filterbank in floating point with no fixed
+  accumulation order or integer-rounding rule, so an independent
+  clean-room decoder reproduces a reference decoder's output only within
+  that envelope, not byte-for-byte; ISO/IEC 11172-4 defines conformance
+  itself as a bounded difference signal.) The fractional→`i16` map uses
+  the symmetric `2^15` full-scale (`−1.0 ↦ −32768`) matching the
+  §2.4.3.3.4 "MSB represents −1" convention.
 
 **Encode** — the frame-assembly path is in place: the CRC-16 write
 primitives, the header writer (`FrameHeader::emit_bytes`), the §C.1.3
