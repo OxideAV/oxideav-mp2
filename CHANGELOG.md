@@ -8,6 +8,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Joint-stereo (intensity) + dual-channel mode×rate robustness matrix
+  (`tests/joint_stereo_matrix.rs`)**. The existing
+  `tests/roundtrip_multirate.rs` exercises only `Mode::Stereo` with
+  `ModeExtension::Bound4`; this new suite broadens the channel-mode axis so
+  the §2.4.1.6 intensity-stereo region (`bound ≤ sb < sblimit`) and the
+  `dual_channel` two-independent-mono path get equal coverage across the whole
+  sampling-rate ladder. It pins five properties: (1) joint-stereo encode →
+  decode round-trips at **every** `mode_extension` bound (4 / 8 / 12 / 16) ×
+  every MPEG-1 and MPEG-2 LSF rate, with a successful frame-size-exact decode
+  proving the §2.4.2.6 shared-codeword loop stays bit-aligned through the
+  intensity region; (2) the intensity region is genuinely non-empty for the
+  wide-table cases (parsed `bound` matches the clamped expectation and at
+  least one above-bound subband is allocated, with `nb_steps[0] == nb_steps[1]`
+  enforced); (3) the §2.4.2.3 `bound = min(mode_extension_bound, sblimit)`
+  **clamp** at the low-rate B.2c (sblimit 8, 48 kHz) / B.2d (sblimit 12,
+  32 kHz) tables — `Bound12` / `Bound16` collapse the intensity region to
+  empty and the decoder must not read phantom codewords; (4) `dual_channel`
+  reconstructs two *independent* tones (a cross-channel leak would put one
+  channel's tone in the other); and (5) joint-stereo silence round-trips to
+  exact-zero PCM at every bound. Reconstruction is asserted as the ISO
+  bounded-difference envelope (sample count, error/signal energy ratio,
+  Goertzel spectral localisation), matching `roundtrip_multirate.rs`.
 - **Full Layer II decode-conformance matrix (`tests/decode_matrix_conformance.rs`)**.
   The §2.4.3 decode chain (header → bit-allocation table → §2.4.3.3.4
   requantization → §2.4.3.3.3 scalefactor rescaling → §2.4.3.2 / Annex A

@@ -1,0 +1,449 @@
+//! Round 360 — joint-stereo (intensity) + dual-channel mode×rate
+//! robustness matrix for the Layer II encode → decode pipeline.
+//!
+//! The existing `tests/roundtrip_multirate.rs` exercises only
+//! `Mode::Stereo` with `ModeExtension::Bound4`. This test broadens the
+//! channel-mode axis so the §2.4.1.6 **intensity-stereo region**
+//! (`bound ≤ sb < sblimit`) and the `dual_channel` two-independent-mono
+//! path get equal coverage across the whole sampling-rate ladder:
+//!
+//! * **Joint-stereo, every `mode_extension` bound (4 / 8 / 12 / 16).**
+//!   The §2.4.2.3 bound sets where intensity coding starts; above it
+//!   the bitstream carries ONE shared sample codeword per subband per
+//!   §2.4.2.6, with each channel rescaling it by its own §2.4.3.3.3
+//!   scalefactor. A decoder that mis-counts the codewords in the
+//!   intensity region desyncs the whole frame, so a successful decode
+//!   that lands exactly `frame_size_bytes()` long and reproduces the
+//!   right tone is direct evidence the intensity loop stays
+//!   bit-aligned.
+//!
+//! * **Bound clamping at low-`sblimit` tables.** §2.4.2.3:
+//!   `bound = min(mode_extension_bound, sblimit)`. At 64 kbit/s the
+//!   per-channel rate selects B.2c (`sblimit = 8`) at 48 kHz or B.2d
+//!   (`sblimit = 12`) at 32 kHz, so `Bound12` / `Bound16` collapse the
+//!   intensity region to empty — the joint-stereo frame degenerates to
+//!   a flat per-channel read. The decoder must handle that degenerate
+//!   case without reading phantom intensity codewords.
+//!
+//! * **Dual-channel mode.** Two independent mono programmes carried in
+//!   one stream (`bound == sblimit`, no shared region). The two
+//!   channels are decoded with fully independent allocation,
+//!   scalefactors and codewords; feeding two *different* tones must
+//!   reconstruct each channel's own tone.
+//!
+//! # Conformance basis
+//!
+//! The §C.1.3 analysis and §2.4.3.2 synthesis filterbanks are
+//! floating-point with no prescribed accumulation order (ISO/IEC
+//! 11172-4 defines conformance as a *bounded* difference signal), so —
+//! exactly as in `roundtrip_multirate.rs` — the assertions are envelope
+//! properties (sample count, reconstruction-energy ratio, spectral
+//! localisation), not byte equalities.
+//!
+//! Clean-room basis: rate ladders, the `(bitrate, mode)` matrix, the
+//! `bound = (mode_extension + 1) · 4` mapping and the
+//! `bound = min(bound, sblimit)` clamp are all read from the staged
+//! `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` (§2.4.1.6 / §2.4.2.3 /
+//! §2.4.2.6) and `docs/audio/mp3/ISO_IEC_13818-3-MPEG2-audio-1997.pdf`
+//! (§2.4.2.3 LSF Table). No third-party MP2 implementation source was
+//! consulted.
+
+use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
+use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
+use oxideav_mp2::{decode_all_frames, encode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
+
+use oxideav_core::bits::BitReader;
+
+/// Combined §C.1.3 analysis + §2.4.3.2 synthesis filterbank group
+/// delay for Layer II, in samples (matches `roundtrip_multirate.rs`).
+const FILTERBANK_DELAY: usize = 480;
+
+fn header(
+    lsf: bool,
+    sample_rate: u32,
+    bit_rate: u32,
+    mode: Mode,
+    mode_extension: ModeExtension,
+) -> FrameHeader {
+    FrameHeader {
+        lsf,
+        protection_bit: true, // true == "no CRC" per the §2.4.2.3 inverted convention
+        bit_rate,
+        sample_rate,
+        padding: false,
+        private_bit: false,
+        mode,
+        mode_extension,
+        copyright: false,
+        original: true,
+        emphasis: Emphasis::None,
+    }
+}
+
+/// `n_frames` of a continuous per-channel sine at `freq_hz`, sampled at
+/// `sample_rate`. Amplitude stays inside the §2.4.3.4.7.1 `[-1, +1]`
+/// range. Each channel may carry its own frequency.
+fn tone_stream(freqs: &[f64], amp: f64, sample_rate: u32, n_frames: usize) -> Vec<Vec<f64>> {
+    let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+    freqs
+        .iter()
+        .map(|&f| {
+            let omega = 2.0 * std::f64::consts::PI * f / sample_rate as f64;
+            (0..total).map(|i| amp * (omega * i as f64).sin()).collect()
+        })
+        .collect()
+}
+
+/// Goertzel single-bin power estimate of `signal` at `freq_hz`
+/// (sampled at `sample_rate`).
+fn goertzel_power(signal: &[f64], freq_hz: f64, sample_rate: u32) -> f64 {
+    let w = 2.0 * std::f64::consts::PI * freq_hz / sample_rate as f64;
+    let coeff = 2.0 * w.cos();
+    let mut s_prev = 0.0;
+    let mut s_prev2 = 0.0;
+    for &x in signal {
+        let s = x + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev = s;
+    }
+    s_prev * s_prev + s_prev2 * s_prev2 - coeff * s_prev * s_prev2
+}
+
+/// Assert the decoded `out` plane reproduces `want_freq` and not
+/// `probe_freq`, and that the residual against the delayed original
+/// holds only a fraction of the signal energy.
+fn assert_tone_reconstructed(
+    out: &[f64],
+    original: &[f64],
+    want_freq: f64,
+    probe_freq: f64,
+    sample_rate: u32,
+    n_frames: usize,
+    label: &str,
+) {
+    let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+    let lo = FILTERBANK_DELAY + PCM_SAMPLES_PER_CHANNEL; // skip ramp-in
+    let hi = total - PCM_SAMPLES_PER_CHANNEL; // skip trailing partial
+    assert!(hi > lo, "{label}: stream long enough for a steady middle");
+
+    let mut sig_energy = 0.0_f64;
+    let mut err_energy = 0.0_f64;
+    for i in lo..hi {
+        let w = original[i - FILTERBANK_DELAY];
+        let g = out[i];
+        sig_energy += w * w;
+        let e = g - w;
+        err_energy += e * e;
+    }
+    assert!(sig_energy > 0.0, "{label}: non-trivial signal");
+    let ratio = err_energy / sig_energy;
+    assert!(
+        ratio < 0.5,
+        "{label}: reconstruction error/signal energy {ratio:.4} too high"
+    );
+
+    let steady = &out[lo..hi];
+    let tone_power = goertzel_power(steady, want_freq, sample_rate);
+    let probe_power = goertzel_power(steady, probe_freq, sample_rate);
+    assert!(
+        tone_power > 100.0 * probe_power.max(f64::MIN_POSITIVE),
+        "{label}: tone power {tone_power:.3e} does not dominate probe power {probe_power:.3e}"
+    );
+}
+
+/// (is_lsf, sample_rate, total_bitrate) tuples whose joint-stereo
+/// per-channel rate selects B.2b (sblimit=30) at 44.1/32 kHz or B.2a
+/// (sblimit=27) at 48 kHz — i.e. tables wide enough that all four
+/// `mode_extension` bounds leave a non-empty intensity region.
+const WIDE_RATE_MATRIX: &[(bool, u32, u32)] = &[
+    (false, 32_000, 192_000), // per_ch 96 → B.2b (sblimit 30)
+    (false, 44_100, 192_000), // per_ch 96 → B.2b (sblimit 30)
+    (false, 48_000, 192_000), // per_ch 96 → B.2a (sblimit 27)
+    (true, 16_000, 128_000),  // LSF → B.1 (sblimit 30)
+    (true, 22_050, 128_000),  // LSF → B.1 (sblimit 30)
+    (true, 24_000, 128_000),  // LSF → B.1 (sblimit 30)
+];
+
+const ALL_BOUNDS: &[ModeExtension] = &[
+    ModeExtension::Bound4,
+    ModeExtension::Bound8,
+    ModeExtension::Bound12,
+    ModeExtension::Bound16,
+];
+
+#[test]
+fn joint_stereo_round_trips_at_every_bound_and_rate() {
+    let n_frames = 8;
+    let amp = 0.5;
+    let tone_hz = 1_000.0;
+    let probe_hz = 7_000.0;
+
+    for &(lsf, sample_rate, bit_rate) in WIDE_RATE_MATRIX {
+        for &ext in ALL_BOUNDS {
+            let h = header(lsf, sample_rate, bit_rate, Mode::JointStereo, ext);
+            let label = format!("JS {sample_rate}Hz {}kbps {ext:?}", bit_rate / 1000);
+
+            // Identical input on both channels so the shared above-bound
+            // codeword and per-channel scalefactors coincide.
+            let stream = tone_stream(&[tone_hz, tone_hz], amp, sample_rate, n_frames);
+
+            let bytes = encode_all_frames(&h, &stream, 0)
+                .unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+            // A desync in the intensity region would change the byte
+            // count: the frame must be exactly n_frames whole frames.
+            assert_eq!(
+                bytes.len(),
+                n_frames * h.frame_size_bytes(),
+                "{label}: encoded byte length"
+            );
+
+            let planes =
+                decode_all_frames(&bytes).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+            assert_eq!(planes.len(), 2, "{label}: stereo");
+            let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+            for (ch, plane) in planes.iter().enumerate() {
+                assert_eq!(plane.len(), total, "{label}: ch {ch} sample count");
+            }
+
+            // Both channels carried the same tone; each must reproduce it.
+            for (ch, plane) in planes.iter().enumerate() {
+                assert_tone_reconstructed(
+                    plane,
+                    &stream[ch],
+                    tone_hz,
+                    probe_hz,
+                    sample_rate,
+                    n_frames,
+                    &format!("{label} ch{ch}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn joint_stereo_intensity_region_is_actually_exercised() {
+    // The robustness test above proves the decoder *survives* the
+    // intensity region, but only if the region is non-empty. Pin that
+    // the encoder produces an allocated above-bound subband for a
+    // wide-table joint-stereo frame at each bound, and that the
+    // decoder's parsed bound matches the clamped expectation — so the
+    // round-trip is genuinely covering the shared-codeword path and not
+    // silently degenerating to `bound == sblimit`.
+    let n_frames = 2;
+    let amp = 0.6;
+    // A tone high enough to push energy into upper subbands so the
+    // allocator funds the intensity region. 1 kHz at 44.1 kHz sits in a
+    // low subband; pick a spread of energy via a richer two-tone input.
+    let sample_rate = 44_100;
+    let stream: Vec<Vec<f64>> = {
+        let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        let mk = |f1: f64, f2: f64| -> Vec<f64> {
+            let w1 = 2.0 * std::f64::consts::PI * f1 / sample_rate as f64;
+            let w2 = 2.0 * std::f64::consts::PI * f2 / sample_rate as f64;
+            (0..total)
+                .map(|i| amp * 0.5 * ((w1 * i as f64).sin() + (w2 * i as f64).sin()))
+                .collect()
+        };
+        vec![mk(1_000.0, 12_000.0), mk(1_000.0, 12_000.0)]
+    };
+
+    for &ext in ALL_BOUNDS {
+        let h = header(false, sample_rate, 192_000, Mode::JointStereo, ext);
+        let label = format!("JS-intensity {ext:?}");
+        let bytes =
+            encode_all_frames(&h, &stream, 0).unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+
+        // Parse frame 0's audio-data side info to inspect the bound and
+        // the above-bound allocation.
+        let mut reader = BitReader::with_position(&bytes, 4);
+        let (audio, _, _) =
+            parse_audio_data_with_section_bits(&h, &mut reader).expect("parse audio-data");
+
+        let expected_bound = ext.bound().min(audio.sblimit);
+        assert_eq!(audio.bound, expected_bound, "{label}: clamped bound");
+        assert!(
+            audio.bound < audio.sblimit,
+            "{label}: wide table keeps a non-empty intensity region (bound {} < sblimit {})",
+            audio.bound,
+            audio.sblimit
+        );
+        // At least one above-bound subband should carry a shared
+        // allocation — otherwise the round-trip never reads a shared
+        // codeword and the intensity path is untested.
+        let any_allocated = (audio.bound..audio.sblimit).any(|sb| audio.nb_steps[0][sb] != 0);
+        assert!(
+            any_allocated,
+            "{label}: at least one above-bound subband must be allocated for the test to bite"
+        );
+        // §2.4.1.6 forces allocation[1][sb] == allocation[0][sb] above
+        // bound; the decoder copies the single on-wire field to both
+        // channels.
+        for sb in audio.bound..audio.sblimit {
+            assert_eq!(
+                audio.nb_steps[0][sb], audio.nb_steps[1][sb],
+                "{label}: above-bound sb={sb} must share allocation across channels"
+            );
+        }
+    }
+}
+
+#[test]
+fn joint_stereo_bound_clamps_to_sblimit_at_low_rate_tables() {
+    // §2.4.2.3 `bound = min(mode_extension_bound, sblimit)`. At 64
+    // kbit/s the joint-stereo per-channel rate is 32 kbit/s, selecting
+    // B.2c (sblimit=8) at 48 kHz and B.2d (sblimit=12) at 32 kHz. With
+    // `Bound16` the intensity region collapses to empty; the
+    // joint-stereo frame degenerates to a flat per-channel read. The
+    // decoder must round-trip the degenerate case without reading any
+    // phantom intensity codewords.
+    let n_frames = 4;
+    let amp = 0.4;
+    let tone_hz = 900.0;
+    let probe_hz = 5_000.0;
+
+    // (sample_rate, expected_sblimit) for the B.2c / B.2d clamp cases.
+    let clamp_cases: &[(u32, usize)] = &[(48_000, 8), (32_000, 12)];
+
+    for &(sample_rate, expected_sblimit) in clamp_cases {
+        for &ext in &[ModeExtension::Bound12, ModeExtension::Bound16] {
+            let h = header(false, sample_rate, 64_000, Mode::JointStereo, ext);
+            let label = format!("JS-clamp {sample_rate}Hz {ext:?}");
+            let stream = tone_stream(&[tone_hz, tone_hz], amp, sample_rate, n_frames);
+            let bytes = encode_all_frames(&h, &stream, 0)
+                .unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+
+            let mut reader = BitReader::with_position(&bytes, 4);
+            let (audio, _, _) =
+                parse_audio_data_with_section_bits(&h, &mut reader).expect("parse audio-data");
+            assert_eq!(
+                audio.sblimit, expected_sblimit,
+                "{label}: low-rate table sblimit"
+            );
+            // Bound clamps down to sblimit → intensity region is empty.
+            assert_eq!(
+                audio.bound, expected_sblimit,
+                "{label}: bound clamps to sblimit so intensity region is empty"
+            );
+
+            let planes =
+                decode_all_frames(&bytes).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+            assert_eq!(planes.len(), 2, "{label}: stereo");
+            let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+            for (ch, plane) in planes.iter().enumerate() {
+                assert_eq!(plane.len(), total, "{label}: ch {ch} sample count");
+                assert_tone_reconstructed(
+                    plane,
+                    &stream[ch],
+                    tone_hz,
+                    probe_hz,
+                    sample_rate,
+                    n_frames,
+                    &format!("{label} ch{ch}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn dual_channel_reconstructs_two_independent_tones() {
+    // §2.4.2.3 `dual_channel`: two independent mono programmes carried
+    // in one stream. `bound == sblimit` (no intensity region), and the
+    // two channels are decoded with fully independent allocation,
+    // scalefactors and codewords. Feeding each channel a *different*
+    // tone must reconstruct that channel's own tone — a cross-channel
+    // leak (e.g. accidental codeword sharing) would put channel 1's
+    // tone into channel 0.
+    let n_frames = 8;
+    let amp = 0.5;
+    // Two distinct tones, both low enough to localise cleanly at every
+    // rate in the matrix (including the LSF 16 kHz / flat-SMR path,
+    // whose allocator starves higher subbands more than the
+    // perceptually-shaped MPEG-1 rates).
+    let l_hz = 800.0;
+    let r_hz = 1_600.0;
+
+    // dual_channel is allowed at 64..=192 kbit/s and 224..=384 kbit/s.
+    for &(lsf, sample_rate, bit_rate) in WIDE_RATE_MATRIX {
+        let h = header(
+            lsf,
+            sample_rate,
+            bit_rate,
+            Mode::DualChannel,
+            ModeExtension::Bound4, // ignored for dual_channel
+        );
+        let label = format!("dual {sample_rate}Hz {}kbps", bit_rate / 1000);
+        let stream = tone_stream(&[l_hz, r_hz], amp, sample_rate, n_frames);
+
+        let bytes =
+            encode_all_frames(&h, &stream, 0).unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+        assert_eq!(
+            bytes.len(),
+            n_frames * h.frame_size_bytes(),
+            "{label}: encoded byte length"
+        );
+
+        // dual_channel has bound == sblimit (no shared region).
+        let mut reader = BitReader::with_position(&bytes, 4);
+        let (audio, _, _) =
+            parse_audio_data_with_section_bits(&h, &mut reader).expect("parse audio-data");
+        assert_eq!(
+            audio.bound, audio.sblimit,
+            "{label}: dual_channel has no intensity region"
+        );
+
+        let planes = decode_all_frames(&bytes).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+        assert_eq!(planes.len(), 2, "{label}: two channels");
+
+        // Channel 0 reproduces the left tone (and not the right one);
+        // channel 1 reproduces the right tone (and not the left one).
+        assert_tone_reconstructed(
+            &planes[0],
+            &stream[0],
+            l_hz,
+            r_hz, // the *other* channel's tone is the probe
+            sample_rate,
+            n_frames,
+            &format!("{label} ch0"),
+        );
+        assert_tone_reconstructed(
+            &planes[1],
+            &stream[1],
+            r_hz,
+            l_hz,
+            sample_rate,
+            n_frames,
+            &format!("{label} ch1"),
+        );
+    }
+}
+
+#[test]
+fn joint_stereo_silence_round_trips_to_exact_zero_at_every_bound() {
+    // Silence funds no scalefactors or sample codewords, so the
+    // requantiser never runs and the intensity region carries nothing —
+    // the decode must be exact zero regardless of the declared bound.
+    let n_frames = 3;
+    let sample_rate = 44_100;
+    let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+    let stream: Vec<Vec<f64>> = vec![vec![0.0; total]; 2];
+
+    for &ext in ALL_BOUNDS {
+        let h = header(false, sample_rate, 192_000, Mode::JointStereo, ext);
+        let label = format!("JS-silence {ext:?}");
+        let bytes =
+            encode_all_frames(&h, &stream, 0).unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+        let planes = decode_all_frames(&bytes).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+        assert_eq!(planes.len(), 2, "{label}");
+        for (ch, plane) in planes.iter().enumerate() {
+            assert_eq!(plane.len(), total, "{label}: ch {ch} len");
+            for (i, &s) in plane.iter().enumerate() {
+                assert_eq!(
+                    s, 0.0,
+                    "{label}: silence sample[{i}] on ch {ch} must be exact zero, got {s}"
+                );
+            }
+        }
+    }
+}
