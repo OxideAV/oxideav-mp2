@@ -49,6 +49,7 @@
 //! consulted.
 
 use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
+use oxideav_mp2::frame::{decode_frame, FrameError};
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{decode_all_frames, encode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
 
@@ -416,6 +417,167 @@ fn dual_channel_reconstructs_two_independent_tones() {
             n_frames,
             &format!("{label} ch1"),
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Decode-robustness fuzz: adversarial joint-stereo / dual-channel
+// payloads built DIRECTLY (not via our own encoder).
+//
+// The round-trip tests above pair our encoder with our decoder, so a
+// shared bug in the intensity-region loop (e.g. both reading two
+// codewords above bound) could cancel out and pass. These tests bypass
+// the encoder entirely: they synthesise raw frames with a joint-stereo
+// or dual-channel header and an arbitrary payload, then assert
+// `decode_frame` never panics, never overruns the buffer, and either
+// succeeds with the correct PCM shape or returns a documented
+// `FrameError`. A spec-conformant decoder consumes a bounded, exact
+// number of payload bits for any allocation, so even a byte-pattern our
+// encoder would never emit must be handled gracefully.
+// ---------------------------------------------------------------------
+
+/// Build a 4-byte Layer II header word from explicit field values
+/// (§2.4.1.3 layout), MPEG-1 (`id == 1`, layer `'10'`).
+fn build_header_bytes(
+    bitrate_index: u32,
+    sf_index: u32,
+    mode_bits: u32,
+    mode_ext_bits: u32,
+    protection_bit: u32,
+) -> [u8; 4] {
+    let word: u32 = (0xFFF << 20)
+        | (1 << 19)
+        | (0b10 << 17)
+        | (protection_bit << 16)
+        | (bitrate_index << 12)
+        | (sf_index << 10)
+        | (mode_bits << 6)
+        | (mode_ext_bits << 4)
+        | (1 << 2); // original = 1, everything else 0
+    word.to_be_bytes()
+}
+
+/// Synthesise a complete frame: a parseable header followed by a payload
+/// filled with `pattern`. The frame is exactly `frame_size_bytes()`
+/// long. Returns `None` if the header doesn't parse (caller skips).
+fn synth_frame(header4: [u8; 4], pattern: u8) -> Option<Vec<u8>> {
+    let parsed = FrameHeader::parse(&header4).ok()?;
+    let fs = parsed.frame_size_bytes();
+    let mut frame = vec![pattern; fs];
+    frame[..4].copy_from_slice(&header4);
+    Some(frame)
+}
+
+/// Assert a decode result is either a correctly-shaped success or a
+/// documented error — never a panic or malformed output.
+fn assert_decode_graceful(frame: &[u8], channels: usize, label: &str) {
+    match decode_frame(frame) {
+        Ok(decoded) => {
+            assert_eq!(decoded.pcm.len(), channels, "{label}: channel count");
+            for (ch, plane) in decoded.pcm.iter().enumerate() {
+                assert_eq!(
+                    plane.len(),
+                    PCM_SAMPLES_PER_CHANNEL,
+                    "{label}: ch {ch} sample count"
+                );
+                for (n, &v) in plane.iter().enumerate() {
+                    assert!(v.is_finite(), "{label}: ch {ch} n {n} non-finite: {v}");
+                }
+            }
+        }
+        // Exhaustive match (no wildcard): a new FrameError variant added
+        // without updating this test fails to compile, keeping the
+        // documented-error contract honest.
+        Err(err) => match err {
+            FrameError::Header(_)
+            | FrameError::AudioData(_)
+            | FrameError::Requant(_)
+            | FrameError::Truncated { .. }
+            | FrameError::CrcMismatch { .. }
+            | FrameError::UnknownQuantClass { .. } => {}
+        },
+    }
+}
+
+#[test]
+fn joint_stereo_adversarial_payloads_never_panic() {
+    // 192 kbit/s (index 0b1010) joint-stereo (mode '01') at 44.1 kHz
+    // (sf '00'), no CRC (protection '1'), across all four mode_extension
+    // bounds, with a spread of payload byte patterns. The all-ones
+    // pattern maximally allocates every subband (largest nb_steps),
+    // stressing the deepest sample-codeword reads through the intensity
+    // region; the alternating patterns walk the bit-alignment.
+    for mode_ext in 0..4u32 {
+        let header4 = build_header_bytes(0b1010, 0b00, 0b01, mode_ext, 1);
+        for &pattern in &[0x00u8, 0xFF, 0xAA, 0x55, 0x0F, 0xF0, 0x3C, 0xC3] {
+            let Some(frame) = synth_frame(header4, pattern) else {
+                continue;
+            };
+            assert_decode_graceful(
+                &frame,
+                2,
+                &format!("JS-fuzz ext={mode_ext} pattern={pattern:#04x}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn dual_channel_adversarial_payloads_never_panic() {
+    // dual_channel (mode '10') at 192 kbit/s / 44.1 kHz: bound ==
+    // sblimit, two fully-independent channels. The same payload spread
+    // exercises the per-channel allocation reads with no shared region.
+    let header4 = build_header_bytes(0b1010, 0b00, 0b10, 0b00, 1);
+    for &pattern in &[0x00u8, 0xFF, 0xAA, 0x55, 0x0F, 0xF0, 0x3C, 0xC3, 0x99, 0x66] {
+        let Some(frame) = synth_frame(header4, pattern) else {
+            continue;
+        };
+        assert_decode_graceful(&frame, 2, &format!("dual-fuzz pattern={pattern:#04x}"));
+    }
+}
+
+#[test]
+fn joint_stereo_adversarial_payloads_at_low_rate_tables_never_panic() {
+    // 64 kbit/s (index 0b0110) joint-stereo at 48 kHz (sf '01') and
+    // 32 kHz (sf '10') select the narrow B.2c / B.2d tables where the
+    // bound clamps to sblimit. Fuzz the payload at every bound so the
+    // degenerate (empty intensity region) and non-degenerate cases both
+    // get adversarial coverage.
+    for (sf_index, rate_label) in [(0b01u32, "48kHz"), (0b10u32, "32kHz")] {
+        for mode_ext in 0..4u32 {
+            let header4 = build_header_bytes(0b0110, sf_index, 0b01, mode_ext, 1);
+            for &pattern in &[0x00u8, 0xFF, 0xAA, 0x55, 0x3C] {
+                let Some(frame) = synth_frame(header4, pattern) else {
+                    continue;
+                };
+                assert_decode_graceful(
+                    &frame,
+                    2,
+                    &format!("JS-lowrate-fuzz {rate_label} ext={mode_ext} pattern={pattern:#04x}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn joint_stereo_truncated_frames_are_truncated_not_panic() {
+    // Every prefix of a joint-stereo frame that is too short to hold the
+    // declared payload must be rejected gracefully (Truncated, or a
+    // payload-underflow AudioData/Requant error) — never a panic or an
+    // out-of-bounds read in the intensity region.
+    let header4 = build_header_bytes(0b1010, 0b00, 0b01, 0b01, 1); // Bound8
+    let Some(frame) = synth_frame(header4, 0xC9) else {
+        panic!("header must parse");
+    };
+    // Walk a representative set of prefixes (every byte boundary would
+    // be ~626 iterations; sample densely near the start where the
+    // header/audio-data boundary lives and sparsely after).
+    let fs = frame.len();
+    let mut len = 4;
+    while len < fs {
+        assert_decode_graceful(&frame[..len], 2, &format!("JS-trunc len={len}"));
+        len += if len < 40 { 1 } else { 17 };
     }
 }
 

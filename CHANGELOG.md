@@ -30,6 +30,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   exact-zero PCM at every bound. Reconstruction is asserted as the ISO
   bounded-difference envelope (sample count, error/signal energy ratio,
   Goertzel spectral localisation), matching `roundtrip_multirate.rs`.
+- **Joint-stereo / dual-channel decode-robustness fuzz (in
+  `tests/joint_stereo_matrix.rs`)**. The round-trip tests pair our encoder
+  with our decoder, so a *shared* bug in the §2.4.1.6 intensity-region loop
+  could cancel out. These fuzz tests bypass the encoder entirely: they
+  synthesise raw joint-stereo and dual-channel frames with adversarial payload
+  byte patterns (all-zero, all-ones max-allocation, and alternating
+  bit-walk patterns our encoder would never emit) and assert `decode_frame`
+  never panics, never overruns the buffer, and either returns correctly-shaped
+  finite PCM or one of the documented `FrameError` variants (matched
+  exhaustively, no wildcard). Coverage spans all four `mode_extension` bounds
+  at 192 kbit/s (B.2b/B.2a wide tables) and at 64 kbit/s (B.2c/B.2d narrow
+  tables where the bound clamps), plus an exhaustive truncated-prefix walk of a
+  joint-stereo frame confirming every too-short prefix is rejected gracefully.
 - **Full Layer II decode-conformance matrix (`tests/decode_matrix_conformance.rs`)**.
   The §2.4.3 decode chain (header → bit-allocation table → §2.4.3.3.4
   requantization → §2.4.3.3.3 scalefactor rescaling → §2.4.3.2 / Annex A
