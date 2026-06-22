@@ -129,6 +129,23 @@ silence round-trip. Conformance is asserted as a bounded difference
 signal per ISO/IEC 11172-4, consistent with the floating-point
 filterbank definition.
 
+**Joint-stereo + dual-channel mode×rate matrix.**
+`tests/joint_stereo_matrix.rs` broadens the channel-mode axis beyond the
+stereo/Bound4-only round-trip above. It round-trips `joint_stereo` at
+**every** `mode_extension` bound (4 / 8 / 12 / 16) × every MPEG-1 and
+LSF rate, verifies the §2.4.1.6 intensity region is genuinely non-empty
+for the wide tables (parsed `bound` matches the clamped expectation, an
+above-bound subband is allocated, `nb_steps[0] == nb_steps[1]`),
+exercises the §2.4.2.3 `bound = min(bound, sblimit)` clamp at the narrow
+B.2c (sblimit 8) / B.2d (sblimit 12) tables where the intensity region
+collapses to empty, reconstructs two *independent* tones through
+`dual_channel`, and round-trips joint-stereo silence to exact zero. A
+companion **encoder-independent fuzz** synthesises raw joint-stereo and
+dual-channel frames with adversarial payloads (all-zero, all-ones
+max-allocation, alternating bit-walks) and asserts `decode_frame` never
+panics — catching shared encoder/decoder intensity-loop bugs that a
+symmetric round-trip would mask.
+
 ## API
 
 The crate exposes both the registry path
@@ -170,17 +187,24 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
   MPEG-1 mono/stereo at 32 / 44,1 / 48 kHz and MPEG-2 LSF at
   16 / 22,05 / 24 kHz (see **PCM conformance** above). The one remaining
   decode-fixture gap is a stream with a **live intensity-stereo bound**
-  (`mode_extension != bound4`, so `bound < sblimit`): the available
-  black-box encoder only emits full stereo for Layer II, so this region
-  is currently exercised only by the crate's own encode→decode
-  round-trip rather than against an independent reference.
+  (`mode_extension != bound4`, so `bound < sblimit`) decoded against an
+  **independent reference**: the available black-box encoder only emits
+  full stereo for Layer II, so the live-bound intensity region is
+  currently exercised by the crate's own encode→decode round-trip and by
+  encoder-independent adversarial-payload fuzz (see **Joint-stereo +
+  dual-channel mode×rate matrix** above) rather than against a
+  third-party reference decoder's PCM.
 
 ## Robustness
 
 A `tests/malformed_input.rs` suite property-tests the header parser and
 frame-decode loop against single-bit header flips and every truncated
-prefix of a synthesized frame; a `cargo-fuzz` `decode` target exercises
-the decode attacker surface for panic-freedom.
+prefix of a synthesized frame; `tests/joint_stereo_matrix.rs` adds
+encoder-independent panic-freedom fuzz for adversarial joint-stereo and
+dual-channel payloads across all four `mode_extension` bounds and the
+wide / narrow allocation tables (plus a truncated-prefix walk of a
+joint-stereo frame); and a `cargo-fuzz` `decode` target exercises the
+decode attacker surface for panic-freedom.
 
 ## License
 
