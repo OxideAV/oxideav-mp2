@@ -8,6 +8,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2 Psychoacoustic Model 2 analysis front-end — steps (a)–(e)
+  (`src/psy.rs`)**. Completes the Model-2 chain ahead of its threshold
+  loop (steps (f)…(n), already in `src/tables_model2.rs`): the §D.2.4
+  step (b) bare raised-cosine analysis window `model2_hann_window_layer2`
+  (`h(i) = 0,5 − 0,5·cos(2π(i − 0,5)/1024)`, distinct from Model 1's
+  `sqrt(8/3)`-scaled power window), the step (b) polar
+  `complex_spectrum_polar_layer2` returning per-bin magnitude `r_ω` and
+  phase `f_ω`, the step (c) two-block `Model2PredictorState`
+  (`r̂_ω = 2·r(t-1) − r(t-2)`, `f̂_ω = 2·f(t-1) − f(t-2)`, zeroed-startup),
+  the step (d) `unpredictability_measure` (`c_ω`, the Cartesian-distance
+  ratio between observation and prediction, with the spec's 0,3 default
+  for never-excited lines), and the step (e)
+  `partition_energy_and_unpredictability` (`e_b = Σ r_ω²`,
+  `c_b = Σ r_ω²·c_ω` over each Table D.3 calculation partition). Six unit
+  tests pin the window bounds/symmetry, single-tone polar peak recovery,
+  the perfect-prediction / orthogonal-prediction `c_ω` limits, the
+  zero-denominator fallback, the predictor's zeroed-startup roll, and the
+  partition-energy span sums. Sourced verbatim from the staged ISO PDF
+  Annex D pages 129–130.
+
 - **Joint-stereo (intensity) + dual-channel mode×rate robustness matrix
   (`tests/joint_stereo_matrix.rs`)**. The existing
   `tests/roundtrip_multirate.rs` exercises only `Mode::Stereo` with

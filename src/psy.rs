@@ -90,6 +90,24 @@
 //!   ([`signal_to_mask_ratio_subband`]) — the verbatim spec
 //!   subtraction `SMR_sb(n) = L_sb(n) - LT_min(n)`.
 //!
+//! It also lands the §D.2 **Model 2** analysis front-end (steps a–e),
+//! complementing the §D.2.4 step (f)…(n) threshold loop already in
+//! [`crate::tables_model2`]:
+//!
+//! * **Step (b) analysis window + polar FFT**
+//!   ([`model2_hann_window_layer2`] / [`complex_spectrum_polar_layer2`])
+//!   — the bare `h(i) = 0,5 − 0,5·cos(2π(i − 0,5)/1024)` raised-cosine
+//!   (no `sqrt(8/3)` power coefficient, unlike Model 1) feeding a polar
+//!   `(r_ω, f_ω)` magnitude / phase transform.
+//! * **Step (c) two-block prediction** ([`Model2PredictorState`]) — the
+//!   rolling `r̂_ω = 2·r(t-1) − r(t-2)`, `f̂_ω = 2·f(t-1) − f(t-2)`
+//!   extrapolation with the spec's zeroed-startup state.
+//! * **Step (d) unpredictability measure** ([`unpredictability_measure`])
+//!   — the verbatim Cartesian-distance ratio `c_ω`.
+//! * **Step (e) partition energy + weighted unpredictability**
+//!   ([`partition_energy_and_unpredictability`]) — `e_b = Σ r_ω²`,
+//!   `c_b = Σ r_ω²·c_ω` over each D.3 calculation partition.
+//!
 //! * **Step 3 absolute-threshold offset**
 //!   ([`absolute_threshold_offset_db`]) — the verbatim overall-bit-rate
 //!   offset (−12 dB for >= 96 kbit/s/ch, 0 dB below).
@@ -176,10 +194,12 @@
 //!
 //! Only the textually-transcribed equations from
 //! `docs/audio/mp3/mp3-annex-d-psychoacoustic-extracts.md` and the
-//! §D.1 Step 1 prose/equations read directly from the staged ISO
-//! PDF `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` (Annex D, PDF
-//! pages 115–117) were consulted. The PNG-only Annex D table rows
-//! are not read.
+//! §D.1 Step 1 / §D.2.4 step (a)–(e) prose/equations read directly
+//! from the staged ISO PDF
+//! `docs/audio/mp3/ISO_IEC_11172-3-MP3-1993.pdf` (Annex D, PDF pages
+//! 115–117 for §D.1 and 129–130 for the §D.2.4 Model-2 window / polar
+//! FFT / prediction / unpredictability / partition-energy steps) were
+//! consulted. The PNG-only Annex D table rows are not read.
 
 /// Length of the §D.1 Step 1 Layer II FFT window — verbatim from the
 /// "Technical data of the FFT" table on PDF page 116 (printed 110):
@@ -346,6 +366,235 @@ pub fn power_density_spectrum_layer2(s: &[f64; LAYER2_FFT_LEN]) -> Vec<f64> {
             10.0 * power.log10()
         })
         .collect()
+}
+
+/// §D.2.4 step (b) Model-2 *analysis Hann window* `h(i) = 0,5 −
+/// 0,5·cos(2π(i − 0,5)/1024)`.
+///
+/// Unlike the §D.1 Model-1 window ([`hann_window_layer2`], which
+/// carries the `sqrt(8/3)` power-preserving front coefficient and is
+/// destined for a `10·log10` power spectrum), the Model-2 window is the
+/// bare raised-cosine of the verbatim §D.2.4 step (b) equation (PDF page
+/// 129, printed 123): `sw_i = s_i · (0,5 − 0,5·cos(2π(i − 0,5)/1024))`.
+/// The `(i − 0,5)` half-sample phase places the window symmetric about
+/// the 1024-sample block, and the result feeds the *polar* (magnitude /
+/// phase) FFT of [`complex_spectrum_polar_layer2`] rather than a dB
+/// power spectrum, so no power-normalisation coefficient is applied.
+///
+/// Indexing follows the spec's `1 ≤ i ≤ 1024`: `out[i]` is `h(i + 1)`,
+/// i.e. the window value for the spec's 1-based sample `i + 1`, so the
+/// argument is `2π·((idx + 1) − 0,5)/1024 = 2π·(idx + 0,5)/1024`.
+#[must_use]
+pub fn model2_hann_window_layer2() -> [f64; LAYER2_FFT_LEN] {
+    let mut window = [0.0_f64; LAYER2_FFT_LEN];
+    let two_pi_over_n = 2.0 * core::f64::consts::PI / (LAYER2_FFT_LEN as f64);
+    let mut i = 0;
+    while i < LAYER2_FFT_LEN {
+        // Spec sample index is 1-based (1 ≤ i ≤ 1024); buffer index
+        // `i` ↦ spec sample `i + 1`, so the `(i − 0,5)` numerator is
+        // `(i + 1) − 0,5 = i + 0,5`.
+        window[i] = 0.5 - 0.5 * (two_pi_over_n * (i as f64 + 0.5)).cos();
+        i += 1;
+    }
+    window
+}
+
+/// §D.2.4 step (b) Model-2 *complex spectrum in polar form* `(r_ω,
+/// f_ω)`.
+///
+/// Windows the 1024 input samples with the [`model2_hann_window_layer2`]
+/// raised-cosine, runs the same in-crate radix-2 forward FFT as the
+/// Model-1 path, and returns the polar representation per the verbatim
+/// step (b) sentence (PDF page 129, printed 123): "the polar
+/// representation of the transform is calculated. `r_ω` and `f_ω`
+/// represent the magnitude and phase components of the transformed
+/// `sw_i`, respectively."
+///
+/// Returns `(r, f)` two vectors of [`LAYER2_FFT_BINS`] (= 513) entries
+/// each covering the DC bin through the Nyquist bin inclusive — the
+/// `1 ≤ ω ≤ 513` working range of the §D.2.2 notation. `r[k]` is the
+/// magnitude `|X(k)|`; `f[k]` is the phase `atan2(im, re)` in radians.
+/// No dB conversion and no `1/N` scaling is applied: the Model-2 chain
+/// works in the linear magnitude domain, and the per-partition energy
+/// `e_b = Σ r_ω²` (step e) plus the `cw` ratio (step d) are both scale-
+/// covariant, so an unscaled FFT carries the same thresholds.
+#[must_use]
+pub fn complex_spectrum_polar_layer2(s: &[f64; LAYER2_FFT_LEN]) -> (Vec<f64>, Vec<f64>) {
+    let window = model2_hann_window_layer2();
+    let mut re: Vec<f64> = (0..LAYER2_FFT_LEN).map(|l| window[l] * s[l]).collect();
+    let mut im = vec![0.0_f64; LAYER2_FFT_LEN];
+    fft_radix2_in_place(&mut re, &mut im);
+    let r: Vec<f64> = (0..LAYER2_FFT_BINS)
+        .map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt())
+        .collect();
+    let f: Vec<f64> = (0..LAYER2_FFT_BINS).map(|k| im[k].atan2(re[k])).collect();
+    (r, f)
+}
+
+/// §D.2.4 step (c) Model-2 *prediction* of magnitude and phase from the
+/// preceding two threshold-calculation blocks.
+///
+/// Holds the `(r, f)` polar spectra of the two previous blocks so the
+/// step (c) linear extrapolation can be evaluated:
+///
+/// ```text
+/// r̂_ω = 2,0·r_ω(t-1) − r_ω(t-2)
+/// f̂_ω = 2,0·f_ω(t-1) − f_ω(t-2)
+/// ```
+///
+/// (verbatim, PDF page 129, printed 123). The spec's "Before running
+/// the model initially, the arrays used to hold r and f should be
+/// zeroed" instruction is the [`Default`] / [`Model2PredictorState::new`]
+/// all-zero state.
+#[derive(Debug, Clone, Default)]
+pub struct Model2PredictorState {
+    /// `r_ω(t-1)` — magnitude spectrum of the previous block.
+    r_prev1: Vec<f64>,
+    /// `r_ω(t-2)` — magnitude spectrum of the block before that.
+    r_prev2: Vec<f64>,
+    /// `f_ω(t-1)` — phase spectrum of the previous block.
+    f_prev1: Vec<f64>,
+    /// `f_ω(t-2)` — phase spectrum of the block before that.
+    f_prev2: Vec<f64>,
+}
+
+impl Model2PredictorState {
+    /// A freshly-zeroed predictor, per the spec's "the arrays used to
+    /// hold r and f should be zeroed to provide a known starting point".
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Step (c) predicted magnitude `r̂_ω = 2·r_ω(t-1) − r_ω(t-2)` and
+    /// phase `f̂_ω = 2·f_ω(t-1) − f_ω(t-2)` for every FFT bin, given the
+    /// current block's polar spectrum length.
+    ///
+    /// Returns `(r̂, f̂)` of `len` entries. Bins beyond a stored block's
+    /// length (e.g. on the first two calls, when a `prev` array is still
+    /// empty) read `0,0` for that block — the spec's zeroed-startup
+    /// state — so `r̂ = f̂ = 0` until two real blocks have been pushed.
+    #[must_use]
+    pub fn predict(&self, len: usize) -> (Vec<f64>, Vec<f64>) {
+        let at = |v: &[f64], k: usize| v.get(k).copied().unwrap_or(0.0);
+        let r_hat: Vec<f64> = (0..len)
+            .map(|k| 2.0 * at(&self.r_prev1, k) - at(&self.r_prev2, k))
+            .collect();
+        let f_hat: Vec<f64> = (0..len)
+            .map(|k| 2.0 * at(&self.f_prev1, k) - at(&self.f_prev2, k))
+            .collect();
+        (r_hat, f_hat)
+    }
+
+    /// Advance the predictor by one block: the current block's `(r, f)`
+    /// becomes `(t-1)` and the former `(t-1)` slides to `(t-2)`, per the
+    /// spec's rolling two-block history.
+    pub fn push(&mut self, r: Vec<f64>, f: Vec<f64>) {
+        self.r_prev2 = core::mem::take(&mut self.r_prev1);
+        self.f_prev2 = core::mem::take(&mut self.f_prev1);
+        self.r_prev1 = r;
+        self.f_prev1 = f;
+    }
+}
+
+/// §D.2.4 step (d) Model-2 *unpredictability measure* `c_ω`.
+///
+/// Verbatim from PDF page 130 (printed 124):
+///
+/// ```text
+///       ((r_ω·cos f_ω − r̂_ω·cos f̂_ω)² + (r_ω·sin f_ω − r̂_ω·sin f̂_ω)²)^0,5
+/// c_ω = ────────────────────────────────────────────────────────────────────
+///                              r_ω + abs(r̂_ω)
+/// ```
+///
+/// The numerator is the Euclidean distance between the observed complex
+/// spectral line `(r_ω, f_ω)` and the step-(c) predicted line `(r̂_ω,
+/// f̂_ω)` in Cartesian form; the denominator normalises it by the sum of
+/// the observed and predicted magnitudes. A perfectly predicted line
+/// (observation equal to prediction) gives `c_ω = 0` (fully
+/// predictable / tonal); a line orthogonal to its prediction gives
+/// `c_ω → 1` (unpredictable / noise-like).
+///
+/// `r`, `f`, `r_hat`, `f_hat` are the per-bin slices from
+/// [`complex_spectrum_polar_layer2`] and [`Model2PredictorState::predict`]
+/// over the same `1 ≤ ω ≤ 513` working range. The output is indexed by
+/// the same 0-based bin. A bin whose denominator `r_ω + |r̂_ω|` is zero
+/// (a silent, never-excited line) has no defined ratio; the spec's "the
+/// `c_ω` values above [the upper frequency] limit should be set to 0,3"
+/// guidance shows the model tolerates a flat default for lines it does
+/// not compute, so a zero-denominator bin is assigned the same
+/// noise-leaning default `0,3` rather than propagating a `0/0` NaN into
+/// the partition sums. The shortest of the three input slices bounds the
+/// output length.
+#[must_use]
+pub fn unpredictability_measure(r: &[f64], f: &[f64], r_hat: &[f64], f_hat: &[f64]) -> Vec<f64> {
+    /// The spec's flat default for lines the model does not compute
+    /// (PDF page 130: "should be set to 0,3").
+    const UNPREDICTABILITY_DEFAULT: f64 = 0.3;
+    let len = r.len().min(f.len()).min(r_hat.len()).min(f_hat.len());
+    (0..len)
+        .map(|k| {
+            let denom = r[k] + r_hat[k].abs();
+            if denom == 0.0 {
+                return UNPREDICTABILITY_DEFAULT;
+            }
+            let dx = r[k] * f[k].cos() - r_hat[k] * f_hat[k].cos();
+            let dy = r[k] * f[k].sin() - r_hat[k] * f_hat[k].sin();
+            (dx * dx + dy * dy).sqrt() / denom
+        })
+        .collect()
+}
+
+/// §D.2.4 step (e) Model-2 *partition energy and weighted
+/// unpredictability* `(e_b, c_b)`.
+///
+/// For every calculation partition `b` of `table`, accumulates the
+/// verbatim step-(e) sums (PDF page 130, printed 124):
+///
+/// ```text
+/// e_b = Σ_{ω=ωlow_b..ωhigh_b}  r_ω²
+/// c_b = Σ_{ω=ωlow_b..ωhigh_b}  r_ω² · c_ω
+/// ```
+///
+/// `r` is the magnitude spectrum ([`complex_spectrum_polar_layer2`]);
+/// `cw` is the per-line unpredictability ([`unpredictability_measure`]).
+/// Both are indexed by 0-based FFT bin over the `1 ≤ ω ≤ 513` range;
+/// `table` supplies each partition's 1-based inclusive `[ωlow, ωhigh]`
+/// span. Returns `(e, c)`, two vectors indexed by the same 0-based
+/// partition index as `table`.
+///
+/// `c_b` is the energy-weighted unpredictability the spec feeds into the
+/// step-(f) `cf` spreading convolution; the subsequent
+/// [`crate::tables_model2::renormalize_unpredictability`] divides the
+/// convolved `cf_b` back by the convolved energy `ecb_b`. A partition
+/// whose FFT-line span exceeds the supplied `r` / `cw` buffers
+/// contributes only the in-range lines (the buffers are the full 513-bin
+/// range, so this clamps only a malformed table); a length mismatch
+/// between `r` and `cw` truncates to the shorter.
+#[must_use]
+pub fn partition_energy_and_unpredictability(
+    table: &[crate::tables_model2::CalcPartition],
+    r: &[f64],
+    cw: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let n_lines = r.len().min(cw.len());
+    let mut e = Vec::with_capacity(table.len());
+    let mut c = Vec::with_capacity(table.len());
+    for part in table {
+        let mut eb = 0.0_f64;
+        let mut cb = 0.0_f64;
+        // ωlow / ωhigh are 1-based inclusive → 0-based bins.
+        let lo = (part.omega_low.saturating_sub(1)) as usize;
+        let hi = (part.omega_high as usize).min(n_lines);
+        for omega0 in lo..hi {
+            let r2 = r[omega0] * r[omega0];
+            eb += r2;
+            cb += r2 * cw[omega0];
+        }
+        e.push(eb);
+        c.push(cb);
+    }
+    (e, c)
 }
 
 /// §D.1 Step 1 normalisation to the 96 dB SPL reference level.
@@ -4000,6 +4249,129 @@ mod tests {
         let smr = compute_smr_model1_frame(&pcm, &scf_max, SamplingRate::Fs48kHz, 192.0);
         for (n, &v) in smr.iter().enumerate() {
             assert!(v.is_finite(), "silence SMR[{n}] = {v} must be finite");
+        }
+    }
+
+    // -------- §D.2.4 Model-2 front-end (steps a–e) --------
+
+    #[test]
+    fn model2_hann_window_endpoints_and_symmetry() {
+        // The §D.2.4(b) window h(i) = 0.5 - 0.5·cos(2π(i-0.5)/1024) is
+        // bounded in [0, 1], peaks near the centre, and is symmetric
+        // about the block midpoint (the (i - 0.5) half-sample phase).
+        let w = model2_hann_window_layer2();
+        for (i, &v) in w.iter().enumerate() {
+            assert!((0.0..=1.0).contains(&v), "h[{i}] = {v} out of [0,1]");
+        }
+        // Symmetry: h[i] == h[N-1-i] for the (i - 0.5)-phased cosine.
+        for i in 0..LAYER2_FFT_LEN / 2 {
+            let a = w[i];
+            let b = w[LAYER2_FFT_LEN - 1 - i];
+            assert!((a - b).abs() < 1.0e-12, "asymmetry at {i}: {a} vs {b}");
+        }
+        // Centre lines (511, 512) sit at the cosine peak ≈ 1.
+        assert!(w[511] > 0.999, "centre window value {} too low", w[511]);
+    }
+
+    #[test]
+    fn model2_polar_spectrum_recovers_a_pure_tone() {
+        // A bin-aligned cosine (integer cycles over the 1024-sample
+        // block) concentrates its magnitude in one FFT bin; the polar
+        // FFT must place the dominant magnitude there.
+        let bin = 40_usize;
+        let mut s = [0.0_f64; LAYER2_FFT_LEN];
+        for (i, sample) in s.iter_mut().enumerate() {
+            *sample =
+                (2.0 * core::f64::consts::PI * bin as f64 * i as f64 / LAYER2_FFT_LEN as f64).cos();
+        }
+        let (r, f) = complex_spectrum_polar_layer2(&s);
+        assert_eq!(r.len(), LAYER2_FFT_BINS);
+        assert_eq!(f.len(), LAYER2_FFT_BINS);
+        let (peak, _) = r
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        // The Hann window leaks one bin either side; accept ±1.
+        assert!(
+            (peak as i64 - bin as i64).abs() <= 1,
+            "tone peak at bin {peak}, expected ~{bin}"
+        );
+    }
+
+    #[test]
+    fn unpredictability_zero_for_perfect_prediction_one_for_orthogonal() {
+        // Observation equal to prediction ⇒ c_ω = 0 (fully tonal).
+        let r = [4.0];
+        let f = [0.5];
+        let cw = unpredictability_measure(&r, &f, &r, &f);
+        assert!(cw[0].abs() < 1.0e-12, "perfect prediction c_ω = {}", cw[0]);
+
+        // A prediction equal in magnitude but π/2 out of phase: the
+        // Cartesian distance is √2·r, denominator 2r ⇒ c_ω = √2/2.
+        let r_hat = [4.0];
+        let f_hat = [0.5 + core::f64::consts::FRAC_PI_2];
+        let cw = unpredictability_measure(&r, &f, &r_hat, &f_hat);
+        let expected = core::f64::consts::SQRT_2 / 2.0;
+        assert!(
+            (cw[0] - expected).abs() < 1.0e-12,
+            "orthogonal c_ω = {}, expected {expected}",
+            cw[0]
+        );
+    }
+
+    #[test]
+    fn unpredictability_zero_denominator_falls_back_to_default() {
+        // A never-excited line (r = r̂ = 0) has no defined ratio; the
+        // spec's 0.3 flat default is used instead of a 0/0 NaN.
+        let cw = unpredictability_measure(&[0.0], &[0.0], &[0.0], &[0.0]);
+        assert!((cw[0] - 0.3).abs() < 1.0e-12, "fallback c_ω = {}", cw[0]);
+    }
+
+    #[test]
+    fn predictor_zeroed_until_two_blocks_pushed() {
+        // The §D.2.4(c) predictor starts zeroed; r̂ = f̂ = 0 until two
+        // real blocks slide through, then extrapolates linearly.
+        let mut st = Model2PredictorState::new();
+        let (r_hat, f_hat) = st.predict(3);
+        assert_eq!(r_hat, vec![0.0; 3]);
+        assert_eq!(f_hat, vec![0.0; 3]);
+
+        st.push(vec![1.0, 2.0, 3.0], vec![0.1, 0.2, 0.3]);
+        // One block pushed: r̂ = 2·r(t-1) − r(t-2) = 2·1 − 0 = 2, etc.
+        let (r_hat, _) = st.predict(3);
+        assert_eq!(r_hat, vec![2.0, 4.0, 6.0]);
+
+        st.push(vec![3.0, 4.0, 5.0], vec![0.0, 0.0, 0.0]);
+        // Now (t-1)=[3,4,5], (t-2)=[1,2,3]: r̂ = 2·3−1 = 5, 2·4−2 = 6,
+        // 2·5−3 = 7 (a constant-acceleration extrapolation).
+        let (r_hat, _) = st.predict(3);
+        assert_eq!(r_hat, vec![5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn partition_energy_sums_squared_magnitude_over_span() {
+        use crate::tables_model2::calc_partition_table_for_rate;
+        let table = calc_partition_table_for_rate(SamplingRate::Fs32kHz);
+        // Unit magnitude, unit unpredictability everywhere: e_b equals
+        // the partition's line count, c_b equals e_b (cw = 1).
+        let r = vec![1.0_f64; LAYER2_FFT_BINS];
+        let cw = vec![1.0_f64; LAYER2_FFT_BINS];
+        let (e, c) = partition_energy_and_unpredictability(table, &r, &cw);
+        assert_eq!(e.len(), table.len());
+        for (b, part) in table.iter().enumerate() {
+            let span = (part.omega_high - part.omega_low + 1) as f64;
+            assert!(
+                (e[b] - span).abs() < 1.0e-9,
+                "e[{b}] = {} but partition spans {span} lines",
+                e[b]
+            );
+            assert!(
+                (c[b] - e[b]).abs() < 1.0e-9,
+                "c[{b}] = {} should equal e[{b}] = {} for cw = 1",
+                c[b],
+                e[b]
+            );
         }
     }
 }
