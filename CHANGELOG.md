@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2.1 Layer II twice-per-frame Model-2 driver
+  `compute_smr_model2_layer2_frame` (`src/psy.rs`)**. Implements the
+  verbatim §D.2.1 rule "In Layer II, the psychoacoustic masking ratios
+  must be calculated twice during each coder frame. The more stringent
+  of each pair of ratios is used for bit allocation." Runs the
+  `compute_smr_model2_frame` chain twice over one 1152-sample frame —
+  once per `IBLEN_LAYER2` (= 576) half — reconstructing each call's
+  1024-sample analysis window from the 448-sample inter-call carry held
+  in a new `Model2Layer2State` (predictor history + sample tail,
+  zeroed-startup), then returns the per-subband **maximum** of the two
+  SMR tables (the more-stringent ratio). Two tests pin the per-subband
+  max-dominance over a single call and the carry/predictor advance
+  across streamed frames. With this, the §D.2 Model-2 SMR producer is
+  complete end-to-end including the Layer II frame logic; only an
+  `encode_frame_auto`-style encoder selection remains.
+
 - **§D.2 Psychoacoustic Model 2 per-frame SMR driver
   `compute_smr_model2_frame` (`src/psy.rs`)**. Chains the full Model-2
   chain — the newly-added analysis front-end (steps a–e) plus the

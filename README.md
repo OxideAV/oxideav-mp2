@@ -178,9 +178,16 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
     Its calc-partition tables (D.3a/b/c) and absolute-threshold tables
     (D.4a/b/c) are complete for all three Layer II rates, selected by
     `calc_partition_table_for_rate` / `abs_threshold_table_for_rate`. The
-    remaining wiring step is an `encode_frame_auto`-style Model-2 *encode*
-    entry point (the more-stringent-of-the-pair §D.2.1 frame logic) — the
-    SMR producer is complete; only its selection from the encoder remains.
+    §D.2.1 Layer II *twice-per-frame* rule is also implemented:
+    `psy::compute_smr_model2_layer2_frame` runs the chain twice per
+    1152-sample frame (once per `IBLEN_LAYER2` = 576-sample half,
+    reconstructing each call's 1024-sample window from the 448-sample
+    inter-call carry held in `Model2Layer2State`) and returns the
+    per-subband **maximum** of the pair — "the more stringent of each
+    pair of ratios is used for bit allocation". The remaining wiring step
+    is an `encode_frame_auto`-style Model-2 *encode* entry point that
+    selects this producer from the encoder; the SMR producer itself is
+    complete end-to-end.
   - The §D.1 driver uses the current frame's first 1024 samples for the
     FFT; the §D.1 Step 1 net +192-sample window shift (which needs the
     next frame's lookahead) is a refinement that would tighten the

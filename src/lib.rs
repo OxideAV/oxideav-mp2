@@ -276,19 +276,21 @@ pub use header::{
     ModeExtension, SYNCWORD,
 };
 pub use psy::{
-    annex_d_sampling_rate, compute_smr_model1_frame, decimate_tonal_maskers,
+    annex_d_sampling_rate, complex_spectrum_polar_layer2, compute_smr_model1_frame,
+    compute_smr_model2_frame, compute_smr_model2_layer2_frame, decimate_tonal_maskers,
     fft_line_to_subband_layer2, global_masking_threshold_db, hann_window_layer2,
     individual_masking_threshold_db, is_local_maximum, is_tonal_layer2, list_non_tonal_layer2,
     masker_in_target_window, masking_function_vf, masking_index_non_tonal, masking_index_tonal,
-    minimum_masking_threshold_subband, non_tonal_band_index, non_tonal_spl_db,
-    normalize_to_spl_reference, power_density_spectrum_layer2, relevant_maskers_for_target_line,
-    scalefactor_spl_term_db, signal_to_mask_ratio_subband, sound_pressure_level_subband,
-    tonal_neighbourhood_layer2, tonal_spl_db, zero_tonal_neighbourhood_layer2, Masker, MaskerKind,
-    SubbandSplMethod, FFT_DELAY_COMPENSATION_SHIFT_SAMPLES,
-    LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES, LAYER2_FFT_BINS, LAYER2_FFT_LEN,
-    MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO, NUM_SUBBANDS_LAYER2, SPL_FULL_SCALE,
-    SPL_PEAK_RMS_CORRECTION_DB, SPL_REFERENCE_LEVEL_DB, TONALITY_THRESHOLD_DB,
-    TONAL_DECIMATION_WINDOW_BARK,
+    minimum_masking_threshold_subband, model2_hann_window_layer2, non_tonal_band_index,
+    non_tonal_spl_db, normalize_to_spl_reference, partition_energy_and_unpredictability,
+    power_density_spectrum_layer2, relevant_maskers_for_target_line, scalefactor_spl_term_db,
+    signal_to_mask_ratio_subband, sound_pressure_level_subband, tonal_neighbourhood_layer2,
+    tonal_spl_db, unpredictability_measure, zero_tonal_neighbourhood_layer2, Masker, MaskerKind,
+    Model2Layer2State, Model2PredictorState, SubbandSplMethod,
+    FFT_DELAY_COMPENSATION_SHIFT_SAMPLES, IBLEN_LAYER2, LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES,
+    LAYER2_FFT_BINS, LAYER2_FFT_LEN, MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO,
+    NUM_SUBBANDS_LAYER2, SPL_FULL_SCALE, SPL_PEAK_RMS_CORRECTION_DB, SPL_REFERENCE_LEVEL_DB,
+    TONALITY_THRESHOLD_DB, TONAL_DECIMATION_WINDOW_BARK,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};

@@ -2220,6 +2220,124 @@ pub fn compute_smr_model2_frame(
     out
 }
 
+/// §D.2.4 step (a) / §D.2.1 Layer II *shift length* `iblen`.
+///
+/// "Iblen is 576" for Layer II (PDF page 90, printed 84, and the §D.2.1
+/// "calculated twice during each coder frame" rule on PDF page 128).
+/// A Layer II coder frame is 1152 samples, so the threshold generator is
+/// called twice per frame, each call advancing `IBLEN_LAYER2 == 576` new
+/// samples and concatenating `1024 − 576 = 448` stored samples to
+/// reconstruct its 1024-sample analysis window.
+pub const IBLEN_LAYER2: usize = 576;
+
+/// Stored-sample carry `1024 − iblen` between consecutive §D.2 Layer II
+/// threshold-generator calls.
+const MODEL2_LAYER2_CARRY: usize = LAYER2_FFT_LEN - IBLEN_LAYER2;
+
+/// §D.2.1 Layer II *twice-per-frame* Model-2 streaming state.
+///
+/// Bundles the [`Model2PredictorState`] (the rolling two-block `(r, f)`
+/// history) with the [`MODEL2_LAYER2_CARRY`]-sample tail carried between
+/// the two threshold-generator calls of one Layer II frame and across
+/// frames, so [`compute_smr_model2_layer2_frame`] can reconstruct each
+/// call's 1024-sample analysis window from `IBLEN_LAYER2` new samples
+/// plus the stored carry, per the §D.2.4 step (a) reconstruction rule.
+///
+/// The spec's "Before running the model initially, the arrays … should
+/// be zeroed" instruction is the [`Default`] / [`new`](Self::new)
+/// all-zero state (zero predictor + zero carry).
+#[derive(Debug, Clone)]
+pub struct Model2Layer2State {
+    predictor: Model2PredictorState,
+    /// The trailing `MODEL2_LAYER2_CARRY` samples of the previous
+    /// threshold-generator call's 1024-sample window — the "stored
+    /// 1024 − iblen samples" the next call concatenates ahead of its
+    /// `iblen` new samples.
+    carry: [f64; MODEL2_LAYER2_CARRY],
+}
+
+impl Default for Model2Layer2State {
+    fn default() -> Self {
+        Self {
+            predictor: Model2PredictorState::new(),
+            carry: [0.0_f64; MODEL2_LAYER2_CARRY],
+        }
+    }
+}
+
+impl Model2Layer2State {
+    /// A freshly-zeroed Layer II Model-2 state (zero predictor + zero
+    /// carry), per the spec's zeroed-startup instruction.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// §D.2.1 Layer II per-frame Model-2 SMR — the spec's *twice-per-frame,
+/// more-stringent-of-the-pair* rule.
+///
+/// Verbatim §D.2.1 (PDF page 128, printed 122): "In Layer II, the
+/// psychoacoustic masking ratios must be calculated twice during each
+/// coder frame. The more stringent of each pair of ratios is used for
+/// bit allocation." This driver runs the [`compute_smr_model2_frame`]
+/// chain twice over one 1152-sample Layer II frame — once per
+/// [`IBLEN_LAYER2`]-sample half — reconstructing each call's
+/// 1024-sample analysis window from the [`MODEL2_LAYER2_CARRY`]-sample
+/// carry in `state` plus that half's `IBLEN_LAYER2` new samples, then
+/// returns the **per-subband maximum** of the two SMR tables (the "more
+/// stringent" ratio: a higher SMR means less masking headroom, so the
+/// allocator must spend more bits there).
+///
+/// `pcm` is one frame of mono PCM; the first
+/// [`crate::frame::PCM_SAMPLES_PER_CHANNEL`] (= 1152) samples are consumed (a
+/// shorter slice is zero-padded, a longer one truncated). `state`
+/// carries the predictor history and the inter-call sample tail, and is
+/// advanced by **two** threshold-generator calls per invocation, so a
+/// caller streaming consecutive frames through one [`Model2Layer2State`]
+/// gets the spec's continuous rolling history.
+///
+/// LSF rates are not handled (no Annex D Model-2 tables); `fs` is one of
+/// the three Model-2 rates.
+#[must_use]
+pub fn compute_smr_model2_layer2_frame(
+    pcm: &[f64],
+    fs: crate::tables_d2::SamplingRate,
+    state: &mut Model2Layer2State,
+) -> [f64; NUM_SUBBANDS_LAYER2] {
+    let mut frame = [0.0_f64; crate::frame::PCM_SAMPLES_PER_CHANNEL];
+    let take = pcm.len().min(crate::frame::PCM_SAMPLES_PER_CHANNEL);
+    frame[..take].copy_from_slice(&pcm[..take]);
+
+    let mut merged = [f64::NEG_INFINITY; NUM_SUBBANDS_LAYER2];
+    // Two threshold-generator calls per frame, each advancing IBLEN_LAYER2
+    // new samples (the two halves of the 1152-sample frame).
+    for half in 0..2 {
+        let new_start = half * IBLEN_LAYER2;
+        let new = &frame[new_start..new_start + IBLEN_LAYER2];
+
+        // Reconstruct the 1024-sample window: stored carry ++ new.
+        let mut window = [0.0_f64; LAYER2_FFT_LEN];
+        window[..MODEL2_LAYER2_CARRY].copy_from_slice(&state.carry);
+        window[MODEL2_LAYER2_CARRY..].copy_from_slice(new);
+
+        let smr = compute_smr_model2_frame(&window, fs, &mut state.predictor);
+        for sb in 0..NUM_SUBBANDS_LAYER2 {
+            merged[sb] = merged[sb].max(smr[sb]);
+        }
+
+        // Carry the trailing MODEL2_LAYER2_CARRY samples of this window
+        // forward to the next call (the next call's "stored" samples).
+        state
+            .carry
+            .copy_from_slice(&window[IBLEN_LAYER2..LAYER2_FFT_LEN]);
+    }
+
+    // NEG_INFINITY can only survive if NUM_SUBBANDS_LAYER2 == 0, which it
+    // is not; every subband is written by the per-half max above.
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4571,6 +4689,63 @@ mod tests {
         assert!(
             r_hat.iter().any(|&v| v.abs() > 1.0e-6),
             "predictor should carry a non-zero r̂ after three pushes"
+        );
+    }
+
+    #[test]
+    fn model2_layer2_twice_per_frame_dominates_single_call() {
+        // The §D.2.1 twice-per-frame driver takes the per-subband max of
+        // the two half-frame SMR tables, so every subband's SMR must be
+        // ≥ the SMR a single call over the frame's first half produces.
+        let fs_hz = 44_100.0_f64;
+        let f = 2_500.0;
+        let mut pcm = vec![0.0_f64; 1152];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = 0.45 * (2.0 * core::f64::consts::PI * f * i as f64 / fs_hz).sin();
+        }
+
+        // Single call over a 1024 window built from the frame's first
+        // half (carry zeroed), mirroring the twice-driver's first call.
+        let mut single_window = [0.0_f64; LAYER2_FFT_LEN];
+        single_window[(LAYER2_FFT_LEN - IBLEN_LAYER2)..].copy_from_slice(&pcm[..IBLEN_LAYER2]);
+        let mut p1 = Model2PredictorState::new();
+        let single = compute_smr_model2_frame(&single_window, SamplingRate::Fs44k1Hz, &mut p1);
+
+        let mut st = Model2Layer2State::new();
+        let merged = compute_smr_model2_layer2_frame(&pcm, SamplingRate::Fs44k1Hz, &mut st);
+
+        for sb in 0..NUM_SUBBANDS_LAYER2 {
+            assert!(merged[sb].is_finite(), "merged SMR[{sb}] not finite");
+            assert!(
+                merged[sb] >= single[sb] - 1.0e-9,
+                "merged SMR[{sb}] = {} should dominate single-call {}",
+                merged[sb],
+                single[sb]
+            );
+        }
+    }
+
+    #[test]
+    fn model2_layer2_streams_carry_and_predictor() {
+        // Streaming several frames through one state must stay finite and
+        // advance the carry: after streaming a non-silent tone the carry
+        // holds real samples (the inter-call stored window).
+        let fs_hz = 32_000.0_f64;
+        let f = 1_500.0;
+        let mut pcm = vec![0.0_f64; 1152];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = 0.5 * (2.0 * core::f64::consts::PI * f * i as f64 / fs_hz).sin();
+        }
+        let mut st = Model2Layer2State::new();
+        for _ in 0..3 {
+            let smr = compute_smr_model2_layer2_frame(&pcm, SamplingRate::Fs32kHz, &mut st);
+            for &v in &smr {
+                assert!(v.is_finite(), "streamed Layer-II Model-2 SMR {v}");
+            }
+        }
+        assert!(
+            st.carry.iter().any(|&v| v.abs() > 1.0e-6),
+            "carry should be non-zero after streaming a tone"
         );
     }
 
