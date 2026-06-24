@@ -8,6 +8,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2 Psychoacoustic Model 2 per-frame SMR driver
+  `compute_smr_model2_frame` (`src/psy.rs`)**. Chains the full Model-2
+  chain — the newly-added analysis front-end (steps a–e) plus the
+  existing §D.2.4 step (f)…(n) threshold loop in `src/tables_model2.rs` —
+  into a per-subband `SMR_sb(n)` table, the Model-2 counterpart of
+  `compute_smr_model1_frame`. Per frame it runs the polar FFT (b), the
+  two-block prediction (c) against a caller-owned, frame-streaming
+  `Model2PredictorState`, the unpredictability measure (d), the
+  partition energy/unpredictability (e), the spreading convolution +
+  renormalisation (f), the per-line threshold energy (g…k), the
+  absolute-threshold floor (l) — with the dB→energy conversion anchored
+  to a +1-lsb-sine FFT reference per the spec's step-(l) note — and the
+  step-(n) per-coder-partition SMR, mapping each 16-FFT-line Table D.5
+  coder partition `n` (`n ≥ 1`) to subband `n − 1`. Silent/undefined
+  partitions degenerate to 0 dB SMR so the allocator's `MNR = SNR − SMR`
+  stays finite. Four tests pin tone localisation, all-rate silence
+  finiteness, predictor advance across streamed frames, and the
+  reference-energy positivity. This is the wiring step the README's "Not
+  yet supported" note named: Model 2 is now driven end-to-end to a
+  per-subband SMR (an `encode_frame_auto`-style Model-2 encode entry
+  point remains for a future round).
+
 - **§D.2 Psychoacoustic Model 2 analysis front-end — steps (a)–(e)
   (`src/psy.rs`)**. Completes the Model-2 chain ahead of its threshold
   loop (steps (f)…(n), already in `src/tables_model2.rs`): the §D.2.4

@@ -161,18 +161,26 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
   automatic SMR selection (see **Encode** above): `encode_frame_auto`
   drives `psy::compute_smr_model1_frame` per frame to feed the
   §C.1.5.2.7 bit allocator. What remains on the perceptual side:
-  - **Model 2 (§D.2)** is staged in `tables_model2` end-to-end to the
-    signal-to-mask ratio — past the §D.2.4 step-(f) spreading convolution
-    it runs the step-(g)…(n) threshold loop (tonality index (g), required
-    SNR (h), power ratio (i), per-partition threshold (j), per-FFT-line
-    spread (k), the absolute-threshold floor (l), and the
-    per-coder-partition `SMR_n` (n) with the Table D.5 narrow/wide-band
-    rule). Its calc-partition tables (D.3a/b/c) and absolute-threshold
-    tables (D.4a/b/c) are complete for all three Layer II rates, selected
-    by `calc_partition_table_for_rate` / `abs_threshold_table_for_rate`.
-    A `compute_smr_model2_frame` driver + an `encode_frame_auto`-style
-    Model-2 entry point is the next wiring step (Model 1 is wired; Model 2
-    is staged but not yet driven from the encoder).
+  - **Model 2 (§D.2)** is now driven **end-to-end to a per-subband
+    signal-to-mask ratio** by `psy::compute_smr_model2_frame`. Per frame
+    it runs the §D.2.4 step-(a)…(n) chain: the step-(b) raised-cosine
+    analysis window + polar `(r_ω, f_ω)` FFT
+    (`model2_hann_window_layer2` / `complex_spectrum_polar_layer2`), the
+    step-(c) two-block `r̂/f̂` prediction (`Model2PredictorState`, advanced
+    across streamed frames), the step-(d) unpredictability `c_ω`
+    (`unpredictability_measure`), the step-(e) partition energy +
+    weighted unpredictability (`partition_energy_and_unpredictability`),
+    the step-(f) spreading convolution + renormalisation, the
+    step-(g)…(k) threshold loop, the step-(l) absolute-threshold floor
+    (dB→energy converted against a +1-lsb-sine FFT reference per the
+    spec's step-(l) note), and the step-(n) per-coder-partition `SMR_n`
+    mapped to subbands (Table D.5 coder partition `n` ↦ subband `n − 1`).
+    Its calc-partition tables (D.3a/b/c) and absolute-threshold tables
+    (D.4a/b/c) are complete for all three Layer II rates, selected by
+    `calc_partition_table_for_rate` / `abs_threshold_table_for_rate`. The
+    remaining wiring step is an `encode_frame_auto`-style Model-2 *encode*
+    entry point (the more-stringent-of-the-pair §D.2.1 frame logic) — the
+    SMR producer is complete; only its selection from the encoder remains.
   - The §D.1 driver uses the current frame's first 1024 samples for the
     FFT; the §D.1 Step 1 net +192-sample window shift (which needs the
     next frame's lookahead) is a refinement that would tighten the

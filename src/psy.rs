@@ -2070,6 +2070,156 @@ pub fn compute_smr_model1_frame(
     out
 }
 
+/// Reference *+1 lsb sine* energy `r_ω²` for the §D.2.4 step (l)
+/// absolute-threshold dB→energy conversion.
+///
+/// The spec (PDF page 131, printed 125): "The dB values of `absthr` …
+/// are relative to the level that a sine wave of +1 lsb has in the FFT
+/// used for threshold calculation. The dB values must be converted into
+/// the energy domain after considering the FFT normalization actually
+/// used."
+///
+/// The [`complex_spectrum_polar_layer2`] FFT is unnormalised, so a
+/// single +1-lsb (amplitude `1`) sine, windowed by
+/// [`model2_hann_window_layer2`], deposits a fixed peak energy `r_ω²` in
+/// its bin. That peak energy is the linear reference for `absthr = 0 dB`;
+/// a tabulated `absthr` of `d` dB then corresponds to the line energy
+/// `ref · 10^(d/10)`. We pick a mid-band bin (bin 64, well clear of DC
+/// leakage and the Nyquist fold) and use its peak `r_ω²` as the
+/// reference; the windowed single-bin sine has the same peak energy at
+/// any interior bin, so the choice is immaterial.
+fn model2_plus_one_lsb_reference_energy() -> f64 {
+    let bin = 64_usize;
+    let mut s = [0.0_f64; LAYER2_FFT_LEN];
+    for (i, sample) in s.iter_mut().enumerate() {
+        // Amplitude 1 == +1 lsb in the spec's "+1 lsb sine" reference.
+        *sample =
+            (2.0 * core::f64::consts::PI * bin as f64 * i as f64 / LAYER2_FFT_LEN as f64).sin();
+    }
+    let (r, _) = complex_spectrum_polar_layer2(&s);
+    r.iter().map(|&m| m * m).fold(0.0_f64, f64::max)
+}
+
+/// §D.2 *Psychoacoustic Model 2* per-frame driver — chains steps (a)
+/// through (n) into a per-subband signal-to-mask-ratio table.
+///
+/// This is the Model-2 counterpart of [`compute_smr_model1_frame`]: it
+/// consumes one frame's mono PCM (the first [`LAYER2_FFT_LEN`] samples
+/// are the §D.2.4 step (a) reconstruction window — the threshold
+/// generator's stored history is the caller-owned `predictor`) and
+/// produces an `SMR_sb(n)` for every Layer II subband. The stages,
+/// each a spec primitive landed separately:
+///
+/// ```text
+/// (b) (r_ω, f_ω)  = complex_spectrum_polar_layer2(frame)
+/// (c) (r̂, f̂)      = predictor.predict(.)              [then predictor.push]
+/// (d) c_ω         = unpredictability_measure(r, f, r̂, f̂)
+/// (e) (e_b, c_b)  = partition_energy_and_unpredictability(table, r, c_ω)
+/// (f) ecb_b       = convolve_partition_spreading(table, e_b)
+///     cf_b        = convolve_partition_spreading(table, c_b)
+///     en_b        = normalize_spread_energy(table, ecb_b)
+///     cb_b        = renormalize_unpredictability(cf_b, ecb_b)
+/// (g..k) nb_ω     = line_energy_threshold(table, en_b, cb_b)
+/// (l) thr_ω       = include_absolute_threshold(nb_ω, absthr_ω[energy])
+/// (n) SMR_n       = signal_to_mask_ratio_db(n, r_ω², thr_ω)  per coder partition
+/// ```
+///
+/// The step-(n) SMR is computed per **coder partition** (Table D.5); each
+/// 16-FFT-line coder partition `n` (`n ≥ 1`) covers exactly one Layer II
+/// subband (`subband = n − 1`, since the §2.4.3.2 filterbank splits the
+/// band into 32 subbands of 16 FFT lines each, matching the D.5 16-line
+/// partition grid). Coder partition 0 is the DC line and maps to no
+/// subband.
+///
+/// The §D.2.4 step (l) absolute-threshold dB values are converted to the
+/// FFT energy domain against the +1-lsb-sine reference
+/// ([`model2_plus_one_lsb_reference_energy`]) per the spec's conversion
+/// note. A subband whose step-(n) ratio is undefined (a silent partition
+/// with no positive threshold) falls back to `0,0 dB` SMR — the same
+/// "no perceptual headroom" degenerate the Model-1 driver uses — so the
+/// allocator's `MNR = SNR − SMR` stays finite.
+///
+/// `predictor` is advanced by one block on every call (its `(r, f)` are
+/// pushed after the prediction), so a caller streaming consecutive
+/// frames through the same [`Model2PredictorState`] gets the spec's
+/// rolling two-block history; the first two frames predict against the
+/// zeroed-startup state.
+///
+/// LSF (16 / 22,05 / 24 kHz) rates are **not** handled: Annex D provides
+/// no Model-2 calculation-partition or absolute-threshold tables for the
+/// lower sampling frequencies, so `fs` is one of the three Model-2 rates
+/// ([`crate::tables_d2::SamplingRate`]).
+#[must_use]
+pub fn compute_smr_model2_frame(
+    pcm: &[f64],
+    fs: crate::tables_d2::SamplingRate,
+    predictor: &mut Model2PredictorState,
+) -> [f64; NUM_SUBBANDS_LAYER2] {
+    use crate::tables_model2::{
+        abs_threshold_table_for_rate, absolute_threshold_db_per_line,
+        calc_partition_table_for_rate, convolve_partition_spreading, include_absolute_threshold,
+        line_energy_threshold, normalize_spread_energy, renormalize_unpredictability,
+        signal_to_mask_ratio_db, CODER_PARTITION_COUNT,
+    };
+
+    // ---- Step (a)/(b): polar spectrum of the windowed block ----
+    let mut frame = [0.0_f64; LAYER2_FFT_LEN];
+    let take = pcm.len().min(LAYER2_FFT_LEN);
+    frame[..take].copy_from_slice(&pcm[..take]);
+    let (r, f) = complex_spectrum_polar_layer2(&frame);
+
+    // ---- Step (c): predict from the prior two blocks, then advance ----
+    let (r_hat, f_hat) = predictor.predict(r.len());
+    let cw = unpredictability_measure(&r, &f, &r_hat, &f_hat);
+    predictor.push(r.clone(), f.clone());
+
+    // ---- Step (e): partition energy + weighted unpredictability ----
+    let table = calc_partition_table_for_rate(fs);
+    let (e_b, c_b) = partition_energy_and_unpredictability(table, &r, &cw);
+
+    // ---- Step (f): spreading convolution + renormalisation ----
+    let ecb = convolve_partition_spreading(table, &e_b);
+    let cf = convolve_partition_spreading(table, &c_b);
+    let en = normalize_spread_energy(table, &ecb);
+    let cb = renormalize_unpredictability(&cf, &ecb);
+
+    // ---- Steps (g)…(k): per-FFT-line threshold energy ----
+    let nb_omega = line_energy_threshold(table, &en, &cb);
+
+    // ---- Step (l): floor with the absolute threshold (energy domain) ----
+    let line_count = nb_omega.len();
+    let absthr_db = absolute_threshold_db_per_line(abs_threshold_table_for_rate(fs), line_count);
+    let ref_energy = model2_plus_one_lsb_reference_energy();
+    let absthr_energy: Vec<f64> = absthr_db
+        .iter()
+        .map(|&d| ref_energy * 10.0_f64.powf(d / 10.0))
+        .collect();
+    let thr = include_absolute_threshold(&nb_omega, &absthr_energy);
+
+    // ---- Step (n): per-coder-partition SMR → per-subband table ----
+    //
+    // r_ω² is the step-(e)/(n) signal energy per FFT line.
+    let r2: Vec<f64> = r.iter().map(|&m| m * m).collect();
+    let mut out = [0.0_f64; NUM_SUBBANDS_LAYER2];
+    for n in 1..CODER_PARTITION_COUNT {
+        // Coder partition n (n ≥ 1) ↦ subband n − 1.
+        let sb = n - 1;
+        if sb >= NUM_SUBBANDS_LAYER2 {
+            break;
+        }
+        // A silent partition gives `epart = 0` ⇒ `10·log10(0) = -inf`;
+        // an undefined partition gives `None`. Both mean "no audible
+        // signal, no perceptual headroom" — degenerate to 0,0 dB so the
+        // allocator's `MNR = SNR − SMR` stays finite (the same fallback
+        // the Model-1 driver applies for masking-line-free subbands).
+        out[sb] = match signal_to_mask_ratio_db(n, &r2, &thr) {
+            Some(v) if v.is_finite() => v,
+            _ => 0.0,
+        };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4347,6 +4497,89 @@ mod tests {
         // 2·5−3 = 7 (a constant-acceleration extrapolation).
         let (r_hat, _) = st.predict(3);
         assert_eq!(r_hat, vec![5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn compute_smr_model2_frame_finite_and_tone_localised() {
+        // A 1 kHz tone at 44,1 kHz: the Model-2 driver must produce a
+        // finite SMR for every subband, and the tone's subband should
+        // out-SMR a distant high band.
+        let fs_hz = 44_100.0_f64;
+        let f = 1_000.0;
+        let mut pcm = vec![0.0_f64; 1152];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = 0.5 * (2.0 * core::f64::consts::PI * f * i as f64 / fs_hz).sin();
+        }
+        let tone_sb = (f / (fs_hz / 64.0)) as usize;
+        let mut st = Model2PredictorState::new();
+        let smr = compute_smr_model2_frame(&pcm, SamplingRate::Fs44k1Hz, &mut st);
+        for (n, &v) in smr.iter().enumerate() {
+            assert!(v.is_finite(), "Model-2 SMR[{n}] = {v} must be finite");
+        }
+        assert!(
+            smr[tone_sb] > smr[25] - 1.0,
+            "tone band {tone_sb} SMR {} should exceed distant band 25 SMR {}",
+            smr[tone_sb],
+            smr[25]
+        );
+    }
+
+    #[test]
+    fn compute_smr_model2_frame_silence_is_finite() {
+        // An all-zero frame: every SMR must be finite (no NaN/inf from
+        // the 0/0 partition ratios) across all three Model-2 rates.
+        for fs in [
+            SamplingRate::Fs32kHz,
+            SamplingRate::Fs44k1Hz,
+            SamplingRate::Fs48kHz,
+        ] {
+            let pcm = vec![0.0_f64; 1152];
+            let mut st = Model2PredictorState::new();
+            let smr = compute_smr_model2_frame(&pcm, fs, &mut st);
+            for (n, &v) in smr.iter().enumerate() {
+                assert!(v.is_finite(), "silence Model-2 SMR[{n}] = {v} ({fs:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn compute_smr_model2_frame_predictor_advances_across_frames() {
+        // Streaming three identical tone frames through one predictor:
+        // by the third frame the predictor holds two real blocks, so the
+        // step-(c) extrapolation is active (a perfectly periodic tone
+        // predicts well ⇒ lower unpredictability ⇒ generally higher
+        // SMR in the tone band than the cold first frame). We assert the
+        // predictor state actually changed (non-empty) and SMRs stay
+        // finite — the wiring, not a numeric target.
+        let fs_hz = 48_000.0_f64;
+        let f = 3_000.0;
+        let mut pcm = vec![0.0_f64; 1152];
+        for (i, s) in pcm.iter_mut().enumerate() {
+            *s = 0.4 * (2.0 * core::f64::consts::PI * f * i as f64 / fs_hz).sin();
+        }
+        let mut st = Model2PredictorState::new();
+        let mut last = [0.0_f64; NUM_SUBBANDS_LAYER2];
+        for _ in 0..3 {
+            last = compute_smr_model2_frame(&pcm, SamplingRate::Fs48kHz, &mut st);
+        }
+        for &v in &last {
+            assert!(v.is_finite(), "streamed Model-2 SMR {v} must be finite");
+        }
+        // The predictor has two real blocks now: predicting against them
+        // yields a non-zero r̂ for the tone bin.
+        let (r_hat, _) = st.predict(LAYER2_FFT_BINS);
+        assert!(
+            r_hat.iter().any(|&v| v.abs() > 1.0e-6),
+            "predictor should carry a non-zero r̂ after three pushes"
+        );
+    }
+
+    #[test]
+    fn model2_reference_energy_is_positive() {
+        // The +1-lsb-sine reference energy anchors the step-(l) dB→energy
+        // conversion; it must be a finite positive number.
+        let e = model2_plus_one_lsb_reference_energy();
+        assert!(e.is_finite() && e > 0.0, "reference energy {e} invalid");
     }
 
     #[test]
