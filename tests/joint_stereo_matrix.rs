@@ -609,3 +609,107 @@ fn joint_stereo_silence_round_trips_to_exact_zero_at_every_bound() {
         }
     }
 }
+
+/// RMS of a plane over its steady middle (skipping the ramp-in / trailing
+/// partial frame).
+fn steady_rms(plane: &[f64], n_frames: usize) -> f64 {
+    let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+    let lo = FILTERBANK_DELAY + PCM_SAMPLES_PER_CHANNEL;
+    let hi = total - PCM_SAMPLES_PER_CHANNEL;
+    let mut sum = 0.0_f64;
+    for &s in &plane[lo..hi] {
+        sum += s * s;
+    }
+    (sum / (hi - lo) as f64).sqrt()
+}
+
+#[test]
+fn joint_stereo_reconstructs_per_channel_levels_in_the_intensity_region() {
+    // The decisive intensity-stereo property: above `bound` the two
+    // channels share ONE sample codeword but each carries its OWN
+    // §2.4.3.3.3 scalefactor, so the decoder must reconstruct each
+    // channel at its own level by rescaling the shared codeword by that
+    // channel's scalefactor (frame.rs Region-2 loop).
+    //
+    // The round-trip tests above feed both channels identical input, so
+    // their above-bound scalefactors coincide and a bug that ignored
+    // channel 1's scalefactor (e.g. reused channel 0's) would still
+    // pass. Here channel 1 is a deliberately QUIETER copy of channel 0
+    // (same tone, half the amplitude). With correct per-channel
+    // rescaling the decoded channel-1 level must be markedly below
+    // channel 0; a decoder that applied channel 0's scalefactor to both
+    // would reconstruct them at the SAME level and fail this test.
+    let n_frames = 10;
+    let amp0 = 0.6;
+    let amp1 = 0.3; // half-level — a clear 6 dB pan toward channel 0
+
+    for &(lsf, sample_rate, bit_rate) in WIDE_RATE_MATRIX {
+        // Pick a tone whose subband index clears Bound4 so the tone's
+        // subband lands in the intensity region (bound <= sb < sblimit).
+        // A subband is `Fs/64` Hz wide; the ~5.5th subband centre lands
+        // at subband index ≈ 5 (>= bound 4) for every rate in the matrix.
+        let sb_width = sample_rate as f64 / 64.0;
+        let intensity_tone = 5.5 * sb_width; // lands in subband ~5 (>= bound 4)
+
+        let ext = ModeExtension::Bound4;
+        let h = header(lsf, sample_rate, bit_rate, Mode::JointStereo, ext);
+        let label = format!("JS-levels {sample_rate}Hz");
+
+        let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        let omega = 2.0 * std::f64::consts::PI * intensity_tone / sample_rate as f64;
+        let ch0: Vec<f64> = (0..total)
+            .map(|i| amp0 * (omega * i as f64).sin())
+            .collect();
+        let ch1: Vec<f64> = (0..total)
+            .map(|i| amp1 * (omega * i as f64).sin())
+            .collect();
+        let stream = vec![ch0, ch1];
+
+        let bytes =
+            encode_all_frames(&h, &stream, 0).unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+
+        // Confirm the tone's subband is actually in the intensity region
+        // (bound <= sb < sblimit) for this rate — otherwise the test
+        // would be exercising the per-channel region instead.
+        let mut reader = BitReader::with_position(&bytes, 4);
+        let (audio, _, _) =
+            parse_audio_data_with_section_bits(&h, &mut reader).expect("parse audio-data");
+        assert!(
+            audio.bound < audio.sblimit,
+            "{label}: non-empty intensity region (bound {} < sblimit {})",
+            audio.bound,
+            audio.sblimit
+        );
+
+        let planes = decode_all_frames(&bytes).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+        assert_eq!(planes.len(), 2, "{label}: stereo");
+
+        let rms0 = steady_rms(&planes[0], n_frames);
+        let rms1 = steady_rms(&planes[1], n_frames);
+        assert!(rms0 > 1e-3, "{label}: channel 0 must carry the tone");
+        assert!(
+            rms1 > 1e-4,
+            "{label}: channel 1 must carry the (quieter) tone"
+        );
+
+        // Channel 1 is half the amplitude of channel 0. The §2.4.3.3.3
+        // scalefactor ladder is coarse (Table 3-B.1 steps of 2^(1/3)),
+        // so the decoded ratio won't be exactly 0.5, but channel 1 must
+        // clearly be QUIETER than channel 0 — proving its own
+        // scalefactor was applied to the shared codeword. A decoder that
+        // reused channel 0's scalefactor would give ratio ≈ 1.0.
+        let ratio = rms1 / rms0;
+        assert!(
+            ratio < 0.75,
+            "{label}: channel-1/channel-0 RMS ratio {ratio:.3} must reflect the \
+             6 dB intensity pan (expected well below 1.0; ≈1.0 would mean \
+             channel 1's own scalefactor was ignored)"
+        );
+        // And not absurdly low (the codeword is shared, so channel 1 is
+        // a rescaled copy, not silence).
+        assert!(
+            ratio > 0.2,
+            "{label}: channel-1/channel-0 RMS ratio {ratio:.3} unexpectedly low"
+        );
+    }
+}

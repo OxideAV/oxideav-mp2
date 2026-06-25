@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Genuine intensity-stereo per-channel-level decode test
+  (`tests/joint_stereo_matrix.rs`)**. The existing joint-stereo
+  round-trip tests feed both channels identical input, so their
+  above-`bound` scalefactors coincide and a decoder bug that reused
+  channel 0's scalefactor for both channels would still pass. The new
+  `joint_stereo_reconstructs_per_channel_levels_in_the_intensity_region`
+  encodes a 6 dB intensity pan (channel 1 = half-amplitude copy of
+  channel 0) on a tone whose subband clears `Bound4`, then asserts the
+  decoded channel-1/channel-0 RMS ratio reflects the pan (well below
+  1.0) across the whole wide-table rate matrix — direct evidence the
+  §2.4.3.3.3 Region-2 loop rescales the shared codeword by **each
+  channel's own** scalefactor (frame.rs:350-358), not a shared one.
+
 - **`oxideav_core::Encoder` registry wiring (`src/codec_encoder.rs`)**.
   Adapts the `encode_frame_auto_with` primitive into the framework's
   frame-in / packet-out `Encoder` trait — the encode-side dual of
