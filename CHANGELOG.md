@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Registry-encoder codec options (`src/codec_encoder.rs`)**. The
+  `Mp2CoreEncoder` now reads three `CodecParameters::options` keys so the
+  already-built joint-stereo, dual-channel and Model-2 capabilities are
+  reachable through the registry (previously the registry encoder could
+  only emit plain stereo + Model-1): `mode` (`stereo` / `joint_stereo` /
+  `dual_channel` for 2-channel streams), `bound` (joint-stereo intensity
+  bound `4` / `8` / `12` / `16`), and `psymodel` (`model1` / `model2` —
+  routing `encode_one` through `encode_frame_auto_with` or
+  `encode_frame_auto_model2`). Unrecognised values and channel-count /
+  mode mismatches are rejected at `make_encoder` time. Four new unit
+  tests cover the mode selection round-trip, every intensity bound, the
+  Model-1 ≠ Model-2 byte divergence, and option rejection.
+
 - **Psychoacoustic-model allocation-shaping proof
   (`tests/psy_model_shapes_allocation.rs`)**. Two integration tests pin
   that the §D.1 Model-1 and §D.2 Model-2 auto-SMR chains genuinely

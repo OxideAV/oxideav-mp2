@@ -125,6 +125,9 @@ framework's frame-in / packet-out trait: it accepts planar-S16
 every 1152 samples (zero-padding a partial trailing frame on `flush`).
 `register_codecs` now carries both decoder and encoder factories under
 the `"mp2"` id, so the registry exposes MP2 encode for the first time.
+Three `CodecParameters::options` keys tune it: `mode` (`stereo` /
+`joint_stereo` / `dual_channel`), `bound` (joint-stereo intensity bound
+`4` / `8` / `12` / `16`), and `psymodel` (`model1` / `model2`).
 
 **Batch stream encode** — `encode_all_frames` / `encode_all_frames_with_smr`
 are the encode-side counterpart of `decode_all_frames`: they turn one

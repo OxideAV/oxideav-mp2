@@ -57,9 +57,21 @@ use oxideav_core::{
 
 use crate::bitalloc::select_table;
 use crate::codec_decoder::{CODEC_ID_STR, WAVE_FORMAT_MPEG};
-use crate::encoder_frame::{encode_frame_auto_with, EncodeFrameState};
+use crate::encoder_frame::{encode_frame_auto_model2, encode_frame_auto_with, EncodeFrameState};
 use crate::frame::PCM_SAMPLES_PER_CHANNEL;
 use crate::header::{is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, Mode, ModeExtension};
+
+/// Which Annex D psychoacoustic model drives the auto-SMR allocation.
+///
+/// Selected by the `psymodel` codec option (`"model1"` / `"model2"`);
+/// defaults to Model 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PsyModel {
+    /// §D.1 Model 1 (tonal / non-tonal masker labelling).
+    Model1,
+    /// §D.2 Model 2 (unpredictability-driven, twice-per-frame Layer II).
+    Model2,
+}
 
 /// Full-scale divisor mapping S16 → the §2.4.3.4.7.1 `[-1, +1]` float
 /// range. `2^15` so `i16::MIN ↦ -1.0` exactly (the MSB-is-−1 convention
@@ -91,23 +103,72 @@ pub fn default_bitrate_bps(sample_rate: u32, mode: Mode) -> u32 {
     }
 }
 
-/// Map a channel count to the Layer II [`Mode`] the encoder emits.
+/// Map a channel count + optional `mode` override to the Layer II
+/// [`Mode`] the encoder emits.
 ///
-/// 1 → `SingleChannel`, 2 → `Stereo`. (Dual-channel and joint-stereo
-/// are valid Layer II modes but the registry encoder emits plain stereo
-/// for the 2-channel case; callers needing intensity stereo drive
-/// [`encode_frame_auto_with`] directly with a `JointStereo` header.)
-fn mode_for_channels(channels: u16) -> Option<Mode> {
+/// 1 channel → always `SingleChannel`. 2 channels → `Stereo` by default,
+/// or `JointStereo` / `DualChannel` when the `mode` codec option selects
+/// it. A `mode` override that contradicts the channel count (e.g.
+/// `single_channel` for a 2-channel frame) is rejected.
+fn mode_for_channels(channels: u16, mode_opt: Option<&str>) -> Result<Mode> {
     match channels {
-        1 => Some(Mode::SingleChannel),
-        2 => Some(Mode::Stereo),
-        _ => None,
+        1 => match mode_opt {
+            None | Some("single_channel") => Ok(Mode::SingleChannel),
+            Some(other) => Err(Error::invalid(format!(
+                "oxideav-mp2: mode={other:?} is incompatible with a 1-channel stream \
+                 (only single_channel)"
+            ))),
+        },
+        2 => match mode_opt {
+            None | Some("stereo") => Ok(Mode::Stereo),
+            Some("joint_stereo") => Ok(Mode::JointStereo),
+            Some("dual_channel") => Ok(Mode::DualChannel),
+            Some(other) => Err(Error::invalid(format!(
+                "oxideav-mp2: mode={other:?} not recognised for a 2-channel stream \
+                 (stereo / joint_stereo / dual_channel)"
+            ))),
+        },
+        _ => Err(Error::invalid(format!(
+            "oxideav-mp2: encoder supports 1 or 2 channels (channels={channels})"
+        ))),
+    }
+}
+
+/// Parse the `mode_extension` (joint-stereo intensity bound) codec
+/// option. Only meaningful when `mode == JointStereo`; `"4" / "8" / "12"
+/// / "16"` map to the four §2.4.2.3 bounds, default `Bound4`.
+fn mode_extension_opt(s: Option<&str>) -> Result<ModeExtension> {
+    match s {
+        None | Some("4") => Ok(ModeExtension::Bound4),
+        Some("8") => Ok(ModeExtension::Bound8),
+        Some("12") => Ok(ModeExtension::Bound12),
+        Some("16") => Ok(ModeExtension::Bound16),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: bound={other:?} not a valid intensity bound (4 / 8 / 12 / 16)"
+        ))),
+    }
+}
+
+/// Parse the `psymodel` codec option (`"model1"` / `"model2"`), default
+/// Model 1.
+fn psymodel_opt(s: Option<&str>) -> Result<PsyModel> {
+    match s {
+        None | Some("model1") => Ok(PsyModel::Model1),
+        Some("model2") => Ok(PsyModel::Model2),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: psymodel={other:?} not recognised (model1 / model2)"
+        ))),
     }
 }
 
 /// Build the fixed per-stream [`FrameHeader`] from encoder parameters,
 /// validating the rate / channel / bitrate combination up front.
-fn build_header(sample_rate: u32, mode: Mode, bit_rate: u32) -> Result<FrameHeader> {
+fn build_header(
+    sample_rate: u32,
+    mode: Mode,
+    mode_extension: ModeExtension,
+    bit_rate: u32,
+) -> Result<FrameHeader> {
     let lsf = match sample_rate {
         32_000 | 44_100 | 48_000 => false,
         16_000 | 22_050 | 24_000 => true,
@@ -137,7 +198,7 @@ fn build_header(sample_rate: u32, mode: Mode, bit_rate: u32) -> Result<FrameHead
         padding: false,
         private_bit: false,
         mode,
-        mode_extension: ModeExtension::Bound4,
+        mode_extension,
         copyright: false,
         original: true,
         emphasis: Emphasis::None,
@@ -164,6 +225,19 @@ fn build_header(sample_rate: u32, mode: Mode, bit_rate: u32) -> Result<FrameHead
 /// `channels` (1 or 2; default 2), and `bit_rate` (optional — a per-rate
 /// default is chosen when absent).
 ///
+/// # Codec options
+///
+/// Three `params.options` keys tune the encode (all optional):
+///
+/// * `mode` — for a 2-channel stream: `"stereo"` (default),
+///   `"joint_stereo"` (intensity stereo), or `"dual_channel"` (two
+///   independent mono programmes). Ignored / must be `"single_channel"`
+///   for 1 channel.
+/// * `bound` — for `joint_stereo`: the §2.4.2.3 intensity bound,
+///   `"4"` (default) / `"8"` / `"12"` / `"16"`.
+/// * `psymodel` — which Annex D model drives the auto-SMR allocation:
+///   `"model1"` (§D.1, default) or `"model2"` (§D.2).
+///
 /// # Errors
 ///
 /// * `channels` not 1 or 2 — the §2.4.2.3 mode field encodes at most
@@ -171,13 +245,12 @@ fn build_header(sample_rate: u32, mode: Mode, bit_rate: u32) -> Result<FrameHead
 /// * `sample_rate` absent or not a Layer II rate.
 /// * `bit_rate` (if supplied) violates the §2.4.2.3 matrix or has no
 ///   §2.4.3.1 allocation table for the rate.
+/// * an unrecognised `mode` / `bound` / `psymodel` option.
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let channels = params.channels.unwrap_or(2);
-    let Some(mode) = mode_for_channels(channels) else {
-        return Err(Error::invalid(format!(
-            "oxideav-mp2: encoder supports 1 or 2 channels (channels={channels})"
-        )));
-    };
+    let mode = mode_for_channels(channels, params.options.get("mode"))?;
+    let mode_extension = mode_extension_opt(params.options.get("bound"))?;
+    let psymodel = psymodel_opt(params.options.get("psymodel"))?;
 
     let Some(sample_rate) = params.sample_rate else {
         return Err(Error::invalid(
@@ -194,7 +267,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         None => default_bitrate_bps(sample_rate, mode),
     };
 
-    let header = build_header(sample_rate, mode, bit_rate)?;
+    let header = build_header(sample_rate, mode, mode_extension, bit_rate)?;
 
     let mut out_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     out_params.sample_rate = Some(sample_rate);
@@ -207,6 +280,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         CodecId::new(CODEC_ID_STR),
         out_params,
         header,
+        psymodel,
     )))
 }
 
@@ -230,6 +304,7 @@ pub struct Mp2CoreEncoder {
     output: CodecParameters,
     header: FrameHeader,
     channels: usize,
+    psymodel: PsyModel,
     enc_state: EncodeFrameState,
     pending_pcm: Vec<Vec<f64>>,
     pending_packets: VecDeque<Packet>,
@@ -253,13 +328,19 @@ impl std::fmt::Debug for Mp2CoreEncoder {
 }
 
 impl Mp2CoreEncoder {
-    fn new(codec_id: CodecId, output: CodecParameters, header: FrameHeader) -> Self {
+    fn new(
+        codec_id: CodecId,
+        output: CodecParameters,
+        header: FrameHeader,
+        psymodel: PsyModel,
+    ) -> Self {
         let channels = header.channels();
         Self {
             codec_id,
             output,
             header,
             channels,
+            psymodel,
             enc_state: EncodeFrameState::new(),
             pending_pcm: vec![Vec::new(); channels],
             pending_packets: VecDeque::new(),
@@ -294,8 +375,15 @@ impl Mp2CoreEncoder {
     /// Encode one exactly-1152-sample-per-channel PCM frame and queue
     /// the resulting Layer II packet.
     fn encode_one(&mut self, frame_pcm: Vec<Vec<f64>>) -> Result<()> {
-        let bytes = encode_frame_auto_with(&self.header, &frame_pcm, 0, &mut self.enc_state)
-            .map_err(|e| Error::other(format!("oxideav-mp2: encode_frame: {e}")))?;
+        let bytes = match self.psymodel {
+            PsyModel::Model1 => {
+                encode_frame_auto_with(&self.header, &frame_pcm, 0, &mut self.enc_state)
+            }
+            PsyModel::Model2 => {
+                encode_frame_auto_model2(&self.header, &frame_pcm, 0, &mut self.enc_state)
+            }
+        }
+        .map_err(|e| Error::other(format!("oxideav-mp2: encode_frame: {e}")))?;
         let mut packet = Packet::new(
             0,
             TimeBase::new(1, i64::from(self.header.sample_rate)),
@@ -466,6 +554,136 @@ mod tests {
         }
     }
 
+    /// Run a 4-frame tone through an encoder built from `p`, returning
+    /// the decoded planes. Drives the full send → flush → receive loop.
+    fn encode_decode_through(p: &CodecParameters, sample_rate: u32) -> Vec<Vec<f64>> {
+        let channels = p.channels.unwrap_or(2) as usize;
+        let mut enc = make_encoder(p).expect("make_encoder");
+        let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+        let data: Vec<Vec<u8>> = (0..channels)
+            .map(|_| tone_plane(n, 1_000.0, sample_rate, 0.5))
+            .collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+        let mut stream = Vec::new();
+        loop {
+            match enc.receive_packet() {
+                Ok(pk) => stream.extend_from_slice(&pk.data),
+                Err(Error::Eof) => break,
+                Err(e) => panic!("receive_packet: {e:?}"),
+            }
+        }
+        decode_all_frames(&stream).expect("decode")
+    }
+
+    #[test]
+    fn mode_option_selects_joint_stereo_dual_channel_and_stereo() {
+        for mode in ["stereo", "joint_stereo", "dual_channel"] {
+            let mut p = params(44_100, 2, Some(192_000));
+            p.options.insert("mode", mode);
+            let planes = encode_decode_through(&p, 44_100);
+            assert_eq!(planes.len(), 2, "mode={mode}: stereo decode");
+            assert_eq!(
+                planes[0].len(),
+                4 * PCM_SAMPLES_PER_CHANNEL,
+                "mode={mode}: sample count"
+            );
+        }
+    }
+
+    #[test]
+    fn joint_stereo_bound_option_round_trips_at_every_bound() {
+        for bound in ["4", "8", "12", "16"] {
+            let mut p = params(44_100, 2, Some(192_000));
+            p.options.insert("mode", "joint_stereo");
+            p.options.insert("bound", bound);
+            let planes = encode_decode_through(&p, 44_100);
+            assert_eq!(
+                planes[0].len(),
+                4 * PCM_SAMPLES_PER_CHANNEL,
+                "bound={bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn psymodel_option_selects_model2_and_differs_from_model1() {
+        let mut p1 = params(44_100, 2, Some(128_000));
+        p1.options.insert("psymodel", "model1");
+        let mut p2 = params(44_100, 2, Some(128_000));
+        p2.options.insert("psymodel", "model2");
+
+        // Both decode to a valid stream of the right shape.
+        let d1 = encode_decode_through(&p1, 44_100);
+        let d2 = encode_decode_through(&p2, 44_100);
+        assert_eq!(d1[0].len(), 4 * PCM_SAMPLES_PER_CHANNEL);
+        assert_eq!(d2[0].len(), 4 * PCM_SAMPLES_PER_CHANNEL);
+
+        // And the two psymodels produce DIFFERENT encoded bytes for a
+        // structured signal — proving the option actually routes through
+        // the selected model. Build raw streams to compare bytes.
+        let make_stream = |p: &CodecParameters| {
+            let mut enc = make_encoder(p).unwrap();
+            let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+            // Two-tone structured signal so the models diverge.
+            let plane: Vec<u8> = {
+                let mut bytes = Vec::with_capacity(n * 2);
+                let w1 = 2.0 * std::f64::consts::PI * 700.0 / 44_100.0;
+                let w2 = 2.0 * std::f64::consts::PI * 3_300.0 / 44_100.0;
+                for i in 0..n {
+                    let s =
+                        (0.5 * (w1 * i as f64).sin() + 0.15 * (w2 * i as f64).sin()) * FULL_SCALE;
+                    let v = s.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                bytes
+            };
+            enc.send_frame(&Frame::Audio(AudioFrame {
+                samples: n as u32,
+                pts: Some(0),
+                data: vec![plane.clone(), plane],
+            }))
+            .unwrap();
+            enc.flush().unwrap();
+            let mut out = Vec::new();
+            while let Ok(pk) = enc.receive_packet() {
+                out.extend_from_slice(&pk.data);
+            }
+            out
+        };
+        assert_ne!(
+            make_stream(&p1),
+            make_stream(&p2),
+            "model1 and model2 must produce different encoded bytes"
+        );
+    }
+
+    #[test]
+    fn unrecognised_options_are_rejected() {
+        let mut bad_mode = params(44_100, 2, None);
+        bad_mode.options.insert("mode", "surround");
+        assert!(make_encoder(&bad_mode).is_err());
+
+        let mut bad_bound = params(44_100, 2, None);
+        bad_bound.options.insert("mode", "joint_stereo");
+        bad_bound.options.insert("bound", "7");
+        assert!(make_encoder(&bad_bound).is_err());
+
+        let mut bad_psy = params(44_100, 2, None);
+        bad_psy.options.insert("psymodel", "model3");
+        assert!(make_encoder(&bad_psy).is_err());
+
+        // mode incompatible with channel count.
+        let mut bad_mono = params(44_100, 1, None);
+        bad_mono.options.insert("mode", "joint_stereo");
+        assert!(make_encoder(&bad_mono).is_err());
+    }
+
     #[test]
     fn send_frame_buffers_until_1152_then_emits_one_packet() {
         let mut enc = make_encoder(&params(44_100, 2, Some(192_000))).unwrap();
@@ -493,7 +711,7 @@ mod tests {
         .unwrap();
         let pkt = enc.receive_packet().expect("one packet after 1152 samples");
         // Packet must be exactly one Layer II frame.
-        let fsz = build_header(44_100, Mode::Stereo, 192_000)
+        let fsz = build_header(44_100, Mode::Stereo, ModeExtension::Bound4, 192_000)
             .unwrap()
             .frame_size_bytes();
         assert_eq!(pkt.data.len(), fsz);
@@ -570,7 +788,7 @@ mod tests {
         }))
         .unwrap();
         // One full frame available before flush.
-        let fsz = build_header(44_100, Mode::SingleChannel, 128_000)
+        let fsz = build_header(44_100, Mode::SingleChannel, ModeExtension::Bound4, 128_000)
             .unwrap()
             .frame_size_bytes();
         let p0 = enc.receive_packet().expect("first frame");
