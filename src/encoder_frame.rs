@@ -66,7 +66,10 @@ use crate::encoder_scalefactors::{compute_scalefactors, SUBBAND_SAMPLES_PER_FRAM
 use crate::encoder_scfsi::select_scfsi;
 use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME};
 use crate::header::{FrameHeader, HeaderError};
-use crate::psy::{annex_d_sampling_rate, compute_smr_model1_frame, NUM_SUBBANDS_LAYER2};
+use crate::psy::{
+    annex_d_sampling_rate, compute_smr_model1_frame, compute_smr_model2_layer2_frame,
+    Model2Layer2State, NUM_SUBBANDS_LAYER2,
+};
 use crate::tables::SCALEFACTORS;
 
 /// Errors raised by the §2.4 / Annex C frame-level encode loop.
@@ -240,6 +243,15 @@ impl From<SampleWriteError> for EncodeError {
 #[derive(Debug, Default)]
 pub struct EncodeFrameState {
     filterbank: Vec<AnalysisFilterbank>,
+    /// Per-channel §D.2.1 Model-2 threshold-generator state (rolling
+    /// two-block `(r, f)` predictor history + the inter-call sample
+    /// carry). Lazily grown to `header.channels()` the first time a
+    /// Model-2 auto-SMR frame is encoded through this state; unused by
+    /// the Model-1 and caller-supplied SMR paths. Threading it through
+    /// the same [`EncodeFrameState`] keeps the Model-2 rolling history
+    /// continuous across successive frames, exactly as the §C.1.3
+    /// analysis filterbank's X ring buffer is.
+    model2: Vec<Model2Layer2State>,
 }
 
 impl EncodeFrameState {
@@ -248,20 +260,35 @@ impl EncodeFrameState {
     pub fn new() -> Self {
         EncodeFrameState {
             filterbank: Vec::new(),
+            model2: Vec::new(),
         }
     }
 
     /// Re-zero every filterbank's X ring buffer per §C.1.3 Figure C.4
-    /// footnote 1. Call on seek / stream discontinuity.
+    /// footnote 1, and reset the per-channel §D.2.1 Model-2
+    /// threshold-generator history to its zeroed-startup state. Call on
+    /// seek / stream discontinuity.
     pub fn reset(&mut self) {
         for fb in &mut self.filterbank {
             fb.reset();
+        }
+        for m in &mut self.model2 {
+            *m = Model2Layer2State::new();
         }
     }
 
     fn ensure_channels(&mut self, channels: usize) {
         while self.filterbank.len() < channels {
             self.filterbank.push(AnalysisFilterbank::new());
+        }
+    }
+
+    /// Lazily grow the per-channel Model-2 state vector to `channels`.
+    /// Only the Model-2 auto-SMR path calls this; Model-1 and
+    /// caller-supplied paths never touch `self.model2`.
+    fn ensure_model2_channels(&mut self, channels: usize) {
+        while self.model2.len() < channels {
+            self.model2.push(Model2Layer2State::new());
         }
     }
 }
@@ -275,6 +302,13 @@ enum SmrSource<'a> {
     /// §D.1 Model-1 psychoacoustic chain
     /// ([`compute_smr_model1_frame`]).
     Auto,
+    /// Compute the SMR automatically from this frame's PCM via the
+    /// §D.2 Model-2 psychoacoustic chain
+    /// ([`compute_smr_model2_layer2_frame`]) — the spec's *more
+    /// stringent of the twice-per-frame pair* Layer II rule. Needs the
+    /// per-channel rolling [`Model2Layer2State`] threaded through
+    /// [`EncodeFrameState`].
+    AutoModel2,
 }
 
 /// Derive the per-(channel, sub-band) §D.1 Model-1 SMR table for the
@@ -329,6 +363,50 @@ fn compute_auto_smr_table(
         }
 
         let ch_smr = compute_smr_model1_frame(&pcm[ch], &scf_max, fs, bitrate_per_channel_kbps);
+        smr[ch][..NUM_SUBBANDS].copy_from_slice(&ch_smr[..NUM_SUBBANDS]);
+    }
+    smr
+}
+
+/// Derive the per-(channel, sub-band) §D.2 Model-2 SMR table for the
+/// frame from its PCM, driving the spec's *twice-per-frame,
+/// more-stringent-of-the-pair* Layer II threshold generator
+/// ([`compute_smr_model2_layer2_frame`]) once per channel.
+///
+/// Unlike the §D.1 Model-1 chain, Model-2 is **stateful**: each
+/// channel's rolling two-block `(r, f)` predictor history and the
+/// inter-call 448-sample carry are threaded through `state.model2[ch]`,
+/// so consecutive frames encoded through the same [`EncodeFrameState`]
+/// see the continuous rolling spectrum the §D.2 model assumes.
+///
+/// For MPEG-2 LSF sampling rates (16 / 22,05 / 24 kHz) the standard
+/// tabulates no Annex D Model-2 calculation-partition / absolute-
+/// threshold tables, so [`annex_d_sampling_rate`] returns `None` and we
+/// fall back to a flat 0 dB SMR table — identical degenerate behaviour
+/// to the Model-1 path. The fallback keeps Model-2 auto-encode usable
+/// at every rate; a perceptual model for the LSF rates is a documented
+/// spec gap, not an implementation one.
+fn compute_auto_smr_table_model2(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    channels: usize,
+    state: &mut EncodeFrameState,
+) -> SmrTable {
+    let mut smr: SmrTable = [[0.0; NUM_SUBBANDS]; 2];
+
+    // No Annex D Layer II Model-2 tables for the LSF rates: leave the
+    // table flat at 0 dB SMR (rate-driven allocation). The Model-2
+    // state is not advanced in this case (it carries no useful history
+    // at an unmodelled rate); a later switch back to a modelled rate
+    // simply restarts from the zeroed-startup predictor.
+    let Some(fs) = annex_d_sampling_rate(header.sample_rate) else {
+        return smr;
+    };
+
+    state.ensure_model2_channels(channels);
+
+    for ch in 0..channels {
+        let ch_smr = compute_smr_model2_layer2_frame(&pcm[ch], fs, &mut state.model2[ch]);
         smr[ch][..NUM_SUBBANDS].copy_from_slice(&ch_smr[..NUM_SUBBANDS]);
     }
     smr
@@ -425,6 +503,34 @@ pub fn encode_frame_auto_with(
     state: &mut EncodeFrameState,
 ) -> Result<Vec<u8>, EncodeError> {
     encode_frame_inner(header, pcm, SmrSource::Auto, banc, &[], state)
+}
+
+/// Encode one Layer II frame, computing the §C.1.5.2.7 allocator's
+/// signal-to-mask-ratio table **automatically** from the frame's PCM
+/// via the §D.2 Model-2 psychoacoustic chain
+/// ([`compute_smr_model2_layer2_frame`]) — the spec's *more stringent
+/// of the twice-per-frame pair* Layer II rule.
+///
+/// This is the Model-2 counterpart of [`encode_frame_auto`]. Because
+/// the §D.2 threshold generator carries a rolling two-block spectral
+/// predictor + a 448-sample inter-call tail, a [`EncodeFrameState`]
+/// **must** be threaded across successive frames for the model to see
+/// the continuous spectrum it assumes — so there is no stateless
+/// single-frame Model-2 entry point; use [`encode_frame_auto_model2`]
+/// from a fresh state only for the first frame of a stream.
+///
+/// For the MPEG-1 Layer II sampling rates (32 / 44,1 / 48 kHz) the
+/// allocation is psychoacoustically driven; for the MPEG-2 LSF rates
+/// the SMR degenerates to a flat 0 dB table and the allocation is
+/// rate-driven (the standard tabulates no Annex D Model-2 tables for
+/// the LSF rates — see [`compute_auto_smr_table_model2`]).
+pub fn encode_frame_auto_model2(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(header, pcm, SmrSource::AutoModel2, banc, &[], state)
 }
 
 /// Encode one Layer II frame and copy a §2.4.1.8 `ancillary_data()`
@@ -550,9 +656,28 @@ pub fn encode_all_frames_with_smr(
     encode_all_frames_inner(header, pcm, banc, SmrChoice::Provided(smr_db))
 }
 
+/// Like [`encode_all_frames`] but deriving the per-frame SMR table via
+/// the §D.2 Model-2 psychoacoustic chain
+/// ([`compute_smr_model2_layer2_frame`]) instead of §D.1 Model-1.
+///
+/// A single persistent [`EncodeFrameState`] threads both the §C.1.3
+/// analysis filterbank's X ring buffer **and** the per-channel §D.2.1
+/// Model-2 rolling predictor / sample-carry through every frame, so the
+/// Model-2 threshold generator sees the continuous spectrum it assumes.
+/// Length rules and the [`EncodeError::ShortPcmTail`] rejection are
+/// identical to [`encode_all_frames`].
+pub fn encode_all_frames_model2(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoModel2)
+}
+
 /// Per-frame SMR policy for the [`encode_all_frames`] family.
 enum SmrChoice<'a> {
     Auto,
+    AutoModel2,
     Provided(&'a SmrTable),
 }
 
@@ -616,6 +741,14 @@ fn encode_all_frames_inner(
             SmrChoice::Auto => {
                 encode_frame_inner(header, &frame_pcm, SmrSource::Auto, banc, &[], &mut state)?
             }
+            SmrChoice::AutoModel2 => encode_frame_inner(
+                header,
+                &frame_pcm,
+                SmrSource::AutoModel2,
+                banc,
+                &[],
+                &mut state,
+            )?,
             SmrChoice::Provided(table) => encode_frame_inner(
                 header,
                 &frame_pcm,
@@ -706,6 +839,10 @@ fn encode_frame_inner(
         SmrSource::Provided(table) => table,
         SmrSource::Auto => {
             owned_smr = compute_auto_smr_table(header, pcm, &subband_samples, channels);
+            &owned_smr
+        }
+        SmrSource::AutoModel2 => {
+            owned_smr = compute_auto_smr_table_model2(header, pcm, channels, state);
             &owned_smr
         }
     };

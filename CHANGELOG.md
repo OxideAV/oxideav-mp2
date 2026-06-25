@@ -8,6 +8,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§D.2 Model-2 auto-SMR encoder selection
+  (`encode_frame_auto_model2` / `encode_all_frames_model2`,
+  `src/encoder_frame.rs`)**. Wires the §D.2.1 Layer II twice-per-frame
+  Model-2 driver (`compute_smr_model2_layer2_frame`) into the encoder
+  as a selectable SMR source — the Model-2 counterpart of the existing
+  §D.1 `encode_frame_auto` family. A new `SmrSource::AutoModel2` variant
+  routes through `compute_auto_smr_table_model2`, which drives the
+  twice-per-frame threshold generator once per channel. Because Model 2
+  is **stateful** (rolling two-block spectral predictor + 448-sample
+  inter-call carry per channel), the per-channel `Model2Layer2State`
+  vector is threaded through `EncodeFrameState` alongside the §C.1.3
+  analysis filterbank — and reset by `EncodeFrameState::reset`. For the
+  MPEG-2 LSF rates (no Annex D Layer II masking tables) the SMR
+  degenerates to a flat 0 dB table, identical to the Model-1 fallback.
+  Four integration tests (`tests/model2_encode.rs`) pin: the full
+  encode → decode round-trip envelope (shape / reconstruction energy /
+  spectral localisation) across the whole rate matrix; exact-zero
+  silence; batch-equals-hand-rolled-stateful-loop byte equality; and a
+  divergence test proving the rolling predictor history genuinely
+  influences later frames (a fresh-state re-encode of the same frame
+  differs from the streamed continuation). The stale lib.rs "the
+  psychoacoustic model is not yet built" note is corrected — both
+  Annex D example models now drive the encoder end-to-end at the MPEG-1
+  rates.
+
 - **§D.2.1 Layer II twice-per-frame Model-2 driver
   `compute_smr_model2_layer2_frame` (`src/psy.rs`)**. Implements the
   verbatim §D.2.1 rule "In Layer II, the psychoacoustic masking ratios

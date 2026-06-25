@@ -198,12 +198,41 @@
 //!   ancillary and non-empty-ancillary frames — Annex B Table B.5
 //!   does not protect the §2.4.1.8 tail.
 //!
+//! * **§D.1 Model-1 and §D.2 Model-2 auto-SMR encode paths** ([`psy`]
+//!   module + [`encoder_frame`]). The encoder no longer requires the
+//!   caller to supply an [`encoder_bit_allocator::SmrTable`]; it can
+//!   derive the §C.1.5.2.7 allocator's per-(channel, sub-band) SMR
+//!   table from the frame's PCM via *either* of Annex D's two example
+//!   psychoacoustic models:
+//!   - **Model 1** (§D.1) — the tonal / non-tonal masker model, driven
+//!     by [`encode_frame_auto`] / [`encode_frame_auto_with`] /
+//!     [`encode_all_frames`].
+//!   - **Model 2** (§D.2) — the unpredictability-driven model that for
+//!     Layer II runs its threshold generator *twice per 1152-sample
+//!     coder frame* and keeps the more stringent of each pair of ratios
+//!     (§D.2.1), driven by [`encode_frame_auto_model2`] /
+//!     [`encode_all_frames_model2`]. Model 2 is **stateful** (a rolling
+//!     two-block spectral predictor + a 448-sample inter-call carry per
+//!     channel), threaded through the same [`EncodeFrameState`] as the
+//!     §C.1.3 analysis filterbank's X ring buffer so the rolling
+//!     history stays continuous across frames.
+//!
+//!   Both models are perceptually active at the MPEG-1 Layer II rates
+//!   (32 / 44,1 / 48 kHz). For a caller-supplied table, the explicit
+//!   [`encode_frame`] / [`encode_all_frames_with_smr`] paths remain.
+//!
 //! ## What does not work yet
 //!
-//! The §D.1 / §D.2 psychoacoustic model is not yet built — callers
-//! must supply their own [`encoder_bit_allocator::SmrTable`]. A
-//! constant 0 dB table produces a syntactically-valid frame whose
-//! allocation is rate-driven only.
+//! * **No Annex D Layer II masking curves for the MPEG-2 LSF rates**
+//!   (16 / 22,05 / 24 kHz). ISO/IEC 11172-3 Annex D tabulates the
+//!   threshold-in-quiet / critical-band / calculation-partition tables
+//!   only for the three MPEG-1 sampling rates; the standard provides
+//!   none for the LSF rates. Both auto-SMR models therefore degenerate
+//!   to a flat 0 dB SMR table at the LSF rates (rate-driven
+//!   allocation, identical to a caller-supplied constant table). This
+//!   is a documented spec gap, not an implementation one — a perceptual
+//!   model for the LSF rates would need masking tables the standard
+//!   does not publish.
 
 #![warn(missing_debug_implementations)]
 
@@ -252,9 +281,10 @@ pub use encoder_bit_allocator::{
     SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
 pub use encoder_frame::{
-    encode_all_frames, encode_all_frames_with_smr, encode_frame, encode_frame_auto,
-    encode_frame_auto_with, encode_frame_with, encode_frame_with_ancillary,
-    encode_frame_with_state_and_ancillary, EncodeError, EncodeFrameState,
+    encode_all_frames, encode_all_frames_model2, encode_all_frames_with_smr, encode_frame,
+    encode_frame_auto, encode_frame_auto_model2, encode_frame_auto_with, encode_frame_with,
+    encode_frame_with_ancillary, encode_frame_with_state_and_ancillary, EncodeError,
+    EncodeFrameState,
 };
 pub use encoder_samples::{
     quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,
