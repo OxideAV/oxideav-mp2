@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Psychoacoustic-model allocation-shaping proof
+  (`tests/psy_model_shapes_allocation.rs`)**. Two integration tests pin
+  that the §D.1 Model-1 and §D.2 Model-2 auto-SMR chains genuinely
+  influence the §C.1.5.2.7 bit allocation, not just produce a
+  syntactically-valid frame: for a structured two-tone-plus-noise signal
+  at a constrained 128 kbit/s, both perceptual encodes differ
+  byte-for-byte from the flat-0 dB-SMR baseline *and* differ in the
+  first-frame per-subband `nb_steps` allocation, while still decoding
+  back to a stream whose dominant 600 Hz masker tone is preserved. A
+  second test asserts Model-1 ≠ Model-2 output for the same input,
+  guarding against an accidental wiring that routes both auto paths
+  through one model.
+
 - **Genuine intensity-stereo per-channel-level decode test
   (`tests/joint_stereo_matrix.rs`)**. The existing joint-stereo
   round-trip tests feed both channels identical input, so their
