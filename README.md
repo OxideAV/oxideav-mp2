@@ -13,9 +13,12 @@ Frequencies) extension. The decoder is complete end-to-end (frame →
 PCM) and **validated against real Layer II fixtures spanning the whole
 channel-mode × sampling-rate matrix** (MPEG-1 mono/stereo at
 32/44,1/48 kHz + MPEG-2 LSF at 16/22,05/24 kHz) to within the ISO
-floating-point-filterbank conformance bound (max abs ≤ 1 LSB, per-frame);
-the encoder is implemented through frame assembly and is wired to the
-runtime registry as a decoder.
+floating-point-filterbank conformance bound (max abs ≤ 1 LSB, per-frame).
+The encoder is complete through frame assembly with **both** Annex D
+psychoacoustic models (§D.1 Model 1 and §D.2 Model 2) driving the
+§C.1.5.2.7 bit allocator automatically, and **both decoder and encoder
+are wired into the runtime registry** (frame-in / packet-out
+`Mp2CoreEncoder`).
 
 ## What works today
 
@@ -103,6 +106,26 @@ original caller-supplied-SMR entry points (`encode_frame`,
 a constant table still produces a syntactically valid, rate-driven
 frame.
 
+The §D.2 **Model 2** chain is also wired as a selectable auto-SMR source
+— `encode_frame_auto_model2` / `encode_all_frames_model2` — driving the
+§D.2.1 *twice-per-frame, more-stringent-of-the-pair* Layer II threshold
+generator (`psy::compute_smr_model2_layer2_frame`). Model 2 is stateful
+(a rolling two-block spectral predictor + 448-sample inter-call carry per
+channel) and threads its `Model2Layer2State` through the same
+`EncodeFrameState` as the analysis filterbank. An integration test
+(`tests/psy_model_shapes_allocation.rs`) confirms that for a structured
+signal at a constrained bitrate **both** models produce encodes that
+differ — byte-for-byte and in the first-frame per-subband allocation —
+from the flat-0 dB baseline and from each other.
+
+**Registry encoder** — `make_encoder` builds an `oxideav_core::Encoder`
+(`Mp2CoreEncoder`) that adapts the auto-SMR encode path into the
+framework's frame-in / packet-out trait: it accepts planar-S16
+`Frame::Audio`, buffers per channel, and emits one Layer II `Packet`
+every 1152 samples (zero-padding a partial trailing frame on `flush`).
+`register_codecs` now carries both decoder and encoder factories under
+the `"mp2"` id, so the registry exposes MP2 encode for the first time.
+
 **Batch stream encode** — `encode_all_frames` / `encode_all_frames_with_smr`
 are the encode-side counterpart of `decode_all_frames`: they turn one
 continuous per-channel PCM buffer into the concatenated Layer II byte
@@ -151,17 +174,21 @@ symmetric round-trip would mask.
 The crate exposes both the registry path
 (`oxideav_core::register!("mp2", register)`, installed under WAVE format
 tag `0x0050` and Matroska codec id `A_MPEG/L2`, with a layer-field probe
-to disambiguate the shared `0x0050` tag from Layer I) and the direct
-`codec_decoder::make_decoder` factory. Output is planar little-endian
-`i16`.
+to disambiguate the shared `0x0050` tag from Layer I — carrying **both**
+the decoder and encoder factories) and the direct
+`codec_decoder::make_decoder` / `codec_encoder::make_encoder` factories.
+Decoder output is planar little-endian `i16`; the encoder accepts the
+same planar-S16 layout.
 
 ## Not yet supported
 
-- The §D.1 **Model 1** chain is now wired end-to-end into the encoder's
-  automatic SMR selection (see **Encode** above): `encode_frame_auto`
-  drives `psy::compute_smr_model1_frame` per frame to feed the
-  §C.1.5.2.7 bit allocator. What remains on the perceptual side:
-  - **Model 2 (§D.2)** is now driven **end-to-end to a per-subband
+Both Annex D psychoacoustic models now drive the encoder end-to-end at
+the MPEG-1 rates (see **Encode** above), and both the decoder and encoder
+are registry-wired. What remains is refinement and reference-validation
+work, not missing core paths:
+
+- Perceptual-model internals and edges:
+  - **Model 2 (§D.2)** is driven **end-to-end to a per-subband
     signal-to-mask ratio** by `psy::compute_smr_model2_frame`. Per frame
     it runs the §D.2.4 step-(a)…(n) chain: the step-(b) raised-cosine
     analysis window + polar `(r_ω, f_ω)` FFT
@@ -184,10 +211,12 @@ to disambiguate the shared `0x0050` tag from Layer I) and the direct
     reconstructing each call's 1024-sample window from the 448-sample
     inter-call carry held in `Model2Layer2State`) and returns the
     per-subband **maximum** of the pair — "the more stringent of each
-    pair of ratios is used for bit allocation". The remaining wiring step
-    is an `encode_frame_auto`-style Model-2 *encode* entry point that
-    selects this producer from the encoder; the SMR producer itself is
-    complete end-to-end.
+    pair of ratios is used for bit allocation". This producer is now
+    selected from the encoder by the `encode_frame_auto_model2` /
+    `encode_all_frames_model2` entry points (the Model-2 counterpart of
+    the `encode_frame_auto` family), threading the per-channel
+    `Model2Layer2State` through `EncodeFrameState`. Both Annex D models
+    now drive the encoder end-to-end.
   - The §D.1 driver uses the current frame's first 1024 samples for the
     FFT; the §D.1 Step 1 net +192-sample window shift (which needs the
     next frame's lookahead) is a refinement that would tighten the
