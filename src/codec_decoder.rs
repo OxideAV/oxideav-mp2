@@ -284,21 +284,22 @@ fn probe_mp2(ctx: &ProbeContext) -> Confidence {
 /// * **Matroska `A_MPEG/L2`** — the EBML codec ID dedicated to MPEG-1
 ///   Audio Layer II per the Matroska Codec ID registry.
 ///
-/// The encoder factory is **not** wired in this round: §C.1.5.2.7
-/// bit-allocation, the Annex C analysis filterbank, and the §2.4.1.6
-/// audio-data writer are still pending (the §2.4.1.3 / §2.4.2.3 header
-/// writer + §2.4.1.4 CRC writer have already landed in earlier rounds
-/// but are not enough to construct a complete encoder yet). When those
-/// land, this builder picks up `.encoder(make_encoder)` alongside the
-/// existing decoder factory.
+/// The encoder factory is wired alongside the decoder as of round 371:
+/// the §C.1.3 analysis filterbank, §D.1 Model-1 / §D.2 Model-2 auto-SMR
+/// chains, §C.1.5.2.7 bit-allocation, and §2.4.1.6 audio-data writer are
+/// all complete, so [`crate::codec_encoder::make_encoder`] constructs a
+/// full frame-in / packet-out encoder. The single [`CodecInfo`] carries
+/// both factories under the same `"mp2"` id and container tags.
 pub fn register_codecs(reg: &mut CodecRegistry) {
     let info = CodecInfo::new(CodecId::new(CODEC_ID_STR))
         .capabilities(
             CodecCapabilities::audio("mp2")
                 .with_decode()
+                .with_encode()
                 .with_lossy(true),
         )
         .decoder(make_decoder)
+        .encoder(crate::codec_encoder::make_encoder)
         .probe(probe_mp2)
         .tags([
             CodecTag::wave_format(WAVE_FORMAT_MPEG),

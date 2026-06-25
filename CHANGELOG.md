@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`oxideav_core::Encoder` registry wiring (`src/codec_encoder.rs`)**.
+  Adapts the `encode_frame_auto_with` primitive into the framework's
+  frame-in / packet-out `Encoder` trait — the encode-side dual of
+  `Mp2CoreDecoder`. `make_encoder` builds an `Mp2CoreEncoder` whose
+  `FrameHeader` is fixed at construction from `CodecParameters`
+  (sample_rate ∈ the six Layer II rates, channels 1→SingleChannel /
+  2→Stereo, optional bit_rate with a per-rate `default_bitrate_bps`
+  fallback), validating the §2.4.2.3 bitrate/mode matrix and the
+  §2.4.3.1 allocation-table coverage up front. `send_frame` decodes
+  planar S16 → f64 `[-1,+1]`, accumulates per channel, and emits one
+  Layer II packet (`frame_size_bytes()` bytes, keyframe-flagged,
+  sample-count pts/duration) every 1152 samples; `flush` zero-pads a
+  partial trailing frame. `register_codecs` now carries both factories
+  under `"mp2"` with `with_encode()` — the registry exposes MP2 encode
+  for the first time. Ten unit tests cover parameter validation
+  (bad channels / missing or non-Layer-II rate / §2.4.2.3 matrix
+  violations / per-rate defaults), the 1152-sample buffering boundary,
+  flush zero-padding, post-flush rejection, planar-shape rejection, and
+  a full registry encode → `decode_all_frames` round-trip with tone
+  localisation.
+
 - **§D.2 Model-2 auto-SMR encoder selection
   (`encode_frame_auto_model2` / `encode_all_frames_model2`,
   `src/encoder_frame.rs`)**. Wires the §D.2.1 Layer II twice-per-frame
