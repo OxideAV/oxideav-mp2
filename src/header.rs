@@ -297,6 +297,33 @@ impl FrameHeader {
     /// `lsf` flag on the returned [`FrameHeader`] selects the LSF
     /// bitrate ladder and sampling-frequency table.
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
+        Self::parse_inner(buf, false)
+    }
+
+    /// Like [`FrameHeader::parse`] but accepts the §2.4.2.3 free-format
+    /// code (`bitrate_index == '0000'`).
+    ///
+    /// A free-format frame's `bit_rate` is *not* signalled in the header —
+    /// it is a constant chosen by the encoder and recovered by the decoder
+    /// from the distance between consecutive syncwords (§2.4.2.3: "a fixed
+    /// bitrate which does not need to be in the list can be used. Fixed
+    /// means that a frame contains either N or N+1 slots, depending on the
+    /// value of the padding bit."). The returned [`FrameHeader`] therefore
+    /// carries `bit_rate == 0` as the free-format sentinel; callers
+    /// determine the true frame size from the measured slot count rather
+    /// than from [`FrameHeader::frame_size_bytes`]. See
+    /// [`crate::freeformat`] for the measurement helpers.
+    ///
+    /// All other §2.4.2.3 validation (sync, layer, reserved
+    /// sampling-frequency, reserved emphasis) is applied exactly as in
+    /// [`FrameHeader::parse`]. The (bitrate, mode) matrix is **not**
+    /// applied for a free-format frame because that matrix is keyed on the
+    /// ladder bitrates, none of which a free-format frame names.
+    pub fn parse_allow_free_format(buf: &[u8]) -> Result<Self, HeaderError> {
+        Self::parse_inner(buf, true)
+    }
+
+    fn parse_inner(buf: &[u8], allow_free_format: bool) -> Result<Self, HeaderError> {
         if buf.len() < 4 {
             return Err(HeaderError::BufferTooShort);
         }
@@ -320,11 +347,18 @@ impl FrameHeader {
         let protection_bit = ((word >> 16) & 0x1) == 1;
 
         let bitrate_index = ((word >> 12) & 0xF) as u8;
-        let bit_rate = if lsf {
+        // §2.4.2.3 free-format sentinel: when `allow_free_format` is set we
+        // accept `'0000'` and record `bit_rate == 0`, deferring the true
+        // frame size to a sync-to-sync measurement. Otherwise the strict
+        // ladder decode rejects it with `HeaderError::FreeFormat`.
+        let bit_rate = if allow_free_format && bitrate_index == 0 {
+            0
+        } else if lsf {
             decode_bitrate_lsf(bitrate_index)?
         } else {
             decode_bitrate(bitrate_index)?
         };
+        let free_format = bit_rate == 0;
 
         let sf_index = ((word >> 10) & 0x3) as u8;
         let sample_rate = if lsf {
@@ -368,8 +402,10 @@ impl FrameHeader {
         // The ISO/IEC 13818-3 §2.4.2.3 LSF extension does not restate
         // this matrix (the LSF bitrate ladder spans 8..160 kbit/s in a
         // single column for Layer II / Layer III); the LSF rates are
-        // accepted for every mode.
-        if !lsf && !is_layer2_bitrate_mode_allowed(bit_rate, mode) {
+        // accepted for every mode. Free-format frames carry no ladder
+        // bitrate, so the matrix (which is keyed on ladder values) does
+        // not apply — the (bitrate, mode) check is skipped for them.
+        if !free_format && !lsf && !is_layer2_bitrate_mode_allowed(bit_rate, mode) {
             return Err(HeaderError::DisallowedBitrateModeCombination { bit_rate, mode });
         }
 
@@ -397,6 +433,15 @@ impl FrameHeader {
     pub fn frame_size_bytes(&self) -> usize {
         let n = (144u64 * self.bit_rate as u64) / self.sample_rate as u64;
         n as usize + if self.padding { 1 } else { 0 }
+    }
+
+    /// True when this header was parsed from a §2.4.2.3 free-format frame
+    /// (`bitrate_index == '0000'`, recorded as the `bit_rate == 0`
+    /// sentinel). Only [`FrameHeader::parse_allow_free_format`] can
+    /// produce such a header; [`FrameHeader::parse`] rejects free format
+    /// with [`HeaderError::FreeFormat`].
+    pub fn is_free_format(&self) -> bool {
+        self.bit_rate == 0
     }
 
     /// Number of decoded PCM samples per channel per frame.

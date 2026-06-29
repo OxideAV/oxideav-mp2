@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§2.4.2.3 free-format (`bitrate_index == '0000'`) decode
+  (`src/freeformat.rs`, `src/frame.rs`)**. Free-format Layer II streams
+  signal no bitrate in the header; the constant frame size is recovered by
+  measuring the distance between consecutive syncwords (§2.4.2.3 "a frame
+  contains either N or N+1 slots, depending on the value of the padding
+  bit"), with a two-frame sync-lock that rejects false-positive sync
+  patterns inside the audio payload. The recovered base slot count `N` is
+  inverted through the §2.4.3.1 size formula to recover the constant
+  bitrate, which selects the standard Annex B bit-allocation table; an
+  off-ladder free-format bitrate (whose Annex B table the standard leaves
+  undefined) is reported as `FreeFormatError::UnsupportedBitrate` rather
+  than guessed. New public surface: `FrameHeader::parse_allow_free_format`,
+  `FrameHeader::is_free_format`, the `freeformat` module
+  (`measure_base_slots` / `bitrate_from_base_slots` / `resolve` /
+  `header_with_recovered_bitrate` / `FreeFormatLayout` / `FreeFormatError`),
+  `frame::decode_free_format_stream`, and
+  `frame::decode_frame_with_known_header`. A new `FrameError::FreeFormat`
+  variant carries the determination error. `tests/free_format.rs` proves a
+  free-format stream (synthesised by rewriting the encoder's standard-rate
+  output's `bitrate_index` nibble to `'0000'`) decodes **bit-exact
+  identically** to the standard-bitrate stream across MPEG-1 stereo /
+  single-channel and MPEG-2 LSF rates, that padded frames are sized per
+  their own padding bit, and that an off-ladder size is rejected.
+
 - **Registry-encoder codec options (`src/codec_encoder.rs`)**. The
   `Mp2CoreEncoder` now reads three `CodecParameters::options` keys so the
   already-built joint-stereo, dual-channel and Model-2 capabilities are

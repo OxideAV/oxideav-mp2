@@ -494,7 +494,8 @@ fn assert_decode_graceful(frame: &[u8], channels: usize, label: &str) {
             | FrameError::Requant(_)
             | FrameError::Truncated { .. }
             | FrameError::CrcMismatch { .. }
-            | FrameError::UnknownQuantClass { .. } => {}
+            | FrameError::UnknownQuantClass { .. }
+            | FrameError::FreeFormat(_) => {}
         },
     }
 }

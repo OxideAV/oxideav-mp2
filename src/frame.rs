@@ -116,6 +116,10 @@ pub enum FrameError {
     /// test). It exists only as a defence-in-depth against a future
     /// table-edit slip.
     UnknownQuantClass { ch: usize, sb: usize, nb_steps: u32 },
+    /// §2.4.2.3 free-format frame-size determination failed (e.g. the
+    /// recovered base size maps to no Layer II ladder bitrate, so no
+    /// Annex B bit-allocation table is defined for it).
+    FreeFormat(crate::freeformat::FreeFormatError),
 }
 
 impl core::fmt::Display for FrameError {
@@ -135,7 +139,14 @@ impl core::fmt::Display for FrameError {
                 f,
                 "frame: nb_steps={nb_steps} for ch={ch} sb={sb} is not in Table 3-B.4"
             ),
+            FrameError::FreeFormat(e) => write!(f, "frame: free-format error: {e}"),
         }
+    }
+}
+
+impl From<crate::freeformat::FreeFormatError> for FrameError {
+    fn from(value: crate::freeformat::FreeFormatError) -> Self {
+        FrameError::FreeFormat(value)
     }
 }
 
@@ -482,6 +493,173 @@ pub fn decode_all_frames(buf: &[u8]) -> Result<Vec<Vec<f64>>, FrameError> {
         offset += frame.header.frame_size_bytes();
     }
     Ok(pcm)
+}
+
+/// Decode a §2.4.2.3 **free-format** Layer II stream end-to-end.
+///
+/// Free-format frames (`bitrate_index == '0000'`) carry no signalled
+/// bitrate; the constant base slot count `N` is recovered once by
+/// measuring the distance between the first two syncwords (see
+/// [`crate::freeformat::resolve`]), the constant bitrate is recovered from
+/// `N`, and every frame is then sized `N + its padding_bit` and decoded
+/// through the standard path with the recovered bitrate filled into a
+/// synthetic [`FrameHeader`] (so the existing bit-allocation-table
+/// selection applies unchanged).
+///
+/// The recovered bitrate must coincide with a §2.4.2.3 Layer II ladder
+/// rate — the Annex B table for an off-ladder free-format bitrate is a
+/// documented spec gap, surfaced as
+/// [`FrameError::FreeFormat`] wrapping
+/// [`crate::freeformat::FreeFormatError::UnsupportedBitrate`].
+///
+/// Returns per-channel concatenated PCM, exactly like
+/// [`decode_all_frames`].
+pub fn decode_free_format_stream(buf: &[u8]) -> Result<Vec<Vec<f64>>, FrameError> {
+    let mut state = FrameDecodeState::new();
+    let mut pcm: Vec<Vec<f64>> = Vec::new();
+
+    // Find the first syncword (skip any leading ID3 / junk).
+    let mut offset = match crate::header::find_sync(buf) {
+        Some(o) => o,
+        None => return Ok(pcm),
+    };
+
+    // Recover the constant base slot count + bitrate from the first frame's
+    // sync-to-sync distance.
+    let layout = crate::freeformat::resolve(&buf[offset..]).map_err(FrameError::FreeFormat)?;
+    let base_slots = layout.base_slots;
+    let bit_rate = layout.bit_rate;
+
+    while offset + 4 <= buf.len() {
+        if !(buf[offset] == 0xFF && (buf[offset + 1] & 0xF0) == 0xF0) {
+            offset += 1;
+            continue;
+        }
+        // Parse the free-format header, fill in the recovered bitrate, and
+        // size this frame as `N + its padding_bit`.
+        let ff_header = match FrameHeader::parse_allow_free_format(&buf[offset..]) {
+            Ok(h) if h.is_free_format() => h,
+            // A non-free-format (or unparseable) frame ends the
+            // free-format run; stop cleanly with what we have.
+            _ => break,
+        };
+        let frame_size = base_slots + if ff_header.padding { 1 } else { 0 };
+        if offset + frame_size > buf.len() {
+            break; // truncated trailing frame — emit what decoded so far
+        }
+        let resolved = crate::freeformat::header_with_recovered_bitrate(&ff_header, bit_rate);
+        let frame = decode_frame_with_known_header(
+            &buf[offset..offset + frame_size],
+            resolved,
+            &mut state,
+        )?;
+        if frame.pcm.len() > pcm.len() {
+            pcm.resize_with(frame.pcm.len(), Vec::new);
+        }
+        for (ch, samples) in frame.pcm.iter().enumerate() {
+            pcm[ch].extend_from_slice(samples);
+        }
+        offset += frame_size;
+    }
+    Ok(pcm)
+}
+
+/// Like [`decode_frame_with`] but the caller supplies an already-parsed,
+/// already-sized [`FrameHeader`] (e.g. a free-format header with the
+/// recovered bitrate filled in) and `frame` is exactly the frame's bytes.
+///
+/// The header is trusted: no re-parse, no `frame_size_bytes` truncation
+/// check (the caller has already sized `frame`). The §2.4.3.1 CRC and the
+/// §2.4.1.6 sample loop run exactly as in [`decode_frame_with`].
+pub fn decode_frame_with_known_header(
+    frame: &[u8],
+    header: FrameHeader,
+    state: &mut FrameDecodeState,
+) -> Result<DecodedFrame, FrameError> {
+    let channels = header.channels();
+    state.ensure_channels(channels);
+
+    let (expected_crc, after_header_byte) = if !header.protection_bit {
+        if frame.len() < 6 {
+            return Err(FrameError::Truncated {
+                have: frame.len(),
+                need: 6,
+            });
+        }
+        let crc = u16::from_be_bytes([frame[4], frame[5]]);
+        (Some(crc), 6)
+    } else {
+        (None, 4)
+    };
+
+    let mut reader = BitReader::with_position(frame, after_header_byte);
+    let alloc_start_bit = reader.bit_position();
+    let (audio, alloc_bits, scfsi_bits) = parse_audio_data_with_section_bits(&header, &mut reader)?;
+
+    if let Some(expected) = expected_crc {
+        let computed = compute_layer2_crc(frame, alloc_start_bit, alloc_bits + scfsi_bits);
+        if computed != expected {
+            return Err(FrameError::CrcMismatch { computed, expected });
+        }
+    }
+
+    let mut subband: Vec<Vec<[f64; NUM_SUBBANDS]>> = (0..channels)
+        .map(|_| vec![[0.0_f64; NUM_SUBBANDS]; SAMPLE_GRANULES_PER_FRAME * SAMPLES_PER_TRIPLET])
+        .collect();
+
+    for sample_gr in 0..SAMPLE_GRANULES_PER_FRAME {
+        let sf_gr = sample_gr / 4;
+        let base = sample_gr * SAMPLES_PER_TRIPLET;
+        for sb in 0..audio.bound {
+            for (ch, channel_subband) in subband.iter_mut().enumerate().take(channels) {
+                let nb_steps = audio.nb_steps[ch][sb];
+                if nb_steps == 0 {
+                    continue;
+                }
+                let class = class_of_quantization(nb_steps)
+                    .ok_or(FrameError::UnknownQuantClass { ch, sb, nb_steps })?;
+                let triplet = read_triplet(&class, &mut reader)?;
+                let sf_idx = audio.scalefactor[ch][sb][sf_gr] as usize;
+                let factor = SCALEFACTORS[sf_idx];
+                channel_subband[base][sb] = triplet[0] * factor;
+                channel_subband[base + 1][sb] = triplet[1] * factor;
+                channel_subband[base + 2][sb] = triplet[2] * factor;
+            }
+        }
+        for sb in audio.bound..audio.sblimit {
+            let nb_steps = audio.nb_steps[0][sb];
+            if nb_steps == 0 {
+                continue;
+            }
+            let class = class_of_quantization(nb_steps).ok_or(FrameError::UnknownQuantClass {
+                ch: 0,
+                sb,
+                nb_steps,
+            })?;
+            let triplet = read_triplet(&class, &mut reader)?;
+            for (ch, channel_subband) in subband.iter_mut().enumerate().take(channels) {
+                let sf_idx = audio.scalefactor[ch][sb][sf_gr] as usize;
+                let factor = SCALEFACTORS[sf_idx];
+                channel_subband[base][sb] = triplet[0] * factor;
+                channel_subband[base + 1][sb] = triplet[1] * factor;
+                channel_subband[base + 2][sb] = triplet[2] * factor;
+            }
+        }
+    }
+
+    let mut pcm: Vec<Vec<f64>> = (0..channels)
+        .map(|_| Vec::with_capacity(PCM_SAMPLES_PER_CHANNEL))
+        .collect();
+    let mut out_block = [0.0_f64; NUM_SUBBANDS];
+    for (ch, channel_subband) in subband.iter().enumerate() {
+        let fb = &mut state.filterbank[ch];
+        for slot in channel_subband.iter() {
+            fb.push_subbands(slot, &mut out_block);
+            pcm[ch].extend_from_slice(&out_block);
+        }
+    }
+    let _ = audio.scfsi;
+    Ok(DecodedFrame { header, pcm })
 }
 
 #[cfg(test)]

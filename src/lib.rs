@@ -250,6 +250,7 @@ pub mod encoder_samples;
 pub mod encoder_scalefactors;
 pub mod encoder_scfsi;
 pub mod frame;
+pub mod freeformat;
 pub mod header;
 pub mod psy;
 pub mod requant;
@@ -298,8 +299,13 @@ pub use encoder_scfsi::{
     classify_difference, select_scfsi, DifferenceClass, ScfsiSelection, TransmissionPattern,
 };
 pub use frame::{
-    decode_all_frames, decode_frame, decode_frame_with, layer2_crc, DecodedFrame, FrameDecodeState,
-    FrameError, PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME,
+    decode_all_frames, decode_frame, decode_frame_with, decode_frame_with_known_header,
+    decode_free_format_stream, layer2_crc, DecodedFrame, FrameDecodeState, FrameError,
+    PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME,
+};
+pub use freeformat::{
+    bitrate_from_base_slots, header_with_recovered_bitrate, measure_base_slots, resolve,
+    FreeFormatError, FreeFormatLayout,
 };
 pub use header::{
     decode_bitrate, decode_bitrate_lsf, decode_sampling_frequency, decode_sampling_frequency_lsf,
