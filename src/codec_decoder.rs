@@ -60,7 +60,10 @@ use oxideav_core::{
     Confidence, Decoder, Error, Frame, Packet, ProbeContext, Result, SampleFormat,
 };
 
-use crate::frame::{decode_frame_with, FrameDecodeState, PCM_SAMPLES_PER_CHANNEL};
+use crate::frame::{
+    decode_frame_with, decode_frame_with_known_header, DecodedFrame, FrameDecodeState,
+    PCM_SAMPLES_PER_CHANNEL,
+};
 use crate::header::FrameHeader;
 
 /// Codec id under which [`register_codecs`] installs this decoder.
@@ -151,6 +154,34 @@ impl Mp2CoreDecoder {
         }
     }
 
+    /// Decode one packet's worth of Layer II data, transparently handling
+    /// the §2.4.2.3 free-format case.
+    ///
+    /// A demuxer hands one frame per packet, so for a free-format frame the
+    /// packet length **is** the frame size (`N` or `N + 1` slots). We need
+    /// no sync-to-sync measurement here: the constant bitrate is recovered
+    /// directly by inverting the §2.4.3.1 size formula on
+    /// `packet_len − padding_bit`, then the standard decode path runs with
+    /// the recovered bitrate filled into the header. Non-free-format
+    /// packets take the ordinary [`decode_frame_with`] path unchanged.
+    fn decode_one_packet(&mut self, data: &[u8]) -> Result<DecodedFrame> {
+        // Peek the header in free-format-tolerant mode.
+        let header = FrameHeader::parse_allow_free_format(data)
+            .map_err(|e| Error::other(format!("oxideav-mp2: header parse: {e}")))?;
+        if !header.is_free_format() {
+            return decode_frame_with(data, &mut self.state)
+                .map_err(|e| Error::other(format!("oxideav-mp2: decode_frame: {e}")));
+        }
+        // Free format: the packet length is this frame's size.
+        let frame_size = data.len();
+        let base_slots = frame_size - if header.padding { 1 } else { 0 };
+        let bit_rate = crate::freeformat::bitrate_from_base_slots(&header, base_slots)
+            .map_err(|e| Error::other(format!("oxideav-mp2: free-format: {e}")))?;
+        let resolved = crate::freeformat::header_with_recovered_bitrate(&header, bit_rate);
+        decode_frame_with_known_header(data, resolved, &mut self.state)
+            .map_err(|e| Error::other(format!("oxideav-mp2: free-format decode: {e}")))
+    }
+
     /// Re-derive and update `self.output` from a freshly-parsed frame
     /// header so callers reading parameters after the first decoded
     /// packet see the on-the-wire values rather than the
@@ -200,8 +231,7 @@ impl Decoder for Mp2CoreDecoder {
         if self.eof {
             return Err(Error::other("oxideav-mp2: cannot send_packet after flush"));
         }
-        let decoded = decode_frame_with(&packet.data, &mut self.state)
-            .map_err(|e| Error::other(format!("oxideav-mp2: decode_frame: {e}")))?;
+        let decoded = self.decode_one_packet(&packet.data)?;
         self.refresh_output_params(&decoded.header);
 
         let data: Vec<Vec<u8>> = decoded
@@ -421,6 +451,73 @@ mod tests {
         match dec.receive_frame() {
             Err(Error::NeedMore) => {}
             other => panic!("expected NeedMore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn free_format_packet_decodes_through_the_trait() {
+        // A demuxer hands one frame per packet, so a free-format packet's
+        // length IS the frame size. Build a standard-bitrate frame, rewrite
+        // its bitrate_index nibble to '0000' (free format), and confirm the
+        // trait decoder recovers the bitrate from the packet length and
+        // produces the SAME PCM as the standard-bitrate packet.
+        use crate::encoder_bit_allocator::SmrTable;
+        use crate::encoder_frame::encode_frame;
+        use crate::header::{Emphasis, Mode, ModeExtension};
+        use crate::NUM_SUBBANDS;
+
+        let header = FrameHeader {
+            lsf: false,
+            protection_bit: true,
+            bit_rate: 128_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::Stereo,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+        };
+        let smr: SmrTable = [[20.0f64; NUM_SUBBANDS]; 2];
+        let pcm: Vec<Vec<f64>> = (0..2)
+            .map(|_| {
+                (0..PCM_SAMPLES_PER_CHANNEL)
+                    .map(|n| 0.4 * (2.0 * std::f64::consts::PI * 500.0 * n as f64 / 44_100.0).sin())
+                    .collect()
+            })
+            .collect();
+        let standard = encode_frame(&header, &pcm, &smr, 0).expect("encode standard frame");
+
+        // Decode the standard packet through the trait.
+        let mut std_dec = make_decoder(&build_decoder_params(44_100, 2)).unwrap();
+        let tb = TimeBase::new(1, 44_100);
+        std_dec
+            .send_packet(&Packet::new(0, tb, standard.clone()))
+            .expect("standard send_packet");
+        let Frame::Audio(std_audio) = std_dec.receive_frame().expect("std frame") else {
+            panic!("expected AudioFrame");
+        };
+
+        // Rewrite the bitrate_index nibble to '0000' → free format.
+        let mut free = standard.clone();
+        free[2] &= 0x0F;
+
+        let mut ff_dec = make_decoder(&build_decoder_params(44_100, 2)).unwrap();
+        ff_dec
+            .send_packet(&Packet::new(0, tb, free))
+            .expect("free-format send_packet");
+        let Frame::Audio(ff_audio) = ff_dec.receive_frame().expect("ff frame") else {
+            panic!("expected AudioFrame");
+        };
+
+        assert_eq!(ff_audio.samples, std_audio.samples);
+        assert_eq!(ff_audio.data.len(), std_audio.data.len(), "stereo");
+        for ch in 0..std_audio.data.len() {
+            assert_eq!(
+                ff_audio.data[ch], std_audio.data[ch],
+                "ch {ch}: free-format packet must decode identically to standard"
+            );
         }
     }
 

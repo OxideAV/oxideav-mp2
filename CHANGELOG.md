@@ -32,6 +32,15 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   single-channel and MPEG-2 LSF rates, that padded frames are sized per
   their own padding bit, and that an off-ladder size is rejected.
 
+- **Free-format support in the registry decoder (`src/codec_decoder.rs`)**.
+  `Mp2CoreDecoder::send_packet` now transparently handles free-format
+  packets: because a demuxer hands one frame per packet, the packet length
+  is the frame size, so the constant bitrate is recovered directly from
+  `packet_len − padding_bit` (no sync-to-sync measurement needed) and the
+  recovered-bitrate header drives the standard decode path. A new unit test
+  confirms a free-format packet decodes byte-identically to the equivalent
+  standard-bitrate packet through the `Decoder` trait.
+
 - **Registry-encoder codec options (`src/codec_encoder.rs`)**. The
   `Mp2CoreEncoder` now reads three `CodecParameters::options` keys so the
   already-built joint-stereo, dual-channel and Model-2 capabilities are
