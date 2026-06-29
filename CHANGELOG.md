@@ -41,6 +41,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   confirms a free-format packet decodes byte-identically to the equivalent
   standard-bitrate packet through the `Decoder` trait.
 
+- **Free-format robustness suite (`tests/free_format_robustness.rs`)**.
+  Panic-freedom coverage for the §2.4.2.3 free-format size-measurement
+  surface — `measure_base_slots`, `resolve`, `decode_free_format_stream`,
+  and `FrameHeader::parse_allow_free_format` — against dense sync runs
+  (the worst case for the sync-lock scanner), every truncated prefix of a
+  free-format frame, a 2000-case deterministic pseudo-random corpus, and
+  empty / tiny buffers. Every entry point always returns a `Result`.
+
 - **Free-format encode path (`src/freeformat.rs`)**.
   `rewrite_to_free_format` / `to_free_format` convert a standard-bitrate
   Layer II stream to §2.4.2.3 free format by clearing each frame's

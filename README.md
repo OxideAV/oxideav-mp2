@@ -31,6 +31,22 @@ are wired into the runtime registry** (frame-in / packet-out
   matrix (MPEG-1 only), and reserved-code rejection.
 - **Frame sizing** (`floor(144 · bitrate / Fs) + padding`) and cold
   sync search (`find_sync`).
+- **Free format** (§2.4.2.3, `bitrate_index == '0000'`): free-format
+  streams carry no signalled bitrate, so the constant frame size is
+  recovered by measuring the distance between consecutive syncwords
+  (with a two-frame sync-lock that rejects false-positive sync patterns
+  inside the payload — §2.4.2.3 "a frame contains either N or N+1 slots,
+  depending on the value of the padding bit"). The recovered base slot
+  count is inverted through the §2.4.3.1 size formula to recover the
+  constant bitrate, which selects the standard Annex B bit-allocation
+  table. `decode_free_format_stream` walks a whole free-format stream;
+  the registry `Mp2CoreDecoder` also handles a free-format packet directly
+  (the packet length is the frame size). An off-ladder free-format bitrate
+  (whose Annex B table the standard leaves undefined) is reported, not
+  guessed. The §2.4.2.3 free-format **encode** path (`to_free_format` /
+  `rewrite_to_free_format`) emits a free-format stream that round-trips
+  bit-exactly back through the decoder
+  (`tests/free_format.rs`).
 - **Bit allocation, scfsi and scalefactors** (§2.4.1.6 / §2.4.3.3):
   the Annex B Tables 3-B.2a..d, Table 3-B.4 quantization classes, and
   the 13818-3 Table B.1 LSF allocation table; `select_table` routes
@@ -250,8 +266,13 @@ prefix of a synthesized frame; `tests/joint_stereo_matrix.rs` adds
 encoder-independent panic-freedom fuzz for adversarial joint-stereo and
 dual-channel payloads across all four `mode_extension` bounds and the
 wide / narrow allocation tables (plus a truncated-prefix walk of a
-joint-stereo frame); and a `cargo-fuzz` `decode` target exercises the
-decode attacker surface for panic-freedom.
+joint-stereo frame); `tests/free_format_robustness.rs` adds
+panic-freedom coverage for the §2.4.2.3 free-format size-measurement
+surface (`measure_base_slots` / `resolve` / `decode_free_format_stream` /
+`parse_allow_free_format`) against dense sync runs, every truncated
+prefix of a free-format frame, and a deterministic pseudo-random corpus;
+and a `cargo-fuzz` `decode` target exercises the decode attacker surface
+for panic-freedom.
 
 ## License
 
