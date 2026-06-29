@@ -41,6 +41,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   confirms a free-format packet decodes byte-identically to the equivalent
   standard-bitrate packet through the `Decoder` trait.
 
+- **Free-format encode path (`src/freeformat.rs`)**.
+  `rewrite_to_free_format` / `to_free_format` convert a standard-bitrate
+  Layer II stream to §2.4.2.3 free format by clearing each frame's
+  `bitrate_index` nibble to `'0000'` — the §2.4.3.1 free-format frame size
+  at a ladder bitrate is byte-identical to the standard frame's size, so
+  the payload and frame boundaries are untouched and the constant bitrate
+  is recoverable on decode. Paired with the standard encoder, this emits a
+  free-format stream that round-trips through `decode_free_format_stream`
+  to bit-identical PCM (`tests/free_format.rs`).
+
 - **Registry-encoder codec options (`src/codec_encoder.rs`)**. The
   `Mp2CoreEncoder` now reads three `CodecParameters::options` keys so the
   already-built joint-stereo, dual-channel and Model-2 capabilities are

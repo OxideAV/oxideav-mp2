@@ -14,8 +14,8 @@
 
 use oxideav_mp2::encoder_frame::encode_frame;
 use oxideav_mp2::{
-    decode_all_frames, decode_free_format_stream, measure_base_slots, resolve, Emphasis,
-    FrameHeader, FreeFormatError, Mode, ModeExtension, SmrTable, NUM_SUBBANDS,
+    decode_all_frames, decode_free_format_stream, measure_base_slots, resolve, to_free_format,
+    Emphasis, FrameHeader, FreeFormatError, Mode, ModeExtension, SmrTable, NUM_SUBBANDS,
     PCM_SAMPLES_PER_CHANNEL,
 };
 
@@ -215,4 +215,31 @@ fn padded_free_format_frames_are_sized_per_padding_bit() {
     assert_eq!(pcm.len(), 2);
     // Two frames → 2 × 1152 samples per channel.
     assert_eq!(pcm[0].len(), 2 * PCM_SAMPLES_PER_CHANNEL);
+}
+
+#[test]
+fn free_format_encode_path_round_trips_via_to_free_format() {
+    // §2.4.2.3 free-format ENCODE: take the standard encoder's output and
+    // convert it to a free-format stream with `to_free_format`, then decode
+    // it back with `decode_free_format_stream`. The result must match the
+    // standard decode bit-for-bit (the payload is untouched; only the
+    // bitrate_index nibble is cleared).
+    let (standard, _free_via_manual) = build_streams(192_000, 44_100, Mode::Stereo, 5);
+    // 192 kbit/s stereo at 44.1 kHz → floor(144*192000/44100) = 626 base.
+    let frame_size = 626usize;
+    let free = to_free_format(&standard, frame_size);
+
+    let std_pcm = decode_all_frames(&standard).expect("standard decode");
+    let ff_pcm = decode_free_format_stream(&free).expect("free-format decode");
+
+    assert_eq!(ff_pcm.len(), std_pcm.len());
+    for ch in 0..std_pcm.len() {
+        assert_eq!(ff_pcm[ch], std_pcm[ch], "ch {ch} encode-path round-trip");
+    }
+    // Confirm the produced stream is genuinely free format.
+    let h = FrameHeader::parse_allow_free_format(&free).unwrap();
+    assert!(
+        h.is_free_format(),
+        "to_free_format produced a free-format frame"
+    );
 }

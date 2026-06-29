@@ -301,6 +301,51 @@ pub fn recovered_pair_is_valid(header: &FrameHeader, bit_rate: u32) -> bool {
     crate::header::is_layer2_bitrate_mode_allowed(bit_rate, header.mode)
 }
 
+/// Rewrite a standard-bitrate Layer II frame (or a contiguous run of them)
+/// in place to **free format** by clearing each frame's `bitrate_index`
+/// field to `'0000'`.
+///
+/// The §2.4.2.3 `bitrate_index` is the high nibble of the third header
+/// byte (bits 15..12 of the 32-bit big-endian word). Clearing it converts
+/// a ladder-rate frame to a free-format frame *without touching the
+/// payload or the frame size* — the §2.4.3.1 frame size of a free-format
+/// frame at a ladder bitrate is byte-identical to the standard frame's
+/// size, so the bytes that follow are already correctly placed. The
+/// constant bitrate is recoverable on decode from the frame size.
+///
+/// `frame_size` is the constant size in bytes of each frame in `frames`
+/// (the unpadded base `N`, or `N + 1` for a uniformly-padded run). Frames
+/// that are not a whole multiple of `frame_size` leave a trailing partial
+/// region untouched.
+///
+/// This is the §2.4.2.3 free-format **encode** path: pair it with the
+/// crate's standard encoder (`crate::encoder_frame::encode_frame` /
+/// `encode_all_frames`) to produce a free-format stream that round-trips
+/// through [`crate::frame::decode_free_format_stream`].
+pub fn rewrite_to_free_format(frames: &mut [u8], frame_size: usize) {
+    if frame_size < 4 {
+        return;
+    }
+    let mut off = 0;
+    while off + 4 <= frames.len() {
+        // Only rewrite genuine syncword-led frames; a malformed region
+        // (no sync) is left as-is.
+        if frames[off] == 0xFF && (frames[off + 1] & 0xF0) == 0xF0 {
+            frames[off + 2] &= 0x0F; // clear bitrate_index nibble
+        }
+        off += frame_size;
+    }
+}
+
+/// Allocating convenience: return a free-format copy of `frames`.
+///
+/// Equivalent to cloning `frames` and applying [`rewrite_to_free_format`].
+pub fn to_free_format(frames: &[u8], frame_size: usize) -> Vec<u8> {
+    let mut out = frames.to_vec();
+    rewrite_to_free_format(&mut out, frame_size);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +465,47 @@ mod tests {
         assert_eq!(filled.mode, h.mode);
         assert_eq!(filled.padding, h.padding);
         let _ = (Emphasis::None, ModeExtension::Bound4);
+    }
+
+    #[test]
+    fn rewrite_to_free_format_clears_bitrate_index_per_frame() {
+        // Two standard 128 kbit/s frames (bitrate_index '1000' = 0x8 in the
+        // high nibble of byte 2) at 44.1 kHz / stereo.
+        let std_word: u32 =
+            (0xFFFu32 << 20) | (1 << 19) | (0b10 << 17) | (1 << 16) | (0b1000 << 12); // bitrate_index for 128 kbit/s
+        let frame_size = 417usize;
+        let mut stream = Vec::new();
+        for _ in 0..2 {
+            let mut frame = std_word.to_be_bytes().to_vec();
+            frame.resize(frame_size, 0xAB);
+            stream.extend_from_slice(&frame);
+        }
+        // Each frame's byte-2 high nibble is 0x8 before the rewrite.
+        assert_eq!(stream[2] & 0xF0, 0x80);
+        assert_eq!(stream[frame_size + 2] & 0xF0, 0x80);
+
+        rewrite_to_free_format(&mut stream, frame_size);
+
+        // After: both frames' bitrate_index nibbles are cleared to 0.
+        assert_eq!(stream[2] & 0xF0, 0x00, "frame 0 → free format");
+        assert_eq!(stream[frame_size + 2] & 0xF0, 0x00, "frame 1 → free format");
+        // The rest of byte 2 (sf/pad/priv) and all other bytes untouched.
+        assert_eq!(stream[2] & 0x0F, (std_word.to_be_bytes()[2]) & 0x0F);
+
+        // And each rewritten frame now parses as free format.
+        let h = FrameHeader::parse_allow_free_format(&stream).unwrap();
+        assert!(h.is_free_format());
+    }
+
+    #[test]
+    fn to_free_format_is_nonmutating_copy() {
+        let std_word: u32 =
+            (0xFFFu32 << 20) | (1 << 19) | (0b10 << 17) | (1 << 16) | (0b1000 << 12);
+        let mut frame = std_word.to_be_bytes().to_vec();
+        frame.resize(417, 0xAB);
+        let original = frame.clone();
+        let free = to_free_format(&frame, 417);
+        assert_eq!(frame, original, "source untouched");
+        assert_eq!(free[2] & 0xF0, 0x00, "copy is free format");
     }
 }

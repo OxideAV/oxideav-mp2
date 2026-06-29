@@ -305,7 +305,7 @@ pub use frame::{
 };
 pub use freeformat::{
     bitrate_from_base_slots, header_with_recovered_bitrate, measure_base_slots, resolve,
-    FreeFormatError, FreeFormatLayout,
+    rewrite_to_free_format, to_free_format, FreeFormatError, FreeFormatLayout,
 };
 pub use header::{
     decode_bitrate, decode_bitrate_lsf, decode_sampling_frequency, decode_sampling_frequency_lsf,
