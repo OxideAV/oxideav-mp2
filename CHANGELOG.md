@@ -41,6 +41,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   confirms a free-format packet decodes byte-identically to the equivalent
   standard-bitrate packet through the `Decoder` trait.
 
+- **`freeformat` registry-encoder option (`src/codec_encoder.rs`)**.
+  `Mp2CoreEncoder` now accepts a `freeformat` `CodecParameters::options`
+  key (`"true"` / `"1"`); when set it emits §2.4.2.3 free-format frames
+  (`bitrate_index == '0000'`) at the configured constant bitrate by
+  clearing each emitted frame's bitrate_index nibble. This completes the
+  free-format story symmetrically through the registry (the decoder
+  already handles free-format packets). A unit test confirms the produced
+  stream parses as free format and decodes byte-identically to the
+  standard-bitrate encode; an unrecognised `freeformat` value is rejected.
+
 - **Free-format robustness suite (`tests/free_format_robustness.rs`)**.
   Panic-freedom coverage for the §2.4.2.3 free-format size-measurement
   surface — `measure_base_slots`, `resolve`, `decode_free_format_stream`,

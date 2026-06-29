@@ -161,6 +161,20 @@ fn psymodel_opt(s: Option<&str>) -> Result<PsyModel> {
     }
 }
 
+/// Parse the `freeformat` option: when `"true"` / `"1"`, the encoder emits
+/// §2.4.2.3 free-format frames (`bitrate_index == '0000'`) at the
+/// configured constant bitrate. Absent / `"false"` / `"0"` keeps the
+/// standard signalled-bitrate framing.
+fn freeformat_opt(s: Option<&str>) -> Result<bool> {
+    match s {
+        None | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: freeformat={other:?} not recognised (true / false)"
+        ))),
+    }
+}
+
 /// Build the fixed per-stream [`FrameHeader`] from encoder parameters,
 /// validating the rate / channel / bitrate combination up front.
 fn build_header(
@@ -237,6 +251,11 @@ fn build_header(
 ///   `"4"` (default) / `"8"` / `"12"` / `"16"`.
 /// * `psymodel` — which Annex D model drives the auto-SMR allocation:
 ///   `"model1"` (§D.1, default) or `"model2"` (§D.2).
+/// * `freeformat` — `"true"` / `"1"` emits §2.4.2.3 free-format frames
+///   (`bitrate_index == '0000'`) at the configured constant bitrate;
+///   default `"false"` keeps the standard signalled-bitrate framing. The
+///   output decodes via `decode_free_format_stream` or the registry
+///   decoder's free-format packet path.
 ///
 /// # Errors
 ///
@@ -251,6 +270,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let mode = mode_for_channels(channels, params.options.get("mode"))?;
     let mode_extension = mode_extension_opt(params.options.get("bound"))?;
     let psymodel = psymodel_opt(params.options.get("psymodel"))?;
+    let freeformat = freeformat_opt(params.options.get("freeformat"))?;
 
     let Some(sample_rate) = params.sample_rate else {
         return Err(Error::invalid(
@@ -281,6 +301,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         out_params,
         header,
         psymodel,
+        freeformat,
     )))
 }
 
@@ -305,6 +326,9 @@ pub struct Mp2CoreEncoder {
     header: FrameHeader,
     channels: usize,
     psymodel: PsyModel,
+    /// When true, emit §2.4.2.3 free-format frames (bitrate_index '0000')
+    /// at the configured constant bitrate.
+    freeformat: bool,
     enc_state: EncodeFrameState,
     pending_pcm: Vec<Vec<f64>>,
     pending_packets: VecDeque<Packet>,
@@ -333,6 +357,7 @@ impl Mp2CoreEncoder {
         output: CodecParameters,
         header: FrameHeader,
         psymodel: PsyModel,
+        freeformat: bool,
     ) -> Self {
         let channels = header.channels();
         Self {
@@ -341,6 +366,7 @@ impl Mp2CoreEncoder {
             header,
             channels,
             psymodel,
+            freeformat,
             enc_state: EncodeFrameState::new(),
             pending_pcm: vec![Vec::new(); channels],
             pending_packets: VecDeque::new(),
@@ -375,7 +401,7 @@ impl Mp2CoreEncoder {
     /// Encode one exactly-1152-sample-per-channel PCM frame and queue
     /// the resulting Layer II packet.
     fn encode_one(&mut self, frame_pcm: Vec<Vec<f64>>) -> Result<()> {
-        let bytes = match self.psymodel {
+        let mut bytes = match self.psymodel {
             PsyModel::Model1 => {
                 encode_frame_auto_with(&self.header, &frame_pcm, 0, &mut self.enc_state)
             }
@@ -384,6 +410,15 @@ impl Mp2CoreEncoder {
             }
         }
         .map_err(|e| Error::other(format!("oxideav-mp2: encode_frame: {e}")))?;
+        // §2.4.2.3 free-format: clear the frame's bitrate_index nibble to
+        // '0000'. The §2.4.3.1 free-format frame size at this ladder
+        // bitrate is byte-identical to the standard frame's size, so the
+        // payload and frame boundary are untouched; the constant bitrate is
+        // recoverable on decode from the frame size.
+        if self.freeformat {
+            let frame_size = bytes.len();
+            crate::freeformat::rewrite_to_free_format(&mut bytes, frame_size);
+        }
         let mut packet = Packet::new(
             0,
             TimeBase::new(1, i64::from(self.header.sample_rate)),
@@ -682,6 +717,60 @@ mod tests {
         let mut bad_mono = params(44_100, 1, None);
         bad_mono.options.insert("mode", "joint_stereo");
         assert!(make_encoder(&bad_mono).is_err());
+
+        // unrecognised freeformat value.
+        let mut bad_ff = params(44_100, 2, None);
+        bad_ff.options.insert("freeformat", "maybe");
+        assert!(make_encoder(&bad_ff).is_err());
+    }
+
+    #[test]
+    fn freeformat_option_emits_a_free_format_stream_that_round_trips() {
+        // Encode the SAME structured input twice: once standard, once with
+        // freeformat=true. The free-format stream must (a) parse as free
+        // format, (b) decode through decode_free_format_stream, and (c)
+        // produce byte-identical PCM to the standard encode (the payload is
+        // untouched; only the bitrate_index nibble is cleared).
+        let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+        let make_raw = |freeformat: bool| {
+            let mut p = params(44_100, 2, Some(192_000));
+            if freeformat {
+                p.options.insert("freeformat", "true");
+            }
+            let mut enc = make_encoder(&p).unwrap();
+            let data: Vec<Vec<u8>> = (0..2).map(|_| tone_plane(n, 900.0, 44_100, 0.5)).collect();
+            enc.send_frame(&Frame::Audio(AudioFrame {
+                samples: n as u32,
+                pts: Some(0),
+                data,
+            }))
+            .unwrap();
+            enc.flush().unwrap();
+            let mut out = Vec::new();
+            while let Ok(pk) = enc.receive_packet() {
+                out.extend_from_slice(&pk.data);
+            }
+            out
+        };
+
+        let standard = make_raw(false);
+        let free = make_raw(true);
+
+        // The free-format stream's first frame parses as free format.
+        let h = crate::FrameHeader::parse_allow_free_format(&free).unwrap();
+        assert!(h.is_free_format(), "freeformat=true → bitrate_index '0000'");
+        // The standard stream's header is NOT free format.
+        assert!(!crate::FrameHeader::parse(&standard)
+            .unwrap()
+            .is_free_format());
+
+        // Both decode to identical PCM.
+        let std_pcm = decode_all_frames(&standard).expect("standard decode");
+        let ff_pcm = crate::frame::decode_free_format_stream(&free).expect("free-format decode");
+        assert_eq!(ff_pcm.len(), std_pcm.len(), "channel count");
+        for ch in 0..std_pcm.len() {
+            assert_eq!(ff_pcm[ch], std_pcm[ch], "ch {ch} free-format round-trip");
+        }
     }
 
     #[test]
