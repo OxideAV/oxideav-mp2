@@ -1,5 +1,7 @@
 # oxideav-mp2
 
+[![CI](https://github.com/OxideAV/oxideav-mp2/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-mp2/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-mp2.svg)](https://crates.io/crates/oxideav-mp2) [![docs.rs](https://docs.rs/oxideav-mp2/badge.svg)](https://docs.rs/oxideav-mp2) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A pure-Rust **MPEG-1 / MPEG-2 LSF Audio Layer II** (MP2 / MUSICAM)
 codec for the
 [oxideav](https://github.com/OxideAV/oxideav-workspace) framework.
