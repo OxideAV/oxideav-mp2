@@ -552,6 +552,94 @@ fn nb_steps_at(table: BitAllocTable, sb: usize, row_idx: u32) -> u32 {
     }
 }
 
+/// Cost in bits of quieting one slot to `MNR >= 0` against `smr`:
+/// the cheapest Table B.2 row whose Table C.5 SNR reaches `smr`
+/// (the top row when even that falls short), plus the worst-case
+/// 20-bit scfsi + scalefactor overhead when a non-zero allocation is
+/// required. `smr <= 0` costs nothing (`MNR = SNR − SMR >= 0` already
+/// holds at `nb_steps = 0`).
+fn slot_demand_bits(table: BitAllocTable, sb: usize, smr: f64) -> u64 {
+    if smr <= 0.0 {
+        return 0;
+    }
+    let width = row_width(table, sb);
+    if width == 0 {
+        return 0;
+    }
+    // Walk the row ladder to the first nb_steps whose SNR covers smr;
+    // hold the top row if none does.
+    let mut chosen = nb_steps_at(table, sb, width - 1);
+    for row in 1..width {
+        let nb = nb_steps_at(table, sb, row);
+        if snr_db(nb).unwrap_or(0.0) >= smr {
+            chosen = nb;
+            break;
+        }
+    }
+    if chosen == 0 {
+        return 0;
+    }
+    u64::from(sample_bits_for(chosen))
+        + u64::from(SCFSI_BITS_PER_SLOT + WORST_CASE_SCALEFACTOR_BITS_PER_SLOT)
+}
+
+/// Annex G.1 required-bitrate estimate: the number of §C.1.5.2.7 data
+/// bits needed to bring **every** (channel, sub-band) slot to
+/// `MNR >= 0` under `header`'s mode / `mode_extension` (i.e. its
+/// `bound`), using the same cost model as [`allocate_bits`]:
+///
+/// * below `bound` each channel pays its own sample codewords and
+///   scfsi/scalefactor overhead;
+/// * in the `bound..sblimit` intensity region the merged slot pays ONE
+///   shared codeword (§2.4.1.6 / §2.4.2.6) sized against the **more
+///   demanding** of the two channels' SMRs ("the higher of the bit
+///   allocations for left and right channel is used", Annex G.1), plus
+///   both channels' scfsi/scalefactor overhead.
+///
+/// Compare against [`available_data_bits`] to drive the Annex G.1
+/// decision "if the required bitrate exceeds the available bitrate,
+/// […] set a number of subbands to intensity stereo mode".
+#[allow(clippy::needless_range_loop)] // sb/ch index two parallel tables
+pub fn demand_bits(header: &FrameHeader, smr_db: &SmrTable) -> Result<u64, BitAllocError> {
+    let budget = fixed_bit_budget(header)?;
+    let table = budget.table;
+    let mut demand = 0u64;
+    for sb in 0..budget.bound.min(budget.sblimit) {
+        for ch in 0..budget.channels {
+            demand += slot_demand_bits(table, sb, smr_db[ch][sb]);
+        }
+    }
+    for sb in budget.bound..budget.sblimit {
+        let smr = if budget.channels == 2 {
+            smr_db[0][sb].max(smr_db[1][sb])
+        } else {
+            smr_db[0][sb]
+        };
+        let d = slot_demand_bits(table, sb, smr);
+        if d > 0 && budget.channels == 2 {
+            // One shared codeword + the SECOND channel's scfsi +
+            // scalefactor overhead (the first channel's is already in
+            // `d`).
+            demand += d + u64::from(SCFSI_BITS_PER_SLOT + WORST_CASE_SCALEFACTOR_BITS_PER_SLOT);
+        } else {
+            demand += d;
+        }
+    }
+    Ok(demand)
+}
+
+/// The §C.1.5.2.7 `adb` for `header`: data bits available for samples
+/// and scalefactors after the constant terms (`bhdr + bcrc + bbal`)
+/// and the caller's `banc` ancillary reservation.
+///
+/// Negative when the constant terms alone exceed the frame (the same
+/// condition [`allocate_bits`] rejects as
+/// [`BitAllocError::InsufficientFrameSize`]).
+pub fn available_data_bits(header: &FrameHeader, banc: u32) -> Result<i64, BitAllocError> {
+    let budget = fixed_bit_budget(header)?;
+    Ok(i64::from(budget.cb) - i64::from(budget.fixed()) - i64::from(banc))
+}
+
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)]
 mod tests {
@@ -902,5 +990,87 @@ mod tests {
                 );
             }
         }
+    }
+    // ---- Annex G.1 demand estimation ----
+
+    #[test]
+    fn demand_bits_is_zero_for_non_positive_smr() {
+        // MNR = SNR − SMR >= 0 already holds at nb_steps = 0 when
+        // SMR <= 0, so no slot demands anything.
+        let h = canonical_header();
+        let smr: SmrTable = [[0.0; NUM_SUBBANDS]; MAX_CHANNELS];
+        assert_eq!(demand_bits(&h, &smr).unwrap(), 0);
+        let smr_neg: SmrTable = [[-25.0; NUM_SUBBANDS]; MAX_CHANNELS];
+        assert_eq!(demand_bits(&h, &smr_neg).unwrap(), 0);
+    }
+
+    #[test]
+    fn demand_bits_single_slot_exact() {
+        // One below-bound slot demanding SNR >= 15 dB: the cheapest
+        // Table B.2 row whose Table C.5 SNR reaches 15 dB, plus the
+        // 20-bit worst-case scfsi + scalefactor overhead.
+        let h = canonical_header();
+        let mut smr: SmrTable = [[0.0; NUM_SUBBANDS]; MAX_CHANNELS];
+        smr[0][3] = 15.0;
+        let budget = fixed_bit_budget(&h).unwrap();
+        // Independently find the cheapest covering row for sb = 3.
+        let mut expect_nb = 0;
+        for row in 1..row_width(budget.table, 3) {
+            let nb = nb_steps_at(budget.table, 3, row);
+            if snr_db(nb).unwrap_or(0.0) >= 15.0 {
+                expect_nb = nb;
+                break;
+            }
+        }
+        assert!(expect_nb > 0, "test premise: some row covers 15 dB");
+        let expect = u64::from(sample_bits_for(expect_nb))
+            + u64::from(SCFSI_BITS_PER_SLOT + WORST_CASE_SCALEFACTOR_BITS_PER_SLOT);
+        assert_eq!(demand_bits(&h, &smr).unwrap(), expect);
+    }
+
+    #[test]
+    fn demand_bits_decreases_as_the_intensity_bound_narrows() {
+        // For a symmetric positive SMR, every subband moved from the
+        // per-channel region into the intensity region saves one
+        // channel's sample codewords (the shared codeword is on the
+        // wire once), so demand is monotonically non-increasing along
+        // Stereo -> Bound16 -> Bound12 -> Bound8 -> Bound4.
+        let smr: SmrTable = [[30.0; NUM_SUBBANDS]; MAX_CHANNELS];
+        let mut h = canonical_header();
+        let mut prev = None;
+        let candidates = [
+            (Mode::Stereo, ModeExtension::Bound4),
+            (Mode::JointStereo, ModeExtension::Bound16),
+            (Mode::JointStereo, ModeExtension::Bound12),
+            (Mode::JointStereo, ModeExtension::Bound8),
+            (Mode::JointStereo, ModeExtension::Bound4),
+        ];
+        for (mode, ext) in candidates {
+            h.mode = mode;
+            h.mode_extension = ext;
+            let d = demand_bits(&h, &smr).unwrap();
+            assert!(d > 0, "flat 30 dB SMR demands bits ({mode:?} {ext:?})");
+            if let Some(p) = prev {
+                assert!(
+                    d <= p,
+                    "demand must not grow as the bound narrows ({mode:?} {ext:?}: {d} > {p})"
+                );
+            }
+            prev = Some(d);
+        }
+    }
+
+    #[test]
+    fn available_data_bits_matches_the_fixed_budget_identity() {
+        let h = canonical_header();
+        let budget = fixed_bit_budget(&h).unwrap();
+        assert_eq!(
+            available_data_bits(&h, 0).unwrap(),
+            i64::from(budget.cb) - i64::from(budget.fixed())
+        );
+        assert_eq!(
+            available_data_bits(&h, 100).unwrap(),
+            i64::from(budget.cb) - i64::from(budget.fixed()) - 100
+        );
     }
 }

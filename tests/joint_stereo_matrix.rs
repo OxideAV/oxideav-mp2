@@ -52,7 +52,8 @@ use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
 use oxideav_mp2::frame::{decode_frame, FrameError};
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{
-    decode_all_frames, encode_all_frames, FrameHeader, PaddingScheduler, PCM_SAMPLES_PER_CHANNEL,
+    decode_all_frames, encode_all_frames, encode_all_frames_js, FrameHeader, PaddingScheduler,
+    PCM_SAMPLES_PER_CHANNEL,
 };
 
 use oxideav_core::bits::BitReader;
@@ -804,4 +805,91 @@ fn intensity_sum_signal_preserves_right_only_content_above_bound() {
              rms1 {rms1:.5})"
         );
     }
+}
+
+#[test]
+fn demand_driven_auto_bound_switches_with_bitrate_and_decodes() {
+    // Annex G.1 flow: "First, an estimation is made of the required
+    // bitrate […]. If the required bitrate exceeds the available
+    // bitrate, the required bitrate can be decreased by setting a
+    // number of subbands to intensity stereo mode." The batch
+    // `encode_all_frames_js` applies that decision per frame: the SAME
+    // stereo tone must come out as full `Stereo` frames when the
+    // bitrate covers its §D.1 demand (384 kbit/s) and as `JointStereo`
+    // frames when it does not (96 kbit/s).
+    let n_frames = 6;
+    let sample_rate = 44_100;
+    let stream = tone_stream(&[1_000.0, 1_000.0], 0.3, sample_rate, n_frames);
+
+    // Walk a stream frame by frame collecting each frame's mode.
+    let modes_of = |bytes: &[u8]| -> Vec<Mode> {
+        let mut out = Vec::new();
+        let mut off = 0;
+        while off < bytes.len() {
+            let h = FrameHeader::parse(&bytes[off..]).expect("frame header");
+            out.push(h.mode);
+            off += h.frame_size_bytes();
+        }
+        out
+    };
+
+    // Rich budget: full Stereo everywhere.
+    let rich = header(
+        false,
+        sample_rate,
+        384_000,
+        Mode::JointStereo,
+        ModeExtension::Bound4,
+    );
+    let bytes = encode_all_frames_js(&rich, &stream, 0).expect("js 384k");
+    let modes = modes_of(&bytes);
+    assert_eq!(modes.len(), n_frames);
+    assert!(
+        modes.iter().all(|&m| m == Mode::Stereo),
+        "384 kbit/s: demand fits, every frame full Stereo (got {modes:?})"
+    );
+    let planes = decode_all_frames(&bytes).expect("decode 384k");
+    assert_eq!(planes[0].len(), n_frames * PCM_SAMPLES_PER_CHANNEL);
+
+    // Tight budget + a signal whose per-frame §D.1 demand stays far
+    // above the 96 kbit/s budget: a comb of well-separated tones, one
+    // per low subband. Tonal maskers leave a large in-band SMR in each
+    // carrying subband, so every frame demands deep quantization
+    // across many slots and intensity coding kicks in on every frame.
+    // (A single steady tone is too easy — after the frame-0 filterbank
+    // ramp-in its masked demand fits full Stereo even at 96 kbit/s —
+    // and broadband noise masks itself into near-zero demand; both
+    // outcomes are the per-frame adaptivity the policy is meant to
+    // show.)
+    let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+    let sb_width = sample_rate as f64 / 64.0;
+    let comb: Vec<f64> = (0..total)
+        .map(|i| {
+            let t = i as f64;
+            (0..12)
+                .map(|k| {
+                    let f = (k as f64 + 0.5) * sb_width;
+                    0.07 * (2.0 * std::f64::consts::PI * f * t / sample_rate as f64).sin()
+                })
+                .sum()
+        })
+        .collect();
+    let stream_comb = vec![comb.clone(), comb];
+    let tight = header(
+        false,
+        sample_rate,
+        96_000,
+        Mode::JointStereo,
+        ModeExtension::Bound4,
+    );
+    let bytes = encode_all_frames_js(&tight, &stream_comb, 0).expect("js 96k");
+    let modes = modes_of(&bytes);
+    assert_eq!(modes.len(), n_frames);
+    assert!(
+        modes.iter().all(|&m| m == Mode::JointStereo),
+        "96 kbit/s tone comb: demand overshoots, every frame JointStereo (got {modes:?})"
+    );
+    let planes = decode_all_frames(&bytes).expect("decode 96k");
+    assert_eq!(planes.len(), 2, "intensity-coded stream decodes as stereo");
+    assert_eq!(planes[0].len(), n_frames * PCM_SAMPLES_PER_CHANNEL);
 }

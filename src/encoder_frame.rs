@@ -533,6 +533,107 @@ pub fn encode_frame_auto_model2(
     encode_frame_inner(header, pcm, SmrSource::AutoModel2, banc, &[], state)
 }
 
+/// Annex G.1 demand-driven stereo-coding selection: pick the widest
+/// coding for this frame whose required bits fit the available budget.
+///
+/// "First, an estimation is made of the required bitrate for both left
+/// and right channel. If the required bitrate exceeds the available
+/// bitrate, the required bitrate can be decreased by setting a number
+/// of subbands to intensity stereo mode. Depending on the bitrate
+/// needed, subbands 16 to 31, 12 to 31, 8 to 31, or 4 to 31 can be set
+/// to intensity stereo mode."
+///
+/// The candidates are walked from full `Stereo` (no intensity
+/// subbands) through `JointStereo` with `Bound16` / `Bound12` /
+/// `Bound8` / `Bound4`; the first whose
+/// [`demand_bits`](crate::encoder_bit_allocator::demand_bits) — the
+/// §C.1.5.2.7 cost of bringing every slot to `MNR >= 0` against
+/// `smr_db` — fits
+/// [`available_data_bits`](crate::encoder_bit_allocator::available_data_bits)
+/// wins. When even `Bound4` overshoots, `Bound4` is returned — the
+/// §C.1.5.2.7 allocator then distributes the shortage by minimum MNR
+/// as usual.
+///
+/// The returned header is `header` with only `mode` / `mode_extension`
+/// replaced; a one-channel header is returned unchanged. All five
+/// candidates are two-channel modes, so the §2.4.2.3 (bitrate, mode)
+/// matrix admits either all of them or none for a given bitrate — the
+/// swap can never turn a valid header invalid.
+#[must_use]
+pub fn choose_stereo_coding(header: &FrameHeader, smr_db: &SmrTable, banc: u32) -> FrameHeader {
+    use crate::encoder_bit_allocator::{available_data_bits, demand_bits};
+    use crate::header::{Mode, ModeExtension};
+
+    if header.channels() != 2 {
+        return *header;
+    }
+    let candidates: [(Mode, ModeExtension); 5] = [
+        // `mode_extension` is meaningless in Stereo mode; Bound4 is an
+        // arbitrary well-formed filler.
+        (Mode::Stereo, ModeExtension::Bound4),
+        (Mode::JointStereo, ModeExtension::Bound16),
+        (Mode::JointStereo, ModeExtension::Bound12),
+        (Mode::JointStereo, ModeExtension::Bound8),
+        (Mode::JointStereo, ModeExtension::Bound4),
+    ];
+    let mut chosen = *header;
+    for (mode, ext) in candidates {
+        chosen.mode = mode;
+        chosen.mode_extension = ext;
+        let (Ok(demand), Ok(adb)) = (
+            demand_bits(&chosen, smr_db),
+            available_data_bits(&chosen, banc),
+        ) else {
+            // No allocation table for this header — leave the caller's
+            // original mode in place; the encode proper will surface
+            // the error.
+            return *header;
+        };
+        if adb >= 0 && demand <= adb as u64 {
+            return chosen;
+        }
+    }
+    // Even Bound4 overshoots: intensity-code as much as possible.
+    chosen
+}
+
+/// Like [`encode_frame_auto_with`] (§D.1 Model-1 auto-SMR) but with
+/// the Annex G.1 **demand-driven stereo-coding selection** applied per
+/// frame: after the psychoacoustic model produces the frame's SMR
+/// table, [`choose_stereo_coding`] picks full `Stereo` when the
+/// required bits fit, else the widest `JointStereo` intensity bound
+/// that fits (16 / 12 / 8 / 4). The emitted frame's header carries the
+/// chosen `mode` / `mode_extension`; every other field (bitrate,
+/// sampling rate, padding, CRC, …) is taken from `header` unchanged,
+/// so consecutive frames of one stream may legally switch between
+/// `Stereo` and `JointStereo` as the signal's demand varies (§2.4.1.3
+/// — each frame carries its own `mode`).
+///
+/// `header` must describe a two-channel stream (`Stereo`,
+/// `JointStereo` or `DualChannel` — the mode itself is overridden per
+/// frame).
+pub fn encode_frame_auto_js_with(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner_auto_joint(header, pcm, SmrSource::Auto, banc, state)
+}
+
+/// The §D.2 Model-2 counterpart of [`encode_frame_auto_js_with`]:
+/// Model-2 auto-SMR with the Annex G.1 demand-driven stereo-coding
+/// selection per frame. Thread one [`EncodeFrameState`] across the
+/// stream (Model 2 is stateful).
+pub fn encode_frame_auto_js_model2(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner_auto_joint(header, pcm, SmrSource::AutoModel2, banc, state)
+}
+
 /// Encode one Layer II frame and copy a §2.4.1.8 `ancillary_data()`
 /// payload into the §2.4.2.1 frame tail that begins immediately after
 /// the §2.4.1.6 audio-data + §2.4.3.3.4 sample-codeword region.
@@ -685,10 +786,32 @@ pub fn encode_all_frames_model2(
     encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoModel2)
 }
 
+/// Like [`encode_all_frames`] (§D.1 Model-1 auto-SMR batch) but with
+/// the Annex G.1 **demand-driven stereo-coding selection** applied to
+/// every frame ([`encode_frame_auto_js_with`]): each frame is emitted
+/// as full `Stereo` when its required bits fit the budget, else as
+/// `JointStereo` with the widest intensity bound that fits — so one
+/// stream may legally mix `Stereo` and `JointStereo` frames as the
+/// signal's demand varies. `header` must describe a two-channel
+/// stream; its `mode` / `mode_extension` are per-frame overridden.
+/// Length rules, the §2.4.2.3 padding schedule and the
+/// [`EncodeError::ShortPcmTail`] rejection are identical to
+/// [`encode_all_frames`].
+pub fn encode_all_frames_js(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoJs)
+}
+
 /// Per-frame SMR policy for the [`encode_all_frames`] family.
 enum SmrChoice<'a> {
     Auto,
     AutoModel2,
+    /// §D.1 Model-1 auto-SMR + Annex G.1 per-frame stereo-coding
+    /// selection.
+    AutoJs,
     Provided(&'a SmrTable),
 }
 
@@ -775,6 +898,13 @@ fn encode_all_frames_inner(
                 &[],
                 &mut state,
             )?,
+            SmrChoice::AutoJs => encode_frame_inner_auto_joint(
+                &frame_header,
+                &frame_pcm,
+                SmrSource::Auto,
+                banc,
+                &mut state,
+            )?,
             SmrChoice::Provided(table) => encode_frame_inner(
                 &frame_header,
                 &frame_pcm,
@@ -811,6 +941,33 @@ fn encode_frame_inner(
     banc: u32,
     ancillary: &[u8],
     state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner_impl(header, pcm, smr_db, banc, ancillary, state, false)
+}
+
+/// [`encode_frame_inner`] with the Annex G.1 demand-driven
+/// stereo-coding selection enabled: after the SMR table is resolved,
+/// [`choose_stereo_coding`] overrides the frame's `mode` /
+/// `mode_extension` before allocation.
+fn encode_frame_inner_auto_joint(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    smr_db: SmrSource<'_>,
+    banc: u32,
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner_impl(header, pcm, smr_db, banc, &[], state, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_frame_inner_impl(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    smr_db: SmrSource<'_>,
+    banc: u32,
+    ancillary: &[u8],
+    state: &mut EncodeFrameState,
+    auto_joint: bool,
 ) -> Result<Vec<u8>, EncodeError> {
     let channels = header.channels();
 
@@ -880,6 +1037,22 @@ fn encode_frame_inner(
             owned_smr = compute_auto_smr_table_model2(header, pcm, channels, state);
             &owned_smr
         }
+    };
+
+    // ---- Annex G.1 demand-driven stereo-coding selection ----
+    //
+    // With `auto_joint`, the frame's `mode` / `mode_extension` is
+    // re-chosen from the resolved SMR table: full Stereo when the
+    // required bits fit the budget, else the widest JointStereo
+    // intensity bound that fits. The SMR table and the filterbank
+    // output do not depend on the mode, so the substitution is safe
+    // after both are computed.
+    let chosen_header;
+    let header: &FrameHeader = if auto_joint {
+        chosen_header = choose_stereo_coding(header, smr_db, banc);
+        &chosen_header
+    } else {
+        header
     };
 
     // ---- §C.1.5.2.7 bit allocation against the SMR table ----
@@ -2308,5 +2481,111 @@ mod tests {
         for plane in &planes {
             assert_eq!(plane.len(), n_frames * PCM_SAMPLES_PER_CHANNEL);
         }
+    }
+    // ---- Annex G.1 demand-driven stereo-coding selection ----
+
+    #[test]
+    fn choose_stereo_coding_picks_stereo_when_demand_fits() {
+        // Non-positive SMR demands nothing, so full Stereo always fits.
+        let header = FrameHeader {
+            mode: Mode::JointStereo,
+            mode_extension: ModeExtension::Bound4,
+            ..canonical_stereo_header()
+        };
+        let smr: SmrTable = [[-10.0; NUM_SUBBANDS]; 2];
+        let chosen = choose_stereo_coding(&header, &smr, 0);
+        assert_eq!(chosen.mode, Mode::Stereo);
+        // Everything but mode/mode_extension is preserved.
+        assert_eq!(chosen.bit_rate, header.bit_rate);
+        assert_eq!(chosen.sample_rate, header.sample_rate);
+        assert_eq!(chosen.protection_bit, header.protection_bit);
+    }
+
+    #[test]
+    fn choose_stereo_coding_falls_to_bound4_under_extreme_demand() {
+        // An SMR far beyond any Table C.5 SNR forces every slot to its
+        // ladder top; not even Bound4 fits at 192 kbit/s, and Bound4 is
+        // the documented final fallback.
+        let header = canonical_stereo_header();
+        let smr: SmrTable = [[90.0; NUM_SUBBANDS]; 2];
+        let chosen = choose_stereo_coding(&header, &smr, 0);
+        assert_eq!(chosen.mode, Mode::JointStereo);
+        assert_eq!(chosen.mode_extension, ModeExtension::Bound4);
+    }
+
+    #[test]
+    fn choose_stereo_coding_walks_monotonically_with_demand() {
+        // As a flat SMR rises, the chosen coding must walk monotonically
+        // from Stereo toward Bound4 (never widen again).
+        let header = canonical_stereo_header();
+        let rank = |h: &FrameHeader| -> u8 {
+            match (h.mode, h.mode_extension) {
+                (Mode::Stereo, _) => 0,
+                (Mode::JointStereo, ModeExtension::Bound16) => 1,
+                (Mode::JointStereo, ModeExtension::Bound12) => 2,
+                (Mode::JointStereo, ModeExtension::Bound8) => 3,
+                (Mode::JointStereo, ModeExtension::Bound4) => 4,
+                other => panic!("unexpected choice {other:?}"),
+            }
+        };
+        let mut prev = 0u8;
+        let mut seen_top = false;
+        for smr_flat in [-5.0, 5.0, 12.0, 20.0, 30.0, 45.0, 65.0, 90.0] {
+            let smr: SmrTable = [[smr_flat; NUM_SUBBANDS]; 2];
+            let r = rank(&choose_stereo_coding(&header, &smr, 0));
+            assert!(
+                r >= prev,
+                "choice must narrow monotonically (SMR {smr_flat}: rank {r} < {prev})"
+            );
+            prev = r;
+            seen_top |= r == 4;
+        }
+        assert!(seen_top, "the sweep must reach the Bound4 fallback");
+    }
+
+    #[test]
+    fn choose_stereo_coding_leaves_single_channel_headers_alone() {
+        let header = canonical_single_channel_header();
+        let smr: SmrTable = [[50.0; NUM_SUBBANDS]; 2];
+        let chosen = choose_stereo_coding(&header, &smr, 0);
+        assert_eq!(chosen.mode, Mode::SingleChannel);
+    }
+
+    #[test]
+    fn encode_frame_auto_js_emits_a_decodable_frame_with_a_demand_driven_mode() {
+        // The same tone must be emitted as full Stereo when the budget
+        // covers its §D.1 demand (384 kbit/s) and as JointStereo when
+        // it does not (192 kbit/s) — Annex G.1: intensity coding is
+        // applied when the required bitrate exceeds the available one.
+        // Either way the frame carries the chosen mode in its own
+        // header and decodes cleanly.
+        let pcm = tone_pcm(2, 1_000.0, 0.2);
+
+        let rich = FrameHeader {
+            bit_rate: 384_000,
+            ..canonical_stereo_header()
+        };
+        let mut state = EncodeFrameState::new();
+        let bytes = encode_frame_auto_js_with(&rich, &pcm, 0, &mut state).expect("js 384k");
+        let emitted = FrameHeader::parse(&bytes).expect("emitted header");
+        assert_eq!(
+            emitted.mode,
+            Mode::Stereo,
+            "at 384 kbit/s the tone's demand fits full stereo"
+        );
+        let decoded = decode_frame(&bytes).expect("decode 384k");
+        assert_eq!(decoded.pcm.len(), 2);
+
+        let tight = canonical_stereo_header(); // 192 kbit/s
+        let mut state = EncodeFrameState::new();
+        let bytes = encode_frame_auto_js_with(&tight, &pcm, 0, &mut state).expect("js 192k");
+        let emitted = FrameHeader::parse(&bytes).expect("emitted header");
+        assert_eq!(
+            emitted.mode,
+            Mode::JointStereo,
+            "at 192 kbit/s the demand overshoots and intensity coding kicks in"
+        );
+        let decoded = decode_frame(&bytes).expect("decode 192k");
+        assert_eq!(decoded.pcm.len(), 2);
     }
 }

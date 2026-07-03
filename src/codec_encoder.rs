@@ -57,7 +57,10 @@ use oxideav_core::{
 
 use crate::bitalloc::select_table;
 use crate::codec_decoder::{CODEC_ID_STR, WAVE_FORMAT_MPEG};
-use crate::encoder_frame::{encode_frame_auto_model2, encode_frame_auto_with, EncodeFrameState};
+use crate::encoder_frame::{
+    encode_frame_auto_js_model2, encode_frame_auto_js_with, encode_frame_auto_model2,
+    encode_frame_auto_with, EncodeFrameState,
+};
 use crate::frame::PCM_SAMPLES_PER_CHANNEL;
 use crate::header::{
     is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, Mode, ModeExtension, PaddingScheduler,
@@ -136,17 +139,31 @@ fn mode_for_channels(channels: u16, mode_opt: Option<&str>) -> Result<Mode> {
     }
 }
 
-/// Parse the `mode_extension` (joint-stereo intensity bound) codec
-/// option. Only meaningful when `mode == JointStereo`; `"4" / "8" / "12"
-/// / "16"` map to the four §2.4.2.3 bounds, default `Bound4`.
-fn mode_extension_opt(s: Option<&str>) -> Result<ModeExtension> {
+/// The joint-stereo intensity-bound policy selected by the `bound`
+/// codec option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundChoice {
+    /// A fixed §2.4.2.3 `mode_extension` bound for every frame.
+    Fixed(ModeExtension),
+    /// Annex G.1 demand-driven per-frame selection: full `Stereo` when
+    /// the frame's required bits fit the budget, else the widest
+    /// `JointStereo` bound that fits (16 / 12 / 8 / 4).
+    Auto,
+}
+
+/// Parse the `bound` (joint-stereo intensity bound) codec option. Only
+/// meaningful when `mode == JointStereo`; `"4" / "8" / "12" / "16"`
+/// map to the four §2.4.2.3 bounds (default `Bound4`), and `"auto"`
+/// selects the Annex G.1 demand-driven per-frame policy.
+fn mode_extension_opt(s: Option<&str>) -> Result<BoundChoice> {
     match s {
-        None | Some("4") => Ok(ModeExtension::Bound4),
-        Some("8") => Ok(ModeExtension::Bound8),
-        Some("12") => Ok(ModeExtension::Bound12),
-        Some("16") => Ok(ModeExtension::Bound16),
+        None | Some("4") => Ok(BoundChoice::Fixed(ModeExtension::Bound4)),
+        Some("8") => Ok(BoundChoice::Fixed(ModeExtension::Bound8)),
+        Some("12") => Ok(BoundChoice::Fixed(ModeExtension::Bound12)),
+        Some("16") => Ok(BoundChoice::Fixed(ModeExtension::Bound16)),
+        Some("auto") => Ok(BoundChoice::Auto),
         Some(other) => Err(Error::invalid(format!(
-            "oxideav-mp2: bound={other:?} not a valid intensity bound (4 / 8 / 12 / 16)"
+            "oxideav-mp2: bound={other:?} not a valid intensity bound (4 / 8 / 12 / 16 / auto)"
         ))),
     }
 }
@@ -272,7 +289,10 @@ fn build_header(
 ///   independent mono programmes). Ignored / must be `"single_channel"`
 ///   for 1 channel.
 /// * `bound` — for `joint_stereo`: the §2.4.2.3 intensity bound,
-///   `"4"` (default) / `"8"` / `"12"` / `"16"`.
+///   `"4"` (default) / `"8"` / `"12"` / `"16"`, or `"auto"` for the
+///   Annex G.1 demand-driven per-frame policy (each frame is emitted
+///   as full `Stereo` when its required bits fit the budget, else as
+///   `JointStereo` with the widest intensity bound that fits).
 /// * `psymodel` — which Annex D model drives the auto-SMR allocation:
 ///   `"model1"` (§D.1, default) or `"model2"` (§D.2).
 /// * `freeformat` — `"true"` / `"1"` emits §2.4.2.3 free-format frames
@@ -296,10 +316,24 @@ fn build_header(
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let channels = params.channels.unwrap_or(2);
     let mode = mode_for_channels(channels, params.options.get("mode"))?;
-    let mode_extension = mode_extension_opt(params.options.get("bound"))?;
+    let bound_choice = mode_extension_opt(params.options.get("bound"))?;
     let psymodel = psymodel_opt(params.options.get("psymodel"))?;
     let freeformat = freeformat_opt(params.options.get("freeformat"))?;
     let crc = crc_opt(params.options.get("crc"))?;
+
+    // The Annex G.1 demand-driven policy needs a two-channel joint
+    // stream to select over (Stereo vs the four intensity bounds).
+    let (mode_extension, auto_bound) = match bound_choice {
+        BoundChoice::Fixed(ext) => (ext, false),
+        BoundChoice::Auto => {
+            if mode != Mode::JointStereo {
+                return Err(Error::invalid(
+                    "oxideav-mp2: bound=auto requires mode=joint_stereo",
+                ));
+            }
+            (ModeExtension::Bound4, true)
+        }
+    };
 
     let Some(sample_rate) = params.sample_rate else {
         return Err(Error::invalid(
@@ -331,6 +365,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         header,
         psymodel,
         freeformat,
+        auto_bound,
     )))
 }
 
@@ -363,6 +398,11 @@ pub struct Mp2CoreEncoder {
     /// (44,1 / 22,05 kHz) so the emitted stream's mean bitrate matches
     /// the signalled value.
     padding: PaddingScheduler,
+    /// Annex G.1 demand-driven per-frame stereo-coding selection
+    /// (`bound=auto`): each frame is emitted as full `Stereo` when its
+    /// required bits fit the budget, else as `JointStereo` with the
+    /// widest intensity bound that fits.
+    auto_bound: bool,
     enc_state: EncodeFrameState,
     pending_pcm: Vec<Vec<f64>>,
     pending_packets: VecDeque<Packet>,
@@ -392,6 +432,7 @@ impl Mp2CoreEncoder {
         header: FrameHeader,
         psymodel: PsyModel,
         freeformat: bool,
+        auto_bound: bool,
     ) -> Self {
         let channels = header.channels();
         Self {
@@ -401,6 +442,7 @@ impl Mp2CoreEncoder {
             channels,
             psymodel,
             freeformat,
+            auto_bound,
             padding: PaddingScheduler::new(),
             enc_state: EncodeFrameState::new(),
             pending_pcm: vec![Vec::new(); channels],
@@ -441,12 +483,19 @@ impl Mp2CoreEncoder {
         // `N+1`-slot frames so the mean bitrate matches the signalled
         // value; everywhere else it never fires.
         let frame_header = self.padding.next_header(&self.header);
-        let mut bytes = match self.psymodel {
-            PsyModel::Model1 => {
+        let mut bytes = match (self.psymodel, self.auto_bound) {
+            (PsyModel::Model1, false) => {
                 encode_frame_auto_with(&frame_header, &frame_pcm, 0, &mut self.enc_state)
             }
-            PsyModel::Model2 => {
+            (PsyModel::Model2, false) => {
                 encode_frame_auto_model2(&frame_header, &frame_pcm, 0, &mut self.enc_state)
+            }
+            // Annex G.1 demand-driven per-frame stereo-coding choice.
+            (PsyModel::Model1, true) => {
+                encode_frame_auto_js_with(&frame_header, &frame_pcm, 0, &mut self.enc_state)
+            }
+            (PsyModel::Model2, true) => {
+                encode_frame_auto_js_model2(&frame_header, &frame_pcm, 0, &mut self.enc_state)
             }
         }
         .map_err(|e| Error::other(format!("oxideav-mp2: encode_frame: {e}")))?;
@@ -1051,6 +1100,61 @@ mod tests {
         let mut bad = params(48_000, 2, Some(192_000));
         bad.options.insert("crc", "always");
         assert!(make_encoder(&bad).is_err());
+    }
+
+    #[test]
+    fn bound_auto_selects_per_frame_and_round_trips() {
+        // bound=auto (with mode=joint_stereo) drives the Annex G.1
+        // demand-driven per-frame policy. At a generous 384 kbit/s a
+        // modest tone fits full Stereo, so the emitted packets carry
+        // mode Stereo; the stream still decodes cleanly.
+        let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+        let mut p = params(44_100, 2, Some(384_000));
+        p.options.insert("mode", "joint_stereo");
+        p.options.insert("bound", "auto");
+        let mut enc = make_encoder(&p).unwrap();
+        let data: Vec<Vec<u8>> = (0..2).map(|_| tone_plane(n, 900.0, 44_100, 0.3)).collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+
+        let mut stream = Vec::new();
+        let mut modes = Vec::new();
+        loop {
+            match enc.receive_packet() {
+                Ok(pk) => {
+                    modes.push(crate::FrameHeader::parse(&pk.data).unwrap().mode);
+                    stream.extend_from_slice(&pk.data);
+                }
+                Err(Error::Eof) => break,
+                Err(e) => panic!("receive_packet: {e:?}"),
+            }
+        }
+        assert_eq!(modes.len(), 4);
+        assert!(
+            modes.iter().all(|&m| m == Mode::Stereo),
+            "384 kbit/s tone fits full Stereo per frame (got {modes:?})"
+        );
+        let planes = decode_all_frames(&stream).expect("decode auto-bound stream");
+        assert_eq!(planes[0].len(), n);
+    }
+
+    #[test]
+    fn bound_auto_requires_joint_stereo_mode() {
+        // Without mode=joint_stereo the auto policy has nothing to
+        // select over — rejected at build time.
+        let mut p = params(44_100, 2, Some(192_000));
+        p.options.insert("bound", "auto");
+        assert!(make_encoder(&p).is_err());
+
+        let mut p2 = params(44_100, 2, Some(192_000));
+        p2.options.insert("mode", "dual_channel");
+        p2.options.insert("bound", "auto");
+        assert!(make_encoder(&p2).is_err());
     }
 
     /// Goertzel single-bin power estimate (test-local copy).

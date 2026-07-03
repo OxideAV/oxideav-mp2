@@ -35,6 +35,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
   bit-identical PCM ("Padding may also be required in free format").
 
+- **Annex G.1 demand-driven automatic joint-stereo selection
+  (`src/encoder_bit_allocator.rs` / `src/encoder_frame.rs` /
+  `src/codec_encoder.rs`)**. Implements the Annex G.1 encoder flow —
+  "an estimation is made of the required bitrate for both left and
+  right channel. If the required bitrate exceeds the available bitrate,
+  the required bitrate can be decreased by setting a number of subbands
+  to intensity stereo mode" — as a per-frame coding-mode policy. New
+  allocator primitives: `demand_bits` (the §C.1.5.2.7 cost of bringing
+  every slot to `MNR ≥ 0` — merged intensity slots pay one shared
+  codeword sized against the more demanding channel per G.1's
+  "higher of the bit allocations", plus both channels' scalefactor
+  overhead) and `available_data_bits` (the `adb` identity). New
+  `choose_stereo_coding` walks full `Stereo` → `JointStereo`
+  Bound16/12/8/4 and returns the widest candidate whose demand fits
+  (Bound4 as the final fallback), preserving every other header field.
+  New encode entry points `encode_frame_auto_js_with` /
+  `encode_frame_auto_js_model2` / `encode_all_frames_js` apply the
+  choice after the psychoacoustic model resolves each frame's SMR (the
+  filterbank/SMR are mode-independent, so the substitution is safe),
+  legally mixing `Stereo` and `JointStereo` frames in one stream
+  (§2.4.1.3 — each frame carries its own `mode`). The registry
+  encoder's `bound` option gains an `"auto"` value (requires
+  `mode=joint_stereo`; works with both `psymodel`s). Tests: demand
+  exactness on a one-hot table walk, zero demand at non-positive SMR,
+  monotone non-increase as the bound narrows, the `adb` identity,
+  choice monotonicity over a rising-SMR sweep with the Bound4 fallback,
+  single-channel pass-through, a same-tone 384 kbit/s → `Stereo` vs
+  192 kbit/s → `JointStereo` frame pin, a batch tone-comb stream that
+  intensity-codes every frame at 96 kbit/s and full-stereo-codes at
+  384 kbit/s (mode-mixed streams decode cleanly), and registry
+  `bound=auto` acceptance/rejection wiring.
+
 - **§C.1.5.2.7 merged-slot sample cost counted once
   (`src/encoder_bit_allocator.rs`)** *(Fixed)*. The allocator charged
   the joint-stereo merged slot's marginal sample bits **twice**

@@ -280,12 +280,14 @@ pub use crc::{
     INIT_STATE as CRC_INIT_STATE,
 };
 pub use encoder_bit_allocator::{
-    allocate_bits, fixed_bit_budget, sample_bits_for, snr_db, BitAllocError, FixedBitBudget,
-    SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT, WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
+    allocate_bits, available_data_bits, demand_bits, fixed_bit_budget, sample_bits_for, snr_db,
+    BitAllocError, FixedBitBudget, SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT,
+    WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
 pub use encoder_frame::{
-    encode_all_frames, encode_all_frames_model2, encode_all_frames_with_smr, encode_frame,
-    encode_frame_auto, encode_frame_auto_model2, encode_frame_auto_with, encode_frame_with,
+    choose_stereo_coding, encode_all_frames, encode_all_frames_js, encode_all_frames_model2,
+    encode_all_frames_with_smr, encode_frame, encode_frame_auto, encode_frame_auto_js_model2,
+    encode_frame_auto_js_with, encode_frame_auto_model2, encode_frame_auto_with, encode_frame_with,
     encode_frame_with_ancillary, encode_frame_with_state_and_ancillary, EncodeError,
     EncodeFrameState,
 };
