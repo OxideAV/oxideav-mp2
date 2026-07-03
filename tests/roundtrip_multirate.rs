@@ -40,7 +40,19 @@
 //! Table). No third-party MP2 implementation source was consulted.
 
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
-use oxideav_mp2::{decode_all_frames, encode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{
+    decode_all_frames, encode_all_frames, FrameHeader, PaddingScheduler, PCM_SAMPLES_PER_CHANNEL,
+};
+
+/// Total byte length of an `n_frames` stream under the §2.4.2.3 padding
+/// schedule the batch encoder drives (per-frame `N` / `N+1` slots at
+/// the fractional 44,1 / 22,05 kHz rates; constant `N` elsewhere).
+fn scheduled_stream_len(header: &FrameHeader, n_frames: usize) -> usize {
+    let mut s = PaddingScheduler::new();
+    (0..n_frames)
+        .map(|_| s.next_header(header).frame_size_bytes())
+        .sum()
+}
 
 /// (is_lsf, sample_rate_hz, total_bitrate_bps) — one entry per Layer II
 /// sampling rate. The bitrates are picked comfortably above the
@@ -128,10 +140,11 @@ fn encode_decode_round_trips_a_tone_at_every_layer2_rate() {
 
         let bytes = encode_all_frames(&header, &stream, 0)
             .unwrap_or_else(|e| panic!("encode at {sample_rate} Hz (lsf={lsf}): {e:?}"));
-        // Each frame is exactly frame_size_bytes() long.
+        // Each frame is exactly frame_size_bytes() long, with the
+        // §2.4.2.3 padded frames one slot larger.
         assert_eq!(
             bytes.len(),
-            n_frames * header.frame_size_bytes(),
+            scheduled_stream_len(&header, n_frames),
             "byte length at {sample_rate} Hz"
         );
 

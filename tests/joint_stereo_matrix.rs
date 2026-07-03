@@ -51,9 +51,21 @@
 use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
 use oxideav_mp2::frame::{decode_frame, FrameError};
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
-use oxideav_mp2::{decode_all_frames, encode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{
+    decode_all_frames, encode_all_frames, FrameHeader, PaddingScheduler, PCM_SAMPLES_PER_CHANNEL,
+};
 
 use oxideav_core::bits::BitReader;
+
+/// Total byte length of an `n_frames` stream under the §2.4.2.3 padding
+/// schedule the batch encoder drives (per-frame `N` / `N+1` slots at
+/// the fractional 44,1 / 22,05 kHz rates; constant `N` elsewhere).
+fn scheduled_stream_len(header: &FrameHeader, n_frames: usize) -> usize {
+    let mut s = PaddingScheduler::new();
+    (0..n_frames)
+        .map(|_| s.next_header(header).frame_size_bytes())
+        .sum()
+}
 
 /// Combined §C.1.3 analysis + §2.4.3.2 synthesis filterbank group
 /// delay for Layer II, in samples (matches `roundtrip_multirate.rs`).
@@ -191,10 +203,11 @@ fn joint_stereo_round_trips_at_every_bound_and_rate() {
             let bytes = encode_all_frames(&h, &stream, 0)
                 .unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
             // A desync in the intensity region would change the byte
-            // count: the frame must be exactly n_frames whole frames.
+            // count: the frame must be exactly n_frames whole frames
+            // (§2.4.2.3 padded frames one slot larger).
             assert_eq!(
                 bytes.len(),
-                n_frames * h.frame_size_bytes(),
+                scheduled_stream_len(&h, n_frames),
                 "{label}: encoded byte length"
             );
 
@@ -381,7 +394,7 @@ fn dual_channel_reconstructs_two_independent_tones() {
             encode_all_frames(&h, &stream, 0).unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
         assert_eq!(
             bytes.len(),
-            n_frames * h.frame_size_bytes(),
+            scheduled_stream_len(&h, n_frames),
             "{label}: encoded byte length"
         );
 

@@ -745,6 +745,113 @@ pub fn encode_sampling_frequency_lsf(sample_rate: u32) -> Result<u8, HeaderError
     }
 }
 
+/// §2.4.2.3 padding-bit scheduler — the frame-by-frame rate-control
+/// accumulator that decides which frames of a constant-bitrate Layer II
+/// stream carry the one-slot padding byte.
+///
+/// The `padding_bit` semantic (§2.4.2.3): "If this bit equals '1', the
+/// frame contains an additional slot to adjust the mean bitrate to the
+/// sampling frequency […]. Padding is necessary with a sampling
+/// frequency of 44,1 kHz." The spec pins the target with an
+/// accumulated-length invariant — after any number of frames the total
+/// coded length must not deviate more than **(+0, −1 slot)** from
+/// `Σ 1152 · bitrate / (8 · sampling_frequency)` bytes (equivalently
+/// `144·bitrate/Fs` exact bytes per frame) — and gives this decision
+/// procedure verbatim:
+///
+/// ```text
+/// for 1st audio frame:            rest = 0; padding = no;
+/// for each subsequent audio frame:
+///     dif  = (144 * bitrate) % sampling_frequency;   // Layer II
+///     rest = rest - dif;
+///     if (rest < 0) { padding = yes; rest = rest + sampling_frequency; }
+///     else            padding = no;
+/// ```
+///
+/// At rates where `144·bitrate` divides evenly (`dif == 0` — every
+/// Layer II ladder bitrate at 32 / 48 / 16 / 24 kHz) the scheduler
+/// never pads and every frame keeps the base size. At 44,1 kHz and
+/// 22,05 kHz `dif != 0` for every ladder bitrate, so padded
+/// (`N+1`-slot) and unpadded (`N`-slot) frames interleave to hold the
+/// long-run mean at the signalled bitrate. Because the first frame is
+/// forced unpadded, the verbatim procedure's running deviation from
+/// the exact accumulated length spans `(−1, +1 − dif/Fs)` slots —
+/// always strictly within one slot.
+///
+/// One scheduler instance tracks one logical stream; call
+/// [`PaddingScheduler::reset`] on seek / stream restart. The batch
+/// [`crate::encode_all_frames`] family and the registry
+/// [`crate::codec_encoder::Mp2CoreEncoder`] drive one internally.
+#[derive(Debug, Clone)]
+pub struct PaddingScheduler {
+    /// `true` until the first [`Self::next`] call — the spec's "for 1st
+    /// audio frame: rest = 0; padding = no" arm.
+    fresh: bool,
+    /// The spec's `rest` accumulator. Always in `0..sampling_frequency`
+    /// after a call.
+    rest: i64,
+}
+
+impl Default for PaddingScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PaddingScheduler {
+    /// A scheduler positioned before the first frame of a stream.
+    #[must_use]
+    pub fn new() -> Self {
+        PaddingScheduler {
+            fresh: true,
+            rest: 0,
+        }
+    }
+
+    /// Re-arm for a new stream (identical to a fresh
+    /// [`PaddingScheduler::new`]).
+    pub fn reset(&mut self) {
+        self.fresh = true;
+        self.rest = 0;
+    }
+
+    /// Decide the §2.4.2.3 `padding_bit` for the next frame of a
+    /// Layer II stream at `bit_rate` bit/s and `sample_rate` Hz.
+    ///
+    /// Free-format streams (§2.4.2.3 "Padding may also be required in
+    /// free format") use the constant *actual* bitrate in place of
+    /// `bit_rate`.
+    pub fn next(&mut self, bit_rate: u32, sample_rate: u32) -> bool {
+        if sample_rate == 0 {
+            return false; // degenerate guard; a real header never has 0.
+        }
+        if self.fresh {
+            // "for 1st audio frame: rest = 0; padding = no;"
+            self.fresh = false;
+            self.rest = 0;
+            return false;
+        }
+        let dif = (144 * i64::from(bit_rate)) % i64::from(sample_rate);
+        self.rest -= dif;
+        if self.rest < 0 {
+            self.rest += i64::from(sample_rate);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Convenience: clone `base` with its `padding` field set per the
+    /// scheduler's decision for the next frame (using `base`'s own
+    /// bitrate and sampling frequency).
+    #[must_use]
+    pub fn next_header(&mut self, base: &FrameHeader) -> FrameHeader {
+        let mut h = *base;
+        h.padding = self.next(base.bit_rate, base.sample_rate);
+        h
+    }
+}
+
 /// Search `buf` for the §2.4.3.1 12-bit syncword on byte boundaries.
 /// Returns the byte offset of the first sync, or `None`.
 pub fn find_sync(buf: &[u8]) -> Option<usize> {
@@ -1359,5 +1466,126 @@ mod tests {
                 assert_eq!(h.frame_size_bytes(), want);
             }
         }
+    }
+
+    // ---- §2.4.2.3 PaddingScheduler ----
+
+    #[test]
+    fn padding_scheduler_first_frame_never_pads() {
+        // "for 1st audio frame: rest = 0; padding = no;" — at every
+        // Layer II rate, including the 44,1 kHz family that pads almost
+        // every subsequent frame.
+        for (br, fs) in [
+            (128_000, 44_100),
+            (192_000, 44_100),
+            (64_000, 22_050),
+            (192_000, 48_000),
+            (96_000, 32_000),
+        ] {
+            let mut s = PaddingScheduler::new();
+            assert!(!s.next(br, fs), "first frame at {br} bit/s / {fs} Hz");
+        }
+    }
+
+    #[test]
+    fn padding_scheduler_never_pads_when_dif_is_zero() {
+        // 144·bitrate divides evenly at 32 / 48 kHz (MPEG-1) and
+        // 16 / 24 kHz (LSF) for every ladder bitrate → dif == 0 → the
+        // spec algorithm never sets padding.
+        for fs in [32_000u32, 48_000, 16_000, 24_000] {
+            for br in [32_000u32, 64_000, 96_000, 128_000, 192_000] {
+                assert_eq!((144 * u64::from(br)) % u64::from(fs), 0);
+                let mut s = PaddingScheduler::new();
+                for f in 0..1000 {
+                    assert!(!s.next(br, fs), "frame {f} at {br} bit/s / {fs} Hz");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn padding_scheduler_accumulated_length_invariant_at_fractional_rates() {
+        // §2.4.2.3 aims the accumulated coded length at
+        // `Σ frame_size · bitrate / Fs` (the exact per-frame byte length
+        // is 144·bitrate/Fs = 1152·bitrate/(8·Fs)) within about one
+        // slot. The spec's own verbatim decision procedure forces the
+        // first frame unpadded and corrects afterwards, so the running
+        // deviation spans `(−1, +1 − dif/Fs)` slots — strictly within
+        // ±1 slot at every frame boundary, which is what we pin here
+        // across a long run.
+        for (br, fs) in [
+            (128_000u32, 44_100u32),
+            (192_000, 44_100),
+            (32_000, 44_100),
+            (384_000, 44_100),
+            (64_000, 22_050),
+            (8_000, 22_050),
+            (160_000, 22_050),
+        ] {
+            let mut s = PaddingScheduler::new();
+            let base = (144 * u64::from(br) / u64::from(fs)) as f64;
+            let exact_per_frame = 144.0 * f64::from(br) / f64::from(fs);
+            let mut actual = 0.0f64;
+            let mut exact = 0.0f64;
+            let mut padded_frames = 0usize;
+            for f in 0..2000 {
+                let pad = s.next(br, fs);
+                actual += base + if pad { 1.0 } else { 0.0 };
+                exact += exact_per_frame;
+                padded_frames += usize::from(pad);
+                let dev = actual - exact;
+                assert!(
+                    dev.abs() < 1.0,
+                    "accumulated deviation {dev} reaches a whole slot at \
+                     frame {f} ({br} bit/s / {fs} Hz)"
+                );
+            }
+            // The fractional rates genuinely pad (otherwise this test
+            // would vacuously pass on an always-false scheduler).
+            assert!(
+                padded_frames > 0,
+                "no padded frames in 2000 at {br} bit/s / {fs} Hz"
+            );
+        }
+    }
+
+    #[test]
+    fn padding_scheduler_reset_replays_the_same_schedule() {
+        let mut a = PaddingScheduler::new();
+        let first: Vec<bool> = (0..100).map(|_| a.next(192_000, 44_100)).collect();
+        a.reset();
+        let second: Vec<bool> = (0..100).map(|_| a.next(192_000, 44_100)).collect();
+        assert_eq!(first, second, "reset() restarts the §2.4.2.3 schedule");
+        assert!(!first[0], "first frame unpadded");
+        assert!(first.iter().any(|&p| p), "44,1 kHz schedule pads");
+    }
+
+    #[test]
+    fn padding_scheduler_next_header_sets_only_the_padding_field() {
+        let base = FrameHeader {
+            lsf: false,
+            bit_rate: 192_000,
+            sample_rate: 44_100,
+            padding: false,
+            private_bit: false,
+            mode: Mode::Stereo,
+            mode_extension: ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: Emphasis::None,
+            protection_bit: true,
+        };
+        let mut s = PaddingScheduler::new();
+        let h0 = s.next_header(&base);
+        let h1 = s.next_header(&base);
+        assert!(!h0.padding, "first frame unpadded");
+        assert!(h1.padding, "44,1 kHz second frame pads (dif > rest)");
+        for h in [&h0, &h1] {
+            assert_eq!(h.bit_rate, base.bit_rate);
+            assert_eq!(h.sample_rate, base.sample_rate);
+            assert_eq!(h.mode, base.mode);
+            assert_eq!(h.protection_bit, base.protection_bit);
+        }
+        assert_eq!(h1.frame_size_bytes(), h0.frame_size_bytes() + 1);
     }
 }

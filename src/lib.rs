@@ -311,7 +311,7 @@ pub use header::{
     decode_bitrate, decode_bitrate_lsf, decode_sampling_frequency, decode_sampling_frequency_lsf,
     encode_bitrate, encode_bitrate_lsf, encode_sampling_frequency, encode_sampling_frequency_lsf,
     find_sync, is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, HeaderError, Mode,
-    ModeExtension, SYNCWORD,
+    ModeExtension, PaddingScheduler, SYNCWORD,
 };
 pub use psy::{
     annex_d_sampling_rate, complex_spectrum_polar_layer2, compute_smr_model1_frame,

@@ -47,8 +47,18 @@
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{
     decode_all_frames, encode_all_frames_model2, encode_frame_auto_model2, EncodeFrameState,
-    FrameHeader, PCM_SAMPLES_PER_CHANNEL,
+    FrameHeader, PaddingScheduler, PCM_SAMPLES_PER_CHANNEL,
 };
+
+/// Total byte length of an `n_frames` stream under the §2.4.2.3 padding
+/// schedule the batch encoder drives (per-frame `N` / `N+1` slots at
+/// the fractional 44,1 / 22,05 kHz rates; constant `N` elsewhere).
+fn scheduled_stream_len(header: &FrameHeader, n_frames: usize) -> usize {
+    let mut s = PaddingScheduler::new();
+    (0..n_frames)
+        .map(|_| s.next_header(header).frame_size_bytes())
+        .sum()
+}
 
 /// (is_lsf, sample_rate_hz, total_bitrate_bps). Model-2 perceptual
 /// curves are tabulated only for the three MPEG-1 rates; the LSF rates
@@ -127,7 +137,7 @@ fn model2_encode_decode_round_trips_a_tone_at_every_layer2_rate() {
             .unwrap_or_else(|e| panic!("model2 encode at {sample_rate} Hz (lsf={lsf}): {e:?}"));
         assert_eq!(
             bytes.len(),
-            n_frames * header.frame_size_bytes(),
+            scheduled_stream_len(&header, n_frames),
             "byte length at {sample_rate} Hz"
         );
 
@@ -214,16 +224,19 @@ fn model2_batch_matches_hand_rolled_stateful_loop() {
 
         let batch = encode_all_frames_model2(&header, &stream, 0).expect("batch model2");
 
-        // Hand-rolled: one shared state, frame by frame.
+        // Hand-rolled: one shared state, frame by frame, with the same
+        // §2.4.2.3 padding schedule the batch path drives.
         let mut state = EncodeFrameState::new();
+        let mut padding = PaddingScheduler::new();
         let mut manual = Vec::new();
         for f in 0..n_frames {
+            let frame_header = padding.next_header(&header);
             let base = f * PCM_SAMPLES_PER_CHANNEL;
             let frame_pcm: Vec<Vec<f64>> = stream
                 .iter()
                 .map(|plane| plane[base..base + PCM_SAMPLES_PER_CHANNEL].to_vec())
                 .collect();
-            let bytes = encode_frame_auto_model2(&header, &frame_pcm, 0, &mut state)
+            let bytes = encode_frame_auto_model2(&frame_header, &frame_pcm, 0, &mut state)
                 .expect("manual model2 frame");
             manual.extend_from_slice(&bytes);
         }
@@ -260,11 +273,23 @@ fn model2_predictor_state_makes_later_frames_diverge_from_a_fresh_state() {
     let stream = vec![sweep.clone(), sweep];
 
     // Continuation: encode all frames through one state, keep frame 3.
+    // Frame sizes vary under the §2.4.2.3 44,1 kHz padding schedule, so
+    // locate the last frame by walking the schedule.
     let continued = encode_all_frames_model2(&header, &stream, 0).expect("continued");
-    let frame_len = header.frame_size_bytes();
-    let last_continued = &continued[(n_frames - 1) * frame_len..n_frames * frame_len];
+    let last_start = scheduled_stream_len(&header, n_frames - 1);
+    let last_end = scheduled_stream_len(&header, n_frames);
+    let last_continued = &continued[last_start..last_end];
 
-    // Fresh: encode ONLY the last frame's PCM from a zeroed state.
+    // Fresh: encode ONLY the last frame's PCM from a zeroed state —
+    // with the SAME per-frame padded header the schedule gave frame 3,
+    // so the byte-divergence below can only come from the predictor
+    // history, never from a frame-size mismatch.
+    let mut sched = PaddingScheduler::new();
+    let mut frame3_header = header;
+    for _ in 0..n_frames {
+        frame3_header = sched.next_header(&header);
+    }
+    assert_eq!(frame3_header.frame_size_bytes(), last_end - last_start);
     let base = (n_frames - 1) * PCM_SAMPLES_PER_CHANNEL;
     let last_pcm: Vec<Vec<f64>> = stream
         .iter()
@@ -272,7 +297,7 @@ fn model2_predictor_state_makes_later_frames_diverge_from_a_fresh_state() {
         .collect();
     let mut fresh_state = EncodeFrameState::new();
     let last_fresh =
-        encode_frame_auto_model2(&header, &last_pcm, 0, &mut fresh_state).expect("fresh");
+        encode_frame_auto_model2(&frame3_header, &last_pcm, 0, &mut fresh_state).expect("fresh");
 
     assert_ne!(
         last_continued,

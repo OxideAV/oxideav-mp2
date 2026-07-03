@@ -8,6 +8,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§2.4.2.3 padding-bit rate control (`PaddingScheduler`,
+  `src/header.rs` / `src/encoder_frame.rs` / `src/codec_encoder.rs`)**.
+  The encoder previously emitted every frame unpadded, so at the
+  fractional rates (44,1 / 22,05 kHz — where `144·bitrate/Fs` is not an
+  integer) the emitted stream undershot the signalled bitrate ("Padding
+  is necessary with a sampling frequency of 44,1 kHz"). The new public
+  `PaddingScheduler` implements the spec's verbatim `rest`/`dif`
+  decision procedure (first frame forced unpadded; thereafter
+  `dif = (144·bitrate) mod Fs`, `rest −= dif`, borrow-and-pad when
+  negative), keeping the accumulated coded length strictly within one
+  slot of the exact `Σ 144·bitrate/Fs` target at every frame boundary.
+  Both the batch `encode_all_frames` family and the registry
+  `Mp2CoreEncoder` now drive one internally, interleaving `N+1`-slot
+  padded frames with `N`-slot frames at 44,1 / 22,05 kHz (at the
+  evenly-dividing rates `dif == 0` and the output is byte-identical to
+  before); a hand-rolled `encode_frame_auto_with` loop reproduces the
+  batch bytes by threading `PaddingScheduler::next_header`. New
+  coverage: scheduler unit tests (first-frame rule, `dif == 0` rates
+  never pad, the sub-slot accumulated-length envelope over 2000 frames,
+  reset replay, `next_header` field hygiene) plus
+  `tests/padding_rate_control.rs` — a frame-walk of the emitted batch
+  stream against the algorithm's prescription, the mean-bitrate
+  envelope, decode symmetry, registry packet sizing, and a **padded
+  free-format** stream (bitrate nibble cleared per frame) resolving
+  through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
+  bit-identical PCM ("Padding may also be required in free format").
+
 - **§2.4.2.3 free-format (`bitrate_index == '0000'`) decode
   (`src/freeformat.rs`, `src/frame.rs`)**. Free-format Layer II streams
   signal no bitrate in the header; the constant frame size is recovered by

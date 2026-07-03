@@ -59,7 +59,9 @@ use crate::bitalloc::select_table;
 use crate::codec_decoder::{CODEC_ID_STR, WAVE_FORMAT_MPEG};
 use crate::encoder_frame::{encode_frame_auto_model2, encode_frame_auto_with, EncodeFrameState};
 use crate::frame::PCM_SAMPLES_PER_CHANNEL;
-use crate::header::{is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, Mode, ModeExtension};
+use crate::header::{
+    is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, Mode, ModeExtension, PaddingScheduler,
+};
 
 /// Which Annex D psychoacoustic model drives the auto-SMR allocation.
 ///
@@ -329,6 +331,11 @@ pub struct Mp2CoreEncoder {
     /// When true, emit §2.4.2.3 free-format frames (bitrate_index '0000')
     /// at the configured constant bitrate.
     freeformat: bool,
+    /// §2.4.2.3 padding-bit rate control (the spec's `rest`/`dif`
+    /// accumulator) — pads frames at the fractional rates
+    /// (44,1 / 22,05 kHz) so the emitted stream's mean bitrate matches
+    /// the signalled value.
+    padding: PaddingScheduler,
     enc_state: EncodeFrameState,
     pending_pcm: Vec<Vec<f64>>,
     pending_packets: VecDeque<Packet>,
@@ -367,6 +374,7 @@ impl Mp2CoreEncoder {
             channels,
             psymodel,
             freeformat,
+            padding: PaddingScheduler::new(),
             enc_state: EncodeFrameState::new(),
             pending_pcm: vec![Vec::new(); channels],
             pending_packets: VecDeque::new(),
@@ -401,12 +409,17 @@ impl Mp2CoreEncoder {
     /// Encode one exactly-1152-sample-per-channel PCM frame and queue
     /// the resulting Layer II packet.
     fn encode_one(&mut self, frame_pcm: Vec<Vec<f64>>) -> Result<()> {
+        // §2.4.2.3 padding-bit rate control: at the fractional rates
+        // (44,1 / 22,05 kHz) the scheduler interleaves padded
+        // `N+1`-slot frames so the mean bitrate matches the signalled
+        // value; everywhere else it never fires.
+        let frame_header = self.padding.next_header(&self.header);
         let mut bytes = match self.psymodel {
             PsyModel::Model1 => {
-                encode_frame_auto_with(&self.header, &frame_pcm, 0, &mut self.enc_state)
+                encode_frame_auto_with(&frame_header, &frame_pcm, 0, &mut self.enc_state)
             }
             PsyModel::Model2 => {
-                encode_frame_auto_model2(&self.header, &frame_pcm, 0, &mut self.enc_state)
+                encode_frame_auto_model2(&frame_header, &frame_pcm, 0, &mut self.enc_state)
             }
         }
         .map_err(|e| Error::other(format!("oxideav-mp2: encode_frame: {e}")))?;
@@ -886,7 +899,10 @@ mod tests {
 
         enc.flush().unwrap();
         let p1 = enc.receive_packet().expect("padded trailing frame");
-        assert_eq!(p1.data.len(), fsz);
+        // 44,1 kHz / 128 kbit/s: dif = (144·128000) mod 44100 = 42300,
+        // so the §2.4.2.3 scheduler pads frame 1 (rest 0 − 42300 < 0) —
+        // one slot larger than the unpadded frame 0.
+        assert_eq!(p1.data.len(), fsz + 1);
         assert_eq!(p1.pts, Some(PCM_SAMPLES_PER_CHANNEL as i64));
         assert!(matches!(enc.receive_packet(), Err(Error::Eof)));
 

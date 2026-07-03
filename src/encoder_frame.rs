@@ -65,7 +65,7 @@ use crate::encoder_samples::{write_triplet_scaled, SampleWriteError};
 use crate::encoder_scalefactors::{compute_scalefactors, SUBBAND_SAMPLES_PER_FRAME};
 use crate::encoder_scfsi::select_scfsi;
 use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME};
-use crate::header::{FrameHeader, HeaderError};
+use crate::header::{FrameHeader, HeaderError, PaddingScheduler};
 use crate::psy::{
     annex_d_sampling_rate, compute_smr_model1_frame, compute_smr_model2_layer2_frame,
     Model2Layer2State, NUM_SUBBANDS_LAYER2,
@@ -628,6 +628,17 @@ pub fn encode_frame_with_state_and_ancillary(
 /// concatenation of every frame's [`encode_frame_auto`] output, ready
 /// to feed straight back into [`crate::frame::decode_all_frames`].
 ///
+/// The §2.4.2.3 **padding bit** is driven per frame by an internal
+/// [`PaddingScheduler`] (the spec's `rest`/`dif` accumulator), so at
+/// the fractional rates (44,1 / 22,05 kHz — "Padding is necessary with
+/// a sampling frequency of 44,1 kHz") padded `N+1`-slot frames
+/// interleave with unpadded ones to hold the stream's mean bitrate at
+/// the signalled value; the caller's `header.padding` field is
+/// overridden. At every other Layer II rate the frame size divides
+/// evenly and no frame is padded. A hand-rolled loop reproduces the
+/// batch output byte-for-byte by threading its own scheduler through
+/// [`PaddingScheduler::next_header`].
+///
 /// `banc` is the per-frame §2.4.1.10 ancillary reservation in bits;
 /// pass `0` for none.
 pub fn encode_all_frames(
@@ -727,22 +738,37 @@ fn encode_all_frames_inner(
 
     let n_frames = n_frames.unwrap_or(0);
     let mut state = EncodeFrameState::new();
-    // Pre-size: each frame is exactly `frame_size_bytes()` long.
-    let mut out = Vec::with_capacity(n_frames * header.frame_size_bytes());
+    // Pre-size: each frame is `frame_size_bytes()` long, +1 slot on the
+    // §2.4.2.3 padded frames.
+    let mut out = Vec::with_capacity(n_frames * (header.frame_size_bytes() + 1));
     let mut frame_pcm: Vec<Vec<f64>> = vec![Vec::with_capacity(PCM_SAMPLES_PER_CHANNEL); channels];
 
+    // §2.4.2.3 padding-bit rate control: the batch path owns the whole
+    // stream, so it drives the spec's rest/dif accumulator itself and
+    // overrides the caller's `header.padding` per frame ("Padding is
+    // necessary with a sampling frequency of 44,1 kHz"). At rates where
+    // `144·bitrate` divides evenly the scheduler never pads and the
+    // caller header is emitted verbatim.
+    let mut padding = PaddingScheduler::new();
+
     for f in 0..n_frames {
+        let frame_header = padding.next_header(header);
         let base = f * PCM_SAMPLES_PER_CHANNEL;
         for (ch, plane) in pcm.iter().enumerate() {
             frame_pcm[ch].clear();
             frame_pcm[ch].extend_from_slice(&plane[base..base + PCM_SAMPLES_PER_CHANNEL]);
         }
         let bytes = match smr {
-            SmrChoice::Auto => {
-                encode_frame_inner(header, &frame_pcm, SmrSource::Auto, banc, &[], &mut state)?
-            }
+            SmrChoice::Auto => encode_frame_inner(
+                &frame_header,
+                &frame_pcm,
+                SmrSource::Auto,
+                banc,
+                &[],
+                &mut state,
+            )?,
             SmrChoice::AutoModel2 => encode_frame_inner(
-                header,
+                &frame_header,
                 &frame_pcm,
                 SmrSource::AutoModel2,
                 banc,
@@ -750,7 +776,7 @@ fn encode_all_frames_inner(
                 &mut state,
             )?,
             SmrChoice::Provided(table) => encode_frame_inner(
-                header,
+                &frame_header,
                 &frame_pcm,
                 SmrSource::Provided(table),
                 banc,
@@ -2023,7 +2049,9 @@ mod tests {
     fn encode_all_frames_equals_a_persistent_encode_frame_auto_loop() {
         // The batch path must be byte-identical to driving
         // `encode_frame_auto_with` with one persistent state — same
-        // §C.1.3 X-buffer continuity, same §D.1 SMR per frame.
+        // §C.1.3 X-buffer continuity, same §D.1 SMR per frame, same
+        // §2.4.2.3 padding schedule (the manual loop threads its own
+        // `PaddingScheduler`, exactly as the batch docs promise).
         let header = canonical_stereo_header();
         let n_frames = 5;
         let stream = tone_stream(2, 1_000.0, 0.5, n_frames);
@@ -2031,15 +2059,19 @@ mod tests {
         let batch = encode_all_frames(&header, &stream, 0).expect("batch encode");
 
         let mut state = EncodeFrameState::new();
+        let mut padding = PaddingScheduler::new();
         let mut manual = Vec::new();
+        let mut expect_len = 0usize;
         for f in 0..n_frames {
+            let frame_header = padding.next_header(&header);
+            expect_len += frame_header.frame_size_bytes();
             let base = f * PCM_SAMPLES_PER_CHANNEL;
             let frame_pcm: Vec<Vec<f64>> = stream
                 .iter()
                 .map(|ch| ch[base..base + PCM_SAMPLES_PER_CHANNEL].to_vec())
                 .collect();
-            let bytes =
-                encode_frame_auto_with(&header, &frame_pcm, 0, &mut state).expect("manual encode");
+            let bytes = encode_frame_auto_with(&frame_header, &frame_pcm, 0, &mut state)
+                .expect("manual encode");
             manual.extend_from_slice(&bytes);
         }
 
@@ -2047,7 +2079,10 @@ mod tests {
             batch, manual,
             "encode_all_frames must equal a persistent encode_frame_auto_with loop"
         );
-        assert_eq!(batch.len(), n_frames * header.frame_size_bytes());
+        assert_eq!(batch.len(), expect_len);
+        // 44,1 kHz genuinely pads: the schedule-driven length exceeds
+        // the all-unpadded length.
+        assert!(batch.len() > n_frames * header.frame_size_bytes());
     }
 
     #[test]
@@ -2060,13 +2095,15 @@ mod tests {
         let batch = encode_all_frames_with_smr(&header, &stream, &smr, 0).expect("batch smr");
 
         let mut state = EncodeFrameState::new();
+        let mut padding = PaddingScheduler::new();
         let mut manual = Vec::new();
         for f in 0..n_frames {
+            let frame_header = padding.next_header(&header);
             let base = f * PCM_SAMPLES_PER_CHANNEL;
             let frame_pcm: Vec<Vec<f64>> =
                 vec![stream[0][base..base + PCM_SAMPLES_PER_CHANNEL].to_vec()];
-            let bytes =
-                encode_frame_with(&header, &frame_pcm, &smr, 0, &mut state).expect("manual smr");
+            let bytes = encode_frame_with(&frame_header, &frame_pcm, &smr, 0, &mut state)
+                .expect("manual smr");
             manual.extend_from_slice(&bytes);
         }
         assert_eq!(batch, manual);
