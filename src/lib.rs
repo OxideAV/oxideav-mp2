@@ -289,7 +289,7 @@ pub use encoder_frame::{
     encode_all_frames_with_smr, encode_frame, encode_frame_auto, encode_frame_auto_js_model2,
     encode_frame_auto_js_with, encode_frame_auto_model2, encode_frame_auto_with, encode_frame_with,
     encode_frame_with_ancillary, encode_frame_with_state_and_ancillary, EncodeError,
-    EncodeFrameState,
+    EncodeFrameState, MODEL1_WINDOW_DELAY_SAMPLES,
 };
 pub use encoder_samples::{
     quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,

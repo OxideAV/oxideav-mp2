@@ -35,6 +35,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
   bit-identical PCM ("Padding may also be required in free format").
 
+- **§D.1 Step-1 delayed analysis window (net 192-sample delay,
+  `src/encoder_frame.rs`)**. The Model-1 auto-SMR chain previously fed
+  the 1024-point FFT with each frame's first 1024 samples; the spec's
+  Step 1 says "for a coincidence in time between the bit allocation and
+  the corresponding subband samples, the PCM-samples entering the FFT
+  have to be delayed" — 256 samples compensating the §C.1.3 analysis
+  filterbank delay (item a) minus 64 for centring the 1024-point window
+  in the 1152-sample Layer II frame (item b). Frame `f`'s window is now
+  `stream[f·1152 − 192 .. f·1152 + 832]`: a per-channel 192-sample
+  history (new `EncodeFrameState` field, zero-filled at stream start
+  and on `reset()`, matching the filterbank's zeroed X buffer) followed
+  by the frame's first 832 samples. New public
+  `MODEL1_WINDOW_DELAY_SAMPLES` constant; the batch and registry
+  Model-1 paths inherit the alignment automatically. Tests pin the
+  256 − 64 = 192 arithmetic against the existing psy constants, the
+  window layout, that the history genuinely reaches the FFT (two states
+  differing only in history produce different SMR tables), the
+  fresh-state zero-padded-head equivalence against a hand-built window
+  through `compute_smr_model1_frame`, and the history advance to the
+  frame tail. This resolves the README's "window shift needs lookahead"
+  refinement note — the spec asks for a *delay*, which needs history,
+  not lookahead.
+
 - **Annex G.1 demand-driven automatic joint-stereo selection
   (`src/encoder_bit_allocator.rs` / `src/encoder_frame.rs` /
   `src/codec_encoder.rs`)**. Implements the Annex G.1 encoder flow —

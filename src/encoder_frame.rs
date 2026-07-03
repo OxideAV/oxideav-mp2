@@ -252,7 +252,26 @@ pub struct EncodeFrameState {
     /// continuous across successive frames, exactly as the §C.1.3
     /// analysis filterbank's X ring buffer is.
     model2: Vec<Model2Layer2State>,
+    /// Per-channel §D.1 Step-1 window-delay history: the previous
+    /// frame's last [`MODEL1_WINDOW_DELAY_SAMPLES`] PCM samples. "For
+    /// a coincidence in time between the bit allocation and the
+    /// corresponding subband samples, the PCM-samples entering the FFT
+    /// have to be delayed": 256 samples for the analysis-filterbank
+    /// delay, minus 64 for centring the 1024-point window in the
+    /// 1152-sample Layer II frame — a net 192-sample delay, so frame
+    /// `f`'s analysis window is `stream[f·1152 − 192 .. f·1152 + 832]`.
+    /// Zero-filled at stream start (consistent with the §C.1.3 zeroed
+    /// X buffer); only the Model-1 auto-SMR path uses it.
+    psy1_history: Vec<Vec<f64>>,
 }
+
+/// The §D.1 Step-1 net Layer II window delay in samples:
+/// [`crate::psy::FFT_DELAY_COMPENSATION_SHIFT_SAMPLES`] (256, item (a))
+/// plus the Layer II
+/// [`crate::psy::LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES`]
+/// (−64, item (b)) — the frame's FFT window starts 192 samples
+/// *before* the frame's first PCM sample.
+pub const MODEL1_WINDOW_DELAY_SAMPLES: usize = 192;
 
 impl EncodeFrameState {
     /// Fresh state with no filterbanks; they are lazily created on
@@ -261,6 +280,7 @@ impl EncodeFrameState {
         EncodeFrameState {
             filterbank: Vec::new(),
             model2: Vec::new(),
+            psy1_history: Vec::new(),
         }
     }
 
@@ -274,6 +294,9 @@ impl EncodeFrameState {
         }
         for m in &mut self.model2 {
             *m = Model2Layer2State::new();
+        }
+        for h in &mut self.psy1_history {
+            h.iter_mut().for_each(|s| *s = 0.0);
         }
     }
 
@@ -289,6 +312,16 @@ impl EncodeFrameState {
     fn ensure_model2_channels(&mut self, channels: usize) {
         while self.model2.len() < channels {
             self.model2.push(Model2Layer2State::new());
+        }
+    }
+
+    /// Lazily grow the per-channel §D.1 window-delay history to
+    /// `channels`, zero-filled. Only the Model-1 auto-SMR path calls
+    /// this.
+    fn ensure_psy1_channels(&mut self, channels: usize) {
+        while self.psy1_history.len() < channels {
+            self.psy1_history
+                .push(vec![0.0; MODEL1_WINDOW_DELAY_SAMPLES]);
         }
     }
 }
@@ -338,16 +371,21 @@ fn compute_auto_smr_table(
     pcm: &[Vec<f64>],
     subband_samples: &[[[f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]],
     channels: usize,
+    state: &mut EncodeFrameState,
 ) -> SmrTable {
     let mut smr: SmrTable = [[0.0; NUM_SUBBANDS]; 2];
 
     // No Annex D Layer II masking tables for the LSF rates: leave the
-    // table flat at 0 dB SMR (rate-driven allocation).
+    // table flat at 0 dB SMR (rate-driven allocation). The §D.1 window
+    // history is not advanced (it carries no useful alignment at an
+    // unmodelled rate; a later switch back restarts from zeros).
     let Some(fs) = annex_d_sampling_rate(header.sample_rate) else {
         return smr;
     };
 
     let bitrate_per_channel_kbps = f64::from(header.bit_rate) / 1000.0 / channels.max(1) as f64;
+
+    state.ensure_psy1_channels(channels);
 
     for ch in 0..channels {
         // §D.1 Step 2 `scf_max(n)` per subband: the largest Table 3-B.1
@@ -362,10 +400,35 @@ fn compute_auto_smr_table(
             scf_max[sb] = SCALEFACTORS[min_idx];
         }
 
-        let ch_smr = compute_smr_model1_frame(&pcm[ch], &scf_max, fs, bitrate_per_channel_kbps);
+        // §D.1 Step 1 window placement: "the PCM-samples entering the
+        // FFT have to be delayed" by the analysis-filterbank delay
+        // (256) minus the Layer II centring shift (64) — the frame's
+        // 1024-point window is `stream[frame_start − 192 ..
+        // frame_start + 832]`, i.e. the previous frame's 192-sample
+        // tail (zeros at stream start) followed by this frame's first
+        // 832 samples.
+        let window = delayed_model1_window(&state.psy1_history[ch], &pcm[ch]);
+        let ch_smr = compute_smr_model1_frame(&window, &scf_max, fs, bitrate_per_channel_kbps);
         smr[ch][..NUM_SUBBANDS].copy_from_slice(&ch_smr[..NUM_SUBBANDS]);
+
+        // Advance the history: this frame's last 192 samples feed the
+        // next frame's window head.
+        let tail_at = pcm[ch].len() - MODEL1_WINDOW_DELAY_SAMPLES;
+        state.psy1_history[ch].copy_from_slice(&pcm[ch][tail_at..]);
     }
     smr
+}
+
+/// Assemble the §D.1 Step-1 Layer II analysis window for one frame:
+/// the previous frame's [`MODEL1_WINDOW_DELAY_SAMPLES`]-sample tail
+/// followed by this frame's first
+/// `LAYER2_FFT_LEN − MODEL1_WINDOW_DELAY_SAMPLES` (= 832) samples.
+fn delayed_model1_window(history: &[f64], pcm: &[f64]) -> Vec<f64> {
+    let head = crate::psy::LAYER2_FFT_LEN - MODEL1_WINDOW_DELAY_SAMPLES;
+    let mut window = Vec::with_capacity(crate::psy::LAYER2_FFT_LEN);
+    window.extend_from_slice(history);
+    window.extend_from_slice(&pcm[..head.min(pcm.len())]);
+    window
 }
 
 /// Derive the per-(channel, sub-band) §D.2 Model-2 SMR table for the
@@ -1030,7 +1093,7 @@ fn encode_frame_inner_impl(
     let smr_db: &SmrTable = match smr_db {
         SmrSource::Provided(table) => table,
         SmrSource::Auto => {
-            owned_smr = compute_auto_smr_table(header, pcm, &subband_samples, channels);
+            owned_smr = compute_auto_smr_table(header, pcm, &subband_samples, channels, state);
             &owned_smr
         }
         SmrSource::AutoModel2 => {
@@ -2576,16 +2639,157 @@ mod tests {
         let decoded = decode_frame(&bytes).expect("decode 384k");
         assert_eq!(decoded.pcm.len(), 2);
 
-        let tight = canonical_stereo_header(); // 192 kbit/s
+        // Tight case: a comb of tones (one per low subband) keeps the
+        // §D.1 demand far above a 96 kbit/s budget regardless of the
+        // window alignment, so intensity coding must kick in.
+        let comb: Vec<f64> = (0..PCM_SAMPLES_PER_CHANNEL)
+            .map(|i| {
+                let t = i as f64 / 44_100.0;
+                (0..12)
+                    .map(|k| {
+                        let f = (k as f64 + 0.5) * (44_100.0 / 64.0);
+                        0.07 * (2.0 * core::f64::consts::PI * f * t).sin()
+                    })
+                    .sum()
+            })
+            .collect();
+        let comb_pcm = vec![comb.clone(), comb];
+        let tight = FrameHeader {
+            bit_rate: 96_000,
+            ..canonical_stereo_header()
+        };
         let mut state = EncodeFrameState::new();
-        let bytes = encode_frame_auto_js_with(&tight, &pcm, 0, &mut state).expect("js 192k");
+        let bytes = encode_frame_auto_js_with(&tight, &comb_pcm, 0, &mut state).expect("js 96k");
         let emitted = FrameHeader::parse(&bytes).expect("emitted header");
         assert_eq!(
             emitted.mode,
             Mode::JointStereo,
-            "at 192 kbit/s the demand overshoots and intensity coding kicks in"
+            "at 96 kbit/s the comb's demand overshoots and intensity coding kicks in"
         );
-        let decoded = decode_frame(&bytes).expect("decode 192k");
+        let decoded = decode_frame(&bytes).expect("decode 96k");
         assert_eq!(decoded.pcm.len(), 2);
+    }
+    // ---- §D.1 Step-1 delayed analysis window ----
+
+    #[test]
+    fn model1_window_delay_matches_the_step1_shift_arithmetic() {
+        // Item (a): 256-sample filterbank-delay compensation; item (b):
+        // −64 for Layer II window centring. Net 192-sample delay.
+        let net = crate::psy::FFT_DELAY_COMPENSATION_SHIFT_SAMPLES as i64
+            + i64::from(crate::psy::LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES);
+        assert_eq!(MODEL1_WINDOW_DELAY_SAMPLES as i64, net);
+    }
+
+    #[test]
+    fn delayed_model1_window_layout_is_history_then_frame_head() {
+        let history: Vec<f64> = (0..MODEL1_WINDOW_DELAY_SAMPLES)
+            .map(|i| 1_000.0 + i as f64)
+            .collect();
+        let pcm: Vec<f64> = (0..PCM_SAMPLES_PER_CHANNEL).map(|i| i as f64).collect();
+        let window = delayed_model1_window(&history, &pcm);
+        assert_eq!(window.len(), crate::psy::LAYER2_FFT_LEN);
+        assert_eq!(&window[..MODEL1_WINDOW_DELAY_SAMPLES], &history[..]);
+        let head = crate::psy::LAYER2_FFT_LEN - MODEL1_WINDOW_DELAY_SAMPLES;
+        assert_eq!(&window[MODEL1_WINDOW_DELAY_SAMPLES..], &pcm[..head]);
+    }
+
+    #[test]
+    fn model1_window_history_influences_the_next_frames_smr() {
+        // Two states that differ ONLY in the §D.1 window history (the
+        // filterbank state is untouched because compute_auto_smr_table
+        // never reads it): the same frame PCM must produce different
+        // SMR tables when the history carries a loud tail vs silence.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(2, 1_000.0, 0.4);
+        let timesteps = SAMPLE_GRANULES_PER_FRAME * SAMPLES_PER_TRIPLET;
+        let mut subband_samples = vec![[[0.0f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]; 2];
+        {
+            // A representative filterbank pass (shared by both runs).
+            let mut state = EncodeFrameState::new();
+            state.ensure_channels(2);
+            let mut in_block = [0.0f64; NUM_SUBBANDS];
+            let mut out_block = [0.0f64; NUM_SUBBANDS];
+            for (ch, channel_pcm) in pcm.iter().enumerate() {
+                let fb = &mut state.filterbank[ch];
+                for t in 0..timesteps {
+                    let base = t * NUM_SUBBANDS;
+                    in_block.copy_from_slice(&channel_pcm[base..base + NUM_SUBBANDS]);
+                    fb.push_audio(&in_block, &mut out_block);
+                    for sb in 0..NUM_SUBBANDS {
+                        subband_samples[ch][sb][t] = out_block[sb];
+                    }
+                }
+            }
+        }
+
+        let mut quiet_state = EncodeFrameState::new();
+        quiet_state.ensure_psy1_channels(2); // zero history
+        let smr_quiet =
+            compute_auto_smr_table(&header, &pcm, &subband_samples, 2, &mut quiet_state);
+
+        let mut loud_state = EncodeFrameState::new();
+        loud_state.ensure_psy1_channels(2);
+        for h in &mut loud_state.psy1_history {
+            for (i, s) in h.iter_mut().enumerate() {
+                // A loud high-frequency alternation in the tail.
+                *s = if i % 2 == 0 { 0.9 } else { -0.9 };
+            }
+        }
+        let smr_loud = compute_auto_smr_table(&header, &pcm, &subband_samples, 2, &mut loud_state);
+
+        assert_ne!(
+            smr_quiet, smr_loud,
+            "the 192-sample §D.1 window history must reach the FFT"
+        );
+    }
+
+    #[test]
+    fn model1_fresh_state_window_is_the_zero_padded_head() {
+        // At stream start the history is zeros, so the auto path must
+        // equal a hand-built [zeros(192) ++ pcm[..832]] window through
+        // compute_smr_model1_frame directly.
+        let header = canonical_stereo_header();
+        let pcm = tone_pcm(1, 1_500.0, 0.5);
+        let timesteps = SAMPLE_GRANULES_PER_FRAME * SAMPLES_PER_TRIPLET;
+        let mut subband_samples = vec![[[0.0f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]; 1];
+        let mut state = EncodeFrameState::new();
+        state.ensure_channels(1);
+        {
+            let mut in_block = [0.0f64; NUM_SUBBANDS];
+            let mut out_block = [0.0f64; NUM_SUBBANDS];
+            let fb = &mut state.filterbank[0];
+            for t in 0..timesteps {
+                let base = t * NUM_SUBBANDS;
+                in_block.copy_from_slice(&pcm[0][base..base + NUM_SUBBANDS]);
+                fb.push_audio(&in_block, &mut out_block);
+                for sb in 0..NUM_SUBBANDS {
+                    subband_samples[0][sb][t] = out_block[sb];
+                }
+            }
+        }
+        let smr = compute_auto_smr_table(&header, &pcm, &subband_samples, 1, &mut state);
+
+        // Hand-built expectation. The 96.0 operand is the bitrate per
+        // channel in kbit/s (192 kbit/s stereo header / 2 channels)...
+        // except this header is used with channels = 1 here, so the
+        // per-channel rate is 192.
+        let sf = compute_scalefactors(&subband_samples[0], NUM_SUBBANDS);
+        let mut scf_max = [0.0f64; NUM_SUBBANDS_LAYER2];
+        for sb in 0..NUM_SUBBANDS_LAYER2 {
+            let min_idx = sf[0][sb].min(sf[1][sb]).min(sf[2][sb]) as usize;
+            scf_max[sb] = SCALEFACTORS[min_idx];
+        }
+        let mut window = vec![0.0f64; MODEL1_WINDOW_DELAY_SAMPLES];
+        window
+            .extend_from_slice(&pcm[0][..crate::psy::LAYER2_FFT_LEN - MODEL1_WINDOW_DELAY_SAMPLES]);
+        let fs = annex_d_sampling_rate(header.sample_rate).unwrap();
+        let expect = compute_smr_model1_frame(&window, &scf_max, fs, 192.0);
+        assert_eq!(&smr[0][..NUM_SUBBANDS], &expect[..NUM_SUBBANDS]);
+
+        // And the history advanced to the frame tail.
+        assert_eq!(
+            &state.psy1_history[0][..],
+            &pcm[0][PCM_SAMPLES_PER_CHANNEL - MODEL1_WINDOW_DELAY_SAMPLES..]
+        );
     }
 }
