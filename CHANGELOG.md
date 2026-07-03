@@ -35,6 +35,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
   bit-identical PCM ("Padding may also be required in free format").
 
+- **§C.1.5.2.7 merged-slot sample cost counted once
+  (`src/encoder_bit_allocator.rs`)** *(Fixed)*. The allocator charged
+  the joint-stereo merged slot's marginal sample bits **twice**
+  (`d_bspl *= 2`) even though §2.4.1.6 puts a *single* shared triplet
+  on the wire for `bound <= sb < sblimit` (§2.4.2.6) — which is exactly
+  what the frame writer emits. The double charge made the allocator
+  stop early, wasting one full copy of the committed above-bound sample
+  bits (≈1600 bits ≈ 32 % of the data budget in a 192 kbit/s Bound4
+  frame) as dead §2.4.1.8 tail instead of spending it on quantization
+  depth. The merged slot now pays the shared codeword once (scalefactor
+  + scfsi overhead still counts both channels, per the syntax). New
+  regression `joint_stereo_allocator_saturates_the_budget_at_single_
+  shared_codeword_cost` re-parses an encoded joint-stereo frame,
+  recomputes the actual on-wire spend, and bounds the leftover by the
+  worst-case-scalefactor slack + one unaffordable step — it fails
+  against the double-charged allocator (1602 bits unused vs the 1336
+  permitted) and passes now.
+
 - **Annex G.1 sum-signal intensity-stereo encode
   (`src/encoder_frame.rs`)**. In the `bound <= sb < sblimit` intensity
   region the shared on-wire codeword is now the Annex G.1 **sum

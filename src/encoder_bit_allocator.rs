@@ -47,10 +47,13 @@
 //! enforces this by treating an above-`bound` sub-band as a single
 //! "merged" (ch, sb) slot: only one MNR is tracked (the worst of the
 //! two channels'), only one step is taken (both channels' `nb_steps`
-//! move together), and the marginal sample-bit cost counts both
-//! channels' codewords. Both channels still record an independent
-//! scalefactor (and may select independent scfsi), so the marginal
-//! scalefactor + scfsi cost still counts both channels.
+//! move together), and the marginal sample-bit cost counts the
+//! **single shared codeword** the §2.4.1.6 syntax puts on the wire
+//! (§2.4.2.6 "the coded representation of the sample is valid for
+//! both channels" — the frame writer emits one Annex G.1 sum-signal
+//! triplet per granule above `bound`). Both channels still record an
+//! independent scalefactor (and may select independent scfsi), so the
+//! marginal scalefactor + scfsi cost counts both channels.
 //!
 //! ## Bit-cost-during-allocation policy
 //!
@@ -100,8 +103,8 @@
 //!   `next` along the row: `Δbspl = (36 / s_next) × bw_next −
 //!   (36 / s_prev) × bw_prev` where `s_x` is `samples_per_codeword`
 //!   (3 for grouped, 1 for ungrouped) and `bw_x` is `bits_per_codeword`
-//!   per Table 3-B.4. For the merged joint-stereo slot, both channels
-//!   contribute, so the increment doubles.
+//!   per Table 3-B.4. The merged joint-stereo slot pays this once —
+//!   one shared codeword is on the wire per §2.4.1.6 / §2.4.2.6.
 //!
 //! No external encoder or decoder source was consulted. The §C.1.5.2.7
 //! procedure is the informative Annex C algorithm; the worst-case
@@ -418,11 +421,13 @@ pub fn allocate_bits(
         let cur_nb = nb_steps[ch][sb];
         let next_nb = nb_steps_at(table, sb, next_row);
 
-        // §C.1.5.2.7 marginal-cost calculation.
-        let mut d_bspl = sample_bits_for(next_nb) as i64 - sample_bits_for(cur_nb) as i64;
-        if merged {
-            d_bspl *= 2; // both channels' codewords advance together.
-        }
+        // §C.1.5.2.7 marginal-cost calculation. For a merged
+        // joint-stereo slot the sample cost is counted ONCE: §2.4.1.6
+        // puts a single shared triplet on the wire for `sb >= bound`
+        // (§2.4.2.6 "the coded representation of the sample is valid
+        // for both channels"), which is exactly what the frame writer
+        // emits (the Annex G.1 sum signal).
+        let d_bspl = sample_bits_for(next_nb) as i64 - sample_bits_for(cur_nb) as i64;
         let mut d_bsel: i64 = 0;
         let mut d_bscf: i64 = 0;
         if cur_nb == 0 && next_nb != 0 {

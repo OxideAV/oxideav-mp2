@@ -1542,6 +1542,85 @@ mod tests {
     }
 
     #[test]
+    fn joint_stereo_allocator_saturates_the_budget_at_single_shared_codeword_cost() {
+        // §2.4.1.6 puts ONE shared sample triplet on the wire per
+        // above-`bound` subband per granule, so the §C.1.5.2.7
+        // allocator must charge the merged slot's sample bits ONCE.
+        // A double-charged merged cost makes the allocator stop one
+        // whole channel's worth of intensity sample bits early,
+        // leaving a §2.4.1.8 tail far larger than the termination rule
+        // ("adb is not less than any possible increase") permits.
+        //
+        // We encode a joint-stereo frame under a demanding flat SMR,
+        // re-parse it, recompute the ACTUAL on-wire audio-data spend
+        // (merged samples counted once), and bound the leftover:
+        // legitimate slack = (worst-case-minus-actual scalefactor
+        // budgeting, ≤ 12 bits per non-zero slot) + (one final
+        // unaffordable step, ≤ 616 bits). The double-charge bug wastes
+        // an extra copy of every committed above-bound sample bit
+        // (thousands of bits here) and fails this bound.
+        let header = FrameHeader {
+            mode: Mode::JointStereo,
+            mode_extension: ModeExtension::Bound4,
+            // No CRC so the §2.4.1.6 audio data starts at byte 4 for
+            // the re-parse below.
+            protection_bit: true,
+            ..canonical_stereo_header()
+        };
+        let smr: SmrTable = [[30.0; NUM_SUBBANDS]; 2];
+        let pcm = tone_pcm(2, 1_000.0, 0.5);
+        let bytes = encode_frame(&header, &pcm, &smr, 0).expect("encode joint-stereo");
+
+        let mut reader = BitReader::with_position(&bytes, 4);
+        let (audio, alloc_bits, scfsi_bits) =
+            parse_audio_data_with_section_bits(&header, &mut reader).expect("re-parse");
+
+        // Actual scalefactor + sample spend from the parsed structure.
+        let scf_count = |s: crate::audio_data::Scfsi| -> u64 {
+            match s {
+                crate::audio_data::Scfsi::ThreePerGranule => 3,
+                crate::audio_data::Scfsi::Share01Then2 => 2,
+                crate::audio_data::Scfsi::Share0Then12 => 2,
+                crate::audio_data::Scfsi::ShareAll => 1,
+            }
+        };
+        let mut scf_bits = 0u64;
+        let mut sample_bits = 0u64;
+        for sb in 0..audio.sblimit {
+            for ch in 0..2 {
+                if audio.nb_steps[ch][sb] == 0 {
+                    continue;
+                }
+                scf_bits += 6 * scf_count(audio.scfsi[ch][sb]);
+                // Below bound each channel carries its own codewords;
+                // above bound ONE shared codeword is on the wire.
+                if sb < audio.bound || ch == 0 {
+                    sample_bits += u64::from(crate::encoder_bit_allocator::sample_bits_for(
+                        audio.nb_steps[ch][sb],
+                    ));
+                }
+            }
+        }
+        let cb = 8 * header.frame_size_bytes() as u64;
+        let spent = 32 + alloc_bits as u64 + scfsi_bits as u64 + scf_bits + sample_bits;
+        assert!(spent <= cb, "on-wire spend must fit the frame");
+        let leftover = cb - spent;
+
+        // Non-zero slots bound the worst-case-scf overshoot.
+        let nonzero_slots = (0..audio.sblimit)
+            .flat_map(|sb| (0..2).map(move |ch| (ch, sb)))
+            .filter(|&(ch, sb)| audio.nb_steps[ch][sb] != 0)
+            .count() as u64;
+        let slack_bound = 12 * nonzero_slots + 616;
+        assert!(
+            leftover <= slack_bound,
+            "allocator left {leftover} bits unused (permitted slack \
+             {slack_bound}); a double-charged merged sample cost wastes \
+             one whole copy of the above-bound sample bits"
+        );
+    }
+
+    #[test]
     fn joint_stereo_above_bound_writes_one_shared_codeword_per_subband() {
         // §2.4.1.6: above `bound` the bitstream carries ONE sample
         // triplet per (sb, gr) — `samplecode[0][sb][gr]` — shared by
