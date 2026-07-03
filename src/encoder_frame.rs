@@ -790,6 +790,15 @@ fn encode_all_frames_inner(
     Ok(out)
 }
 
+/// The Annex G.1 intensity-stereo sum-signal carrier: the boxed
+/// `L + R` subband samples for the `bound..sblimit` region and the
+/// sum's own (untransmitted) per-granule quantization scalefactor
+/// indices, `[granule][sub-band]`.
+type IntensitySum = (
+    Box<[[f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]>,
+    [[u8; NUM_SUBBANDS]; 3],
+);
+
 /// Shared implementation of the four public encode entry points.
 ///
 /// All bit-stream assembly happens here so the §2.4.1.8 ancillary copy
@@ -926,6 +935,39 @@ fn encode_frame_inner(
         }
     }
 
+    // ---- Annex G.1 intensity-stereo sum signal ----
+    //
+    // "The basic idea for intensity stereo coding is that for some
+    // subbands, instead of transmitting separate left and right subband
+    // samples, only the sum-signal is transmitted, but with
+    // scalefactors for both the left and right channels" — and: "The
+    // left and right subband signals of the subbands in joint stereo
+    // mode are added. These new subband signals are scaled in the
+    // normal way, but the originally determined scalefactors of the
+    // left and right subband signals are transmitted according to the
+    // bitstream syntax."
+    //
+    // So for `bound <= sb < sblimit` the on-wire codeword is the
+    // quantized **sum** `L + R`, normalised by the sum signal's own
+    // (untransmitted) scalefactor; each decoder channel then rescales
+    // that shared codeword by its own transmitted scalefactor
+    // (§2.4.3.3.3), reproducing the sum's temporal envelope at each
+    // channel's original level. The sum's amplitude is at most 2,
+    // which Table 3-B.1 index 0 (multiplier 2.0) covers, so the
+    // quantized fraction stays inside the §2.4.3.3.4 domain.
+    let intensity_sum: Option<IntensitySum> = if channels == 2 && audio.bound < audio.sblimit {
+        let mut sum = Box::new([[0.0f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]);
+        for sb in audio.bound..audio.sblimit {
+            for t in 0..SUBBAND_SAMPLES_PER_FRAME {
+                sum[sb][t] = subband_samples[0][sb][t] + subband_samples[1][sb][t];
+            }
+        }
+        let sum_sf = compute_scalefactors(&sum, audio.sblimit);
+        Some((sum, sum_sf))
+    } else {
+        None
+    };
+
     // ---- §2.4.1.3 header bytes ----
     let header_bytes = header.emit_bytes()?;
 
@@ -1002,8 +1044,13 @@ fn encode_frame_inner(
             }
         }
 
-        // Region 2: `bound <= sb < sblimit` — one shared triplet,
-        // sourced from channel 0 (`samplecode[0][sb]`).
+        // Region 2: `bound <= sb < sblimit` — one shared triplet
+        // (`samplecode[0][sb]`), carrying the Annex G.1 **sum signal**
+        // `L + R` normalised by the sum's own (untransmitted)
+        // scalefactor. For a single-channel intensity write (never the
+        // case in practice — `bound < sblimit` only under joint
+        // stereo), `intensity_sum` is `None` and channel 0's samples
+        // stand in.
         for sb in audio.bound..audio.sblimit {
             let nb = audio.nb_steps[0][sb];
             if nb == 0 {
@@ -1014,12 +1061,20 @@ fn encode_frame_inner(
                 sb,
                 nb_steps: nb,
             })?;
-            let sf_idx = audio.scalefactor[0][sb][sf_gr];
-            let triplet = [
-                subband_samples[0][sb][base],
-                subband_samples[0][sb][base + 1],
-                subband_samples[0][sb][base + 2],
-            ];
+            let (sf_idx, triplet) = match &intensity_sum {
+                Some((sum, sum_sf)) => (
+                    sum_sf[sf_gr][sb],
+                    [sum[sb][base], sum[sb][base + 1], sum[sb][base + 2]],
+                ),
+                None => (
+                    audio.scalefactor[0][sb][sf_gr],
+                    [
+                        subband_samples[0][sb][base],
+                        subband_samples[0][sb][base + 1],
+                        subband_samples[0][sb][base + 2],
+                    ],
+                ),
+            };
             write_triplet_scaled(&class, sf_idx, &triplet, &mut writer)?;
         }
     }

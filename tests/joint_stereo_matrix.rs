@@ -727,3 +727,81 @@ fn joint_stereo_reconstructs_per_channel_levels_in_the_intensity_region() {
         );
     }
 }
+
+#[test]
+fn intensity_sum_signal_preserves_right_only_content_above_bound() {
+    // Annex G.1: "for some subbands, instead of transmitting separate
+    // left and right subband samples, only the SUM-signal is
+    // transmitted, but with scalefactors for both the left and right
+    // channels". The decisive consequence: content present ONLY in
+    // channel 1 above the bound must survive the encode — the shared
+    // codeword is `L + R`, not channel 0's samples. An encoder that
+    // wrote channel 0's (near-silent) samples as the shared codeword
+    // would silence channel 1's tone entirely; this test fails against
+    // that implementation and passes against the Annex G.1 sum signal.
+    let n_frames = 10;
+    let amp = 0.5;
+
+    for &(lsf, sample_rate, bit_rate) in WIDE_RATE_MATRIX {
+        // A tone whose subband clears Bound4 (subband ≈ 5), present in
+        // channel 1 ONLY. Channel 0 is silent.
+        let sb_width = sample_rate as f64 / 64.0;
+        let intensity_tone = 5.5 * sb_width;
+
+        let h = header(
+            lsf,
+            sample_rate,
+            bit_rate,
+            Mode::JointStereo,
+            ModeExtension::Bound4,
+        );
+        let label = format!("JS-right-only {sample_rate}Hz");
+
+        let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        let omega = 2.0 * std::f64::consts::PI * intensity_tone / sample_rate as f64;
+        let ch0: Vec<f64> = vec![0.0; total];
+        let ch1: Vec<f64> = (0..total).map(|i| amp * (omega * i as f64).sin()).collect();
+        let stream = vec![ch0, ch1];
+
+        let bytes =
+            encode_all_frames(&h, &stream, 0).unwrap_or_else(|e| panic!("{label}: encode: {e:?}"));
+        let planes = decode_all_frames(&bytes).unwrap_or_else(|e| panic!("{label}: decode: {e:?}"));
+        assert_eq!(planes.len(), 2, "{label}: stereo");
+
+        // Channel 1's tone must survive at close to its original level:
+        // the sum signal is `0 + R = R`, quantized by the sum's own
+        // scalefactor and rescaled on decode by channel 1's transmitted
+        // scalefactor. Allow generous headroom for the Table 3-B.1
+        // ladder granularity + quantization noise.
+        let rms1 = steady_rms(&planes[1], n_frames);
+        let input_rms = amp / 2.0_f64.sqrt();
+        assert!(
+            rms1 > 0.4 * input_rms,
+            "{label}: right-only tone must survive the intensity encode \
+             (decoded RMS {rms1:.4} vs input RMS {input_rms:.4}); a \
+             channel-0-codeword encoder silences it"
+        );
+
+        // Spectral identity: it is the *tone* that survives, not noise.
+        let total_len = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        let lo = FILTERBANK_DELAY + PCM_SAMPLES_PER_CHANNEL;
+        let hi = total_len - PCM_SAMPLES_PER_CHANNEL;
+        let steady = &planes[1][lo..hi];
+        let tone_p = goertzel_power(steady, intensity_tone, sample_rate);
+        let probe_p = goertzel_power(steady, 0.3 * intensity_tone, sample_rate);
+        assert!(
+            tone_p > 100.0 * probe_p.max(f64::MIN_POSITIVE),
+            "{label}: decoded channel 1 must localise at the input tone \
+             (tone {tone_p:.3e} vs probe {probe_p:.3e})"
+        );
+
+        // Channel 0 rescales the same codeword by its OWN (near-silent)
+        // scalefactor, so it must stay far quieter than channel 1.
+        let rms0 = steady_rms(&planes[0], n_frames);
+        assert!(
+            rms0 < 0.2 * rms1,
+            "{label}: silent channel 0 must stay quiet (rms0 {rms0:.5} vs \
+             rms1 {rms1:.5})"
+        );
+    }
+}

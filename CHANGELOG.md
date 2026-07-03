@@ -35,6 +35,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
   bit-identical PCM ("Padding may also be required in free format").
 
+- **Annex G.1 sum-signal intensity-stereo encode
+  (`src/encoder_frame.rs`)**. In the `bound <= sb < sblimit` intensity
+  region the shared on-wire codeword is now the Annex G.1 **sum
+  signal** `L + R`, quantized against the sum's own (untransmitted)
+  scalefactor — "instead of transmitting separate left and right
+  subband samples, only the sum-signal is transmitted, but with
+  scalefactors for both the left and right channels". Previously the
+  encoder wrote channel 0's samples as the shared codeword, which
+  silently *discarded* channel 1's above-bound content (a
+  right-channel-only tone decoded to near-silence). Each decoder
+  channel still rescales the shared codeword by its own §2.4.3.3.3
+  transmitted scalefactor, reproducing the sum's temporal envelope at
+  each channel's original level; the sum's ≤ 2.0 amplitude is covered
+  by Table 3-B.1 index 0. New
+  `intensity_sum_signal_preserves_right_only_content_above_bound`
+  integration test (all six wide-table rates) pins that a channel-1-only
+  tone above `Bound4` survives the encode at close to its input RMS,
+  localises spectrally, and leaves the silent channel 0 quiet — it
+  fails against the previous channel-0-codeword implementation. All
+  existing joint-stereo round-trip / pan / silence / clamp tests pass
+  unchanged.
+
 - **`crc` registry-encoder option (`src/codec_encoder.rs`)**. The
   registry encoder hard-coded `protection_bit = '1'` (no CRC), so the
   crate's §2.4.1.4 / §2.4.3.1 CRC *write* path (already used by the
