@@ -67,7 +67,11 @@ are wired into the runtime registry** (frame-in / packet-out
   buffer carried across frames — 1152 PCM samples per channel per frame.
 - **Frame-level decode loop**: `decode_frame` / `decode_all_frames`
   parse a stream end-to-end with per-stream filterbank state and
-  mid-stream resynchronisation.
+  mid-stream resynchronisation. Every frame is sized and allocated
+  from its **own** header, so streams whose frames switch ladder
+  bitrates (or `mode`) decode frame-by-frame — §2.4.2.3 leaves
+  variable-bitrate support optional for a Layer II decoder; this one
+  provides it (`mixed_bitrate_stream_decodes_frame_by_frame`).
 - **PCM conformance vs. real fixtures across the whole rate matrix**:
   the full decode chain is validated end-to-end against the staged
   `layer2-stereo-44100-192kbps` fixture's `expected.wav`
@@ -95,8 +99,45 @@ are wired into the runtime registry** (frame-in / packet-out
 primitives, the header writer (`FrameHeader::emit_bytes`), the §C.1.3
 polyphase analysis filterbank, scalefactor extraction, the SCFSI
 Table-C.4 selection, the §2.4.1.6 audio-data writer, the §C.1.5.2.7
-iterative bit allocator, the §2.4.3.3.4 quantizer, and the frame-level
-orchestrator (`encode_frame` / `encoder_frame` module).
+iterative bit allocator (the joint-stereo merged slot pays its single
+shared codeword **once**, per the §2.4.1.6 wire syntax), the
+§2.4.3.3.4 quantizer, and the frame-level orchestrator (`encode_frame`
+/ `encoder_frame` module).
+
+**§2.4.2.3 padding-bit rate control.** The public `PaddingScheduler`
+implements the spec's verbatim `rest`/`dif` decision procedure; the
+batch `encode_all_frames` family and the registry encoder drive one
+per stream, so at the fractional rates (44,1 / 22,05 kHz — "Padding is
+necessary with a sampling frequency of 44,1 kHz") padded `N+1`-slot
+frames interleave to hold the accumulated coded length strictly within
+one slot of the exact `Σ 144·bitrate/Fs` target
+(`tests/padding_rate_control.rs` walks the emitted frames against the
+algorithm, checks the mean-bitrate envelope, and resolves a **padded
+free-format** stream to bit-identical PCM).
+
+**Annex G.1 intensity stereo.** Above `bound` the shared on-wire
+codeword is the Annex G.1 **sum signal** `L + R`, quantized against
+the sum's own (untransmitted) scalefactor while each channel's own
+scalefactor is transmitted — so channel-1-only content above the bound
+survives the encode (pinned by
+`intensity_sum_signal_preserves_right_only_content_above_bound`). The
+Annex G.1 **demand-driven selection** is also implemented: per frame,
+`choose_stereo_coding` estimates the required bits
+(`demand_bits` — every slot to `MNR ≥ 0`, the merged slot sized
+against the more demanding channel) and picks full `Stereo` when it
+fits the budget, else the widest `JointStereo` bound that fits
+(16 / 12 / 8 / 4, Bound4 fallback). Exposed as
+`encode_frame_auto_js_with` / `encode_frame_auto_js_model2` /
+`encode_all_frames_js` and the registry `bound=auto` option; one
+stream may legally mix `Stereo` and `JointStereo` frames (§2.4.1.3 —
+each frame carries its own `mode`).
+
+**§D.1 Step-1 window placement.** The Model-1 analysis FFT reads the
+spec's *delayed* window — 256 samples of filterbank-delay compensation
+minus 64 of Layer II centring, i.e. frame `f` analyses
+`stream[f·1152 − 192 .. f·1152 + 832]` — via a per-channel 192-sample
+history in `EncodeFrameState` (`MODEL1_WINDOW_DELAY_SAMPLES`),
+zero-filled at stream start.
 
 The encoder now has an **auto-SMR (psychoacoustically-driven) encode
 path** — `encode_frame_auto` / `encode_frame_auto_with` — that derives
@@ -141,19 +182,24 @@ framework's frame-in / packet-out trait: it accepts planar-S16
 every 1152 samples (zero-padding a partial trailing frame on `flush`).
 `register_codecs` now carries both decoder and encoder factories under
 the `"mp2"` id, so the registry exposes MP2 encode for the first time.
-Four `CodecParameters::options` keys tune it: `mode` (`stereo` /
+Five `CodecParameters::options` keys tune it: `mode` (`stereo` /
 `joint_stereo` / `dual_channel`), `bound` (joint-stereo intensity bound
-`4` / `8` / `12` / `16`), `psymodel` (`model1` / `model2`), and
-`freeformat` (`true` to emit §2.4.2.3 free-format frames at the
-configured constant bitrate).
+`4` / `8` / `12` / `16`, or `auto` for the Annex G.1 demand-driven
+per-frame policy), `psymodel` (`model1` / `model2`), `freeformat`
+(`true` to emit §2.4.2.3 free-format frames at the configured constant
+bitrate), and `crc` (`true` to emit the §2.4.1.4 CRC-16 word in every
+frame). The §2.4.2.3 padding schedule is always applied.
 
-**Batch stream encode** — `encode_all_frames` / `encode_all_frames_with_smr`
-are the encode-side counterpart of `decode_all_frames`: they turn one
-continuous per-channel PCM buffer into the concatenated Layer II byte
-stream, threading a single persistent `EncodeFrameState` (the §C.1.3
-analysis-filterbank X ring buffer) through every frame so the
-inter-frame continuity is byte-identical to a hand-rolled
-`encode_frame_auto_with` loop. A per-channel length that is not a whole
+**Batch stream encode** — `encode_all_frames` /
+`encode_all_frames_with_smr` / `encode_all_frames_model2` /
+`encode_all_frames_js` are the encode-side counterpart of
+`decode_all_frames`: they turn one continuous per-channel PCM buffer
+into the concatenated Layer II byte stream, threading a single
+persistent `EncodeFrameState` (the §C.1.3 analysis-filterbank X ring
+buffer, the Model-2 predictor and the §D.1 window history) and the
+§2.4.2.3 `PaddingScheduler` through every frame so the inter-frame
+continuity is byte-identical to a hand-rolled
+`encode_frame_auto_with` loop that threads the same scheduler. A per-channel length that is not a whole
 multiple of 1152 samples is rejected with `EncodeError::ShortPcmTail`
 (the partial trailing frame has no defined Layer II encoding); the
 output feeds straight back into `decode_all_frames`.
@@ -238,11 +284,6 @@ work, not missing core paths:
     the `encode_frame_auto` family), threading the per-channel
     `Model2Layer2State` through `EncodeFrameState`. Both Annex D models
     now drive the encoder end-to-end.
-  - The §D.1 driver uses the current frame's first 1024 samples for the
-    FFT; the §D.1 Step 1 net +192-sample window shift (which needs the
-    next frame's lookahead) is a refinement that would tighten the
-    time-alignment of the masking estimate to the allocated subband
-    samples.
   - The MPEG-2 **LSF** rates (16 / 22,05 / 24 kHz) fall back to a flat
     0 dB SMR — the standard provides no Annex D Layer II masking tables
     for them (a docs/spec gap, not an implementation one).

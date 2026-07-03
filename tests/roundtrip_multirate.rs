@@ -247,3 +247,47 @@ fn round_trip_is_deterministic_across_runs_at_every_rate() {
         );
     }
 }
+
+#[test]
+fn mixed_bitrate_stream_decodes_frame_by_frame() {
+    // §2.4.2.3 notes a Layer II decoder "is not required to support a
+    // continuously variable bitrate" — support is permitted, not
+    // forbidden, and each §2.4.1.3 frame header carries its own
+    // bitrate_index. Our decoder sizes and allocates every frame from
+    // its own header, so a stream whose frames switch between ladder
+    // bitrates (here 192 → 256 kbit/s, which also switch between the
+    // B.2 allocation sub-tables) must decode with the exact sample
+    // count and per-frame envelope intact.
+    let sample_rate = 48_000; // dif == 0: constant frame size per rate
+    let n_frames_each = 3;
+    let stream = tone_stream(2, 1_000.0, 0.4, sample_rate, n_frames_each);
+
+    let h192 = stereo_header(false, sample_rate, 192_000);
+    let h256 = stereo_header(false, sample_rate, 256_000);
+    let part1 = encode_all_frames(&h192, &stream, 0).expect("encode 192k");
+    let part2 = encode_all_frames(&h256, &stream, 0).expect("encode 256k");
+
+    let mut mixed = part1;
+    mixed.extend_from_slice(&part2);
+
+    let planes = decode_all_frames(&mixed).expect("decode mixed-bitrate stream");
+    assert_eq!(planes.len(), 2);
+    for (ch, plane) in planes.iter().enumerate() {
+        assert_eq!(
+            plane.len(),
+            2 * n_frames_each * PCM_SAMPLES_PER_CHANNEL,
+            "ch {ch}: every frame of both bitrate segments decoded"
+        );
+    }
+
+    // Frame walk: the emitted stream genuinely switches bitrate.
+    let mut off = 0;
+    let mut seen = Vec::new();
+    while off < mixed.len() {
+        let h = FrameHeader::parse(&mixed[off..]).expect("frame header");
+        seen.push(h.bit_rate);
+        off += h.frame_size_bytes();
+    }
+    assert_eq!(seen.len(), 2 * n_frames_each);
+    assert!(seen.contains(&192_000) && seen.contains(&256_000));
+}

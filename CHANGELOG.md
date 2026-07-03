@@ -35,6 +35,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
   bit-identical PCM ("Padding may also be required in free format").
 
+- **Mixed-bitrate stream decode pin
+  (`tests/roundtrip_multirate.rs`)**. §2.4.2.3 leaves variable-bitrate
+  support optional for a Layer II decoder ("the decoder is not
+  required to support a continuously variable bitrate when in Layer I
+  or II"); ours sizes and allocates every frame from its own §2.4.1.3
+  header, so a stream whose frames switch ladder bitrates (192 →
+  256 kbit/s, crossing B.2 sub-tables) decodes frame-by-frame with the
+  exact sample count. Now pinned by
+  `mixed_bitrate_stream_decodes_frame_by_frame`.
+
 - **§D.1 Step-1 delayed analysis window (net 192-sample delay,
   `src/encoder_frame.rs`)**. The Model-1 auto-SMR chain previously fed
   the 1024-point FFT with each frame's first 1024 samples; the spec's
