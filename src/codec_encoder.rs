@@ -177,13 +177,33 @@ fn freeformat_opt(s: Option<&str>) -> Result<bool> {
     }
 }
 
+/// Parse the `crc` option: when `"true"` / `"1"`, every emitted frame
+/// carries the §2.4.1.4 / §2.4.3.1 16-bit CRC word (header
+/// `protection_bit = '0'` — the §2.4.2.3 inverted convention) computed
+/// over the Annex B Table B.5 protected fields, so a decoder can detect
+/// transmission errors in the bit-allocation / scfsi section. Absent /
+/// `"false"` / `"0"` emits unprotected frames (`protection_bit = '1'`).
+fn crc_opt(s: Option<&str>) -> Result<bool> {
+    match s {
+        None | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: crc={other:?} not recognised (true / false)"
+        ))),
+    }
+}
+
 /// Build the fixed per-stream [`FrameHeader`] from encoder parameters,
 /// validating the rate / channel / bitrate combination up front.
+/// `crc = true` sets `protection_bit = '0'` (the §2.4.2.3 inverted
+/// convention), making the frame writer emit + patch the §2.4.1.4
+/// 16-bit CRC word after the header.
 fn build_header(
     sample_rate: u32,
     mode: Mode,
     mode_extension: ModeExtension,
     bit_rate: u32,
+    crc: bool,
 ) -> Result<FrameHeader> {
     let lsf = match sample_rate {
         32_000 | 44_100 | 48_000 => false,
@@ -208,7 +228,9 @@ fn build_header(
 
     let header = FrameHeader {
         lsf,
-        protection_bit: true, // no CRC (inverted §2.4.2.3 convention)
+        // §2.4.2.3 inverted convention: '1' = no CRC, '0' = the
+        // §2.4.1.4 16-bit CRC word follows the header.
+        protection_bit: !crc,
         bit_rate,
         sample_rate,
         padding: false,
@@ -258,6 +280,10 @@ fn build_header(
 ///   default `"false"` keeps the standard signalled-bitrate framing. The
 ///   output decodes via `decode_free_format_stream` or the registry
 ///   decoder's free-format packet path.
+/// * `crc` — `"true"` / `"1"` emits the §2.4.1.4 / §2.4.3.1 16-bit CRC
+///   word in every frame (header `protection_bit = '0'`), protecting
+///   the Annex B Table B.5 fields (header second half + bit-allocation
+///   + scfsi); default `"false"` emits unprotected frames.
 ///
 /// # Errors
 ///
@@ -273,6 +299,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let mode_extension = mode_extension_opt(params.options.get("bound"))?;
     let psymodel = psymodel_opt(params.options.get("psymodel"))?;
     let freeformat = freeformat_opt(params.options.get("freeformat"))?;
+    let crc = crc_opt(params.options.get("crc"))?;
 
     let Some(sample_rate) = params.sample_rate else {
         return Err(Error::invalid(
@@ -289,7 +316,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         None => default_bitrate_bps(sample_rate, mode),
     };
 
-    let header = build_header(sample_rate, mode, mode_extension, bit_rate)?;
+    let header = build_header(sample_rate, mode, mode_extension, bit_rate, crc)?;
 
     let mut out_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     out_params.sample_rate = Some(sample_rate);
@@ -813,7 +840,7 @@ mod tests {
         .unwrap();
         let pkt = enc.receive_packet().expect("one packet after 1152 samples");
         // Packet must be exactly one Layer II frame.
-        let fsz = build_header(44_100, Mode::Stereo, ModeExtension::Bound4, 192_000)
+        let fsz = build_header(44_100, Mode::Stereo, ModeExtension::Bound4, 192_000, false)
             .unwrap()
             .frame_size_bytes();
         assert_eq!(pkt.data.len(), fsz);
@@ -890,9 +917,15 @@ mod tests {
         }))
         .unwrap();
         // One full frame available before flush.
-        let fsz = build_header(44_100, Mode::SingleChannel, ModeExtension::Bound4, 128_000)
-            .unwrap()
-            .frame_size_bytes();
+        let fsz = build_header(
+            44_100,
+            Mode::SingleChannel,
+            ModeExtension::Bound4,
+            128_000,
+            false,
+        )
+        .unwrap()
+        .frame_size_bytes();
         let p0 = enc.receive_packet().expect("first frame");
         assert_eq!(p0.data.len(), fsz);
         assert!(matches!(enc.receive_packet(), Err(Error::NeedMore)));
@@ -944,6 +977,80 @@ mod tests {
                 data: vec![vec![0u8; 3], vec![0u8; 3]],
             }))
             .is_err());
+    }
+
+    #[test]
+    fn crc_option_emits_protected_frames_that_verify_and_detect_corruption() {
+        // crc=true → every packet's header has protection_bit == '0'
+        // (CRC present), the §2.4.1.4 word verifies on decode, and a
+        // flipped bit-allocation byte is *detected* (CrcMismatch)
+        // instead of silently mis-decoding.
+        let n = 3 * PCM_SAMPLES_PER_CHANNEL;
+        let mut p = params(48_000, 2, Some(192_000));
+        p.options.insert("crc", "true");
+        let mut enc = make_encoder(&p).unwrap();
+        let data: Vec<Vec<u8>> = (0..2).map(|_| tone_plane(n, 700.0, 48_000, 0.4)).collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+
+        let mut packets = Vec::new();
+        loop {
+            match enc.receive_packet() {
+                Ok(pk) => packets.push(pk.data),
+                Err(Error::Eof) => break,
+                Err(e) => panic!("receive_packet: {e:?}"),
+            }
+        }
+        assert_eq!(packets.len(), 3);
+
+        let mut stream = Vec::new();
+        for pkt in &packets {
+            let h = crate::FrameHeader::parse(pkt).expect("packet header");
+            assert!(
+                !h.protection_bit,
+                "crc=true → protection_bit '0' (CRC present)"
+            );
+            stream.extend_from_slice(pkt);
+        }
+        // All frames verify.
+        let planes = decode_all_frames(&stream).expect("CRC-protected stream decodes");
+        assert_eq!(planes[0].len(), n);
+
+        // Corrupt one bit-allocation byte (just after the 4-byte header
+        // + 2-byte CRC word) — the decoder must flag the mismatch.
+        let mut bad = packets[0].clone();
+        bad[6] ^= 0x55;
+        match crate::frame::decode_frame(&bad) {
+            Err(crate::frame::FrameError::CrcMismatch { .. }) => {}
+            other => panic!("expected CrcMismatch on corrupted frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crc_option_default_is_unprotected_and_bad_value_is_rejected() {
+        // Default (no `crc` key): protection_bit == '1' (no CRC).
+        let mut enc = make_encoder(&params(48_000, 2, Some(192_000))).unwrap();
+        let n = PCM_SAMPLES_PER_CHANNEL;
+        let data: Vec<Vec<u8>> = (0..2).map(|_| tone_plane(n, 700.0, 48_000, 0.4)).collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .unwrap();
+        let pkt = enc.receive_packet().expect("one frame");
+        let h = crate::FrameHeader::parse(&pkt.data).unwrap();
+        assert!(h.protection_bit, "default is no CRC");
+
+        // Unrecognised value rejected at build time.
+        let mut bad = params(48_000, 2, Some(192_000));
+        bad.options.insert("crc", "always");
+        assert!(make_encoder(&bad).is_err());
     }
 
     /// Goertzel single-bin power estimate (test-local copy).

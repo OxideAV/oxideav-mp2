@@ -35,6 +35,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   through the §2.4.2.3 `N` / `N+1` sync-to-sync measurement to
   bit-identical PCM ("Padding may also be required in free format").
 
+- **`crc` registry-encoder option (`src/codec_encoder.rs`)**. The
+  registry encoder hard-coded `protection_bit = '1'` (no CRC), so the
+  crate's §2.4.1.4 / §2.4.3.1 CRC *write* path (already used by the
+  direct `encode_frame` API when handed a protected header) was
+  unreachable through `make_encoder`. A new `crc` codec option
+  (`"true"` / `"1"`) sets `protection_bit = '0'` on the stream header,
+  making every emitted frame carry the 16-bit CRC word over the Annex B
+  Table B.5 protected fields. Two unit tests pin that protected packets
+  parse with `protection_bit == '0'`, decode cleanly through
+  `decode_all_frames`, and that a corrupted bit-allocation byte is
+  detected as `FrameError::CrcMismatch`; the default stays
+  unprotected and an unrecognised `crc` value is rejected at build
+  time.
+
 - **§2.4.2.3 free-format (`bitrate_index == '0000'`) decode
   (`src/freeformat.rs`, `src/frame.rs`)**. Free-format Layer II streams
   signal no bitrate in the header; the constant frame size is recovered by
