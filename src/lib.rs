@@ -244,6 +244,7 @@ pub mod bitalloc;
 pub mod codec_decoder;
 pub mod codec_encoder;
 pub mod crc;
+pub mod deemphasis;
 pub mod encoder_bit_allocator;
 pub mod encoder_frame;
 pub mod encoder_samples;
@@ -279,6 +280,7 @@ pub use crc::{
     crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
     INIT_STATE as CRC_INIT_STATE,
 };
+pub use deemphasis::{DeEmphasis, TAU1_50US, TAU2_15US};
 pub use encoder_bit_allocator::{
     allocate_bits, available_data_bits, demand_bits, fixed_bit_budget, sample_bits_for, snr_db,
     BitAllocError, FixedBitBudget, SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT,

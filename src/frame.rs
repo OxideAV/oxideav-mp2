@@ -68,6 +68,7 @@ use oxideav_core::bits::BitReader;
 use crate::audio_data::{parse_audio_data_with_section_bits, AudioDataError};
 use crate::bitalloc::{class_of_quantization, NUM_SUBBANDS};
 use crate::crc::crc16_layer2;
+use crate::deemphasis::DeEmphasis;
 use crate::header::{FrameHeader, HeaderError};
 use crate::requant::{read_triplet, RequantError};
 use crate::synthesis::SynthesisFilterbank;
@@ -214,6 +215,13 @@ pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame, FrameError> {
 #[derive(Debug, Default)]
 pub struct FrameDecodeState {
     filterbank: Vec<SynthesisFilterbank>,
+    /// Per-channel §2.4.2.4 de-emphasis filter, lazily instantiated the
+    /// first time a frame signals a non-`None` (and implementable)
+    /// `emphasis`, and carried across frames so the IIR has no
+    /// per-frame discontinuity. `None` per channel means "deliver
+    /// unfiltered" (either `emphasis == '00'` or the unstaged J.17
+    /// curve — see [`crate::deemphasis`]).
+    deemphasis: Vec<Option<DeEmphasis>>,
 }
 
 impl FrameDecodeState {
@@ -222,20 +230,60 @@ impl FrameDecodeState {
     pub fn new() -> Self {
         FrameDecodeState {
             filterbank: Vec::new(),
+            deemphasis: Vec::new(),
         }
     }
 
     /// Re-zero every filterbank's V ring buffer per Annex A Figure
-    /// A.2 footnote 1. Call on seek / stream discontinuity.
+    /// A.2 footnote 1, and drop any de-emphasis filter state. Call on
+    /// seek / stream discontinuity.
     pub fn reset(&mut self) {
         for fb in &mut self.filterbank {
             fb.reset();
+        }
+        for de in &mut self.deemphasis {
+            *de = None;
         }
     }
 
     fn ensure_channels(&mut self, channels: usize) {
         while self.filterbank.len() < channels {
             self.filterbank.push(SynthesisFilterbank::new());
+        }
+        while self.deemphasis.len() < channels {
+            self.deemphasis.push(None);
+        }
+    }
+
+    /// Apply the §2.4.2.4 de-emphasis the `header` calls for to each
+    /// channel's reconstructed PCM in place, threading the per-channel
+    /// IIR state across frames. The per-channel filter is (re)built the
+    /// first time a channel needs one and whenever the required curve
+    /// changes; `emphasis == '00'` (or the unstaged J.17 curve) leaves
+    /// the samples untouched.
+    fn apply_deemphasis(&mut self, header: &FrameHeader, pcm: &mut [Vec<f64>]) {
+        let wanted = DeEmphasis::for_header(header);
+        for (ch, samples) in pcm.iter_mut().enumerate() {
+            let slot = &mut self.deemphasis[ch];
+            match wanted {
+                Some(template) => {
+                    // Instantiate on first need; preserve running state
+                    // across frames once created. If a frame switches to
+                    // a rate whose coefficients differ (a variable-rate
+                    // stream), rebuild the filter at the new rate.
+                    let rebuild = match slot {
+                        Some(existing) => existing.coefficients() != template.coefficients(),
+                        None => true,
+                    };
+                    if rebuild {
+                        *slot = Some(template);
+                    }
+                    slot.as_mut()
+                        .expect("de-emphasis filter just set")
+                        .process_in_place(samples);
+                }
+                None => *slot = None,
+            }
         }
     }
 }
@@ -386,6 +434,10 @@ pub fn decode_frame_with(
     }
 
     debug_assert!(pcm.iter().all(|ch| ch.len() == PCM_SAMPLES_PER_CHANNEL));
+
+    // §2.4.2.4: undo any encoder pre-emphasis the header signals,
+    // threading the per-channel IIR state across frames.
+    state.apply_deemphasis(&header, &mut pcm);
 
     // The remainder of the frame (after the sample loop) is §2.4.1.6
     // `ancillary_data`; we ignore it. Suppress unused-_audio.scfsi
@@ -658,6 +710,8 @@ pub fn decode_frame_with_known_header(
             pcm[ch].extend_from_slice(&out_block);
         }
     }
+    // §2.4.2.4 de-emphasis (see `decode_frame_with`).
+    state.apply_deemphasis(&header, &mut pcm);
     let _ = audio.scfsi;
     Ok(DecodedFrame { header, pcm })
 }
