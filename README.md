@@ -352,7 +352,10 @@ surface (`measure_base_slots` / `resolve` / `decode_free_format_stream` /
 `parse_allow_free_format`) against dense sync runs, every truncated
 prefix of a free-format frame, and a deterministic pseudo-random corpus;
 and a `cargo-fuzz` `decode` target exercises the decode attacker surface
-for panic-freedom.
+for panic-freedom, with the crafted headers drawing the §2.4.2.3
+emphasis field from all three accepted codes so both de-emphasis IIRs
+(50/15 µs and CCITT J.17) and their cross-frame rebuild logic sit on
+the fuzzed surface.
 
 ## License
 
