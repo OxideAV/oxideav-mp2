@@ -210,6 +210,21 @@ fn crc_opt(s: Option<&str>) -> Result<bool> {
     }
 }
 
+/// Parse a boolean `params.options` value (`"true"` / `"1"` → true,
+/// `"false"` / `"0"` / absent → `default`), rejecting anything else.
+/// Used for the §2.4.2.3 header metadata flags whose value has no
+/// signal-processing effect (`copyright` / `original` / `private`).
+fn bool_opt(s: Option<&str>, name: &str, default: bool) -> Result<bool> {
+    match s {
+        None => Ok(default),
+        Some("true") | Some("1") => Ok(true),
+        Some("false") | Some("0") => Ok(false),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: {name}={other:?} not recognised (true / false)"
+        ))),
+    }
+}
+
 /// Parse the `emphasis` option: `"none"` (default) delivers PCM
 /// unaltered; `"50/15"` (also accepted as `"5015"` / `"50_15"`) selects
 /// the §2.4.2.4 50/15 µs pre-emphasis (applied at encode, undone by the
@@ -299,7 +314,7 @@ fn build_header(
 ///
 /// # Codec options
 ///
-/// Six `params.options` keys tune the encode (all optional):
+/// The following `params.options` keys tune the encode (all optional):
 ///
 /// * `mode` — for a 2-channel stream: `"stereo"` (default),
 ///   `"joint_stereo"` (intensity stereo), or `"dual_channel"` (two
@@ -326,6 +341,10 @@ fn build_header(
 ///   undoes it via de-emphasis; default `"none"` encodes the PCM
 ///   unaltered. (The reserved `'10'` code and CCITT J.17 are not
 ///   offered — J.17 is an unstaged docs gap.)
+/// * `copyright` / `original` / `private` — the §2.4.2.3 header
+///   metadata flags (`"true"` / `"false"`). They carry no
+///   signal-processing effect and are round-tripped verbatim on decode;
+///   defaults are `copyright=false`, `original=true`, `private=false`.
 ///
 /// # Errors
 ///
@@ -343,6 +362,10 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let freeformat = freeformat_opt(params.options.get("freeformat"))?;
     let crc = crc_opt(params.options.get("crc"))?;
     let emphasis = emphasis_opt(params.options.get("emphasis"))?;
+    // §2.4.2.3 header metadata flags (no signal effect; round-tripped).
+    let copyright = bool_opt(params.options.get("copyright"), "copyright", false)?;
+    let original = bool_opt(params.options.get("original"), "original", true)?;
+    let private_bit = bool_opt(params.options.get("private"), "private", false)?;
 
     // The Annex G.1 demand-driven policy needs a two-channel joint
     // stream to select over (Stereo vs the four intensity bounds).
@@ -373,7 +396,12 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         None => default_bitrate_bps(sample_rate, mode),
     };
 
-    let header = build_header(sample_rate, mode, mode_extension, bit_rate, crc, emphasis)?;
+    let mut header = build_header(sample_rate, mode, mode_extension, bit_rate, crc, emphasis)?;
+    // The §2.4.2.3 metadata flags do not affect allocation-table
+    // selection, so they are applied after the validating build.
+    header.copyright = copyright;
+    header.original = original;
+    header.private_bit = private_bit;
 
     let mut out_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     out_params.sample_rate = Some(sample_rate);
@@ -878,6 +906,57 @@ mod tests {
         // de-emphasis decode) reproduces the tone at the right shape.
         let planes = encode_decode_through(&p, 44_100);
         assert_eq!(planes[0].len(), 4 * PCM_SAMPLES_PER_CHANNEL);
+    }
+
+    #[test]
+    fn metadata_flags_round_trip_through_the_header() {
+        let mut p = params(44_100, 2, Some(192_000));
+        p.options.insert("copyright", "true");
+        p.options.insert("original", "false");
+        p.options.insert("private", "true");
+
+        let mut enc = make_encoder(&p).unwrap();
+        let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+        let plane = tone_plane(n, 1_000.0, 44_100, 0.5);
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![plane.clone(), plane],
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+        let mut stream = Vec::new();
+        while let Ok(pk) = enc.receive_packet() {
+            stream.extend_from_slice(&pk.data);
+        }
+        let header = FrameHeader::parse(&stream).expect("parse first frame");
+        assert!(header.copyright);
+        assert!(!header.original);
+        assert!(header.private_bit);
+
+        // Defaults when the options are absent.
+        let mut enc2 = make_encoder(&params(44_100, 2, Some(192_000))).unwrap();
+        let plane2 = tone_plane(n, 1_000.0, 44_100, 0.5);
+        enc2.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![plane2.clone(), plane2],
+        }))
+        .unwrap();
+        enc2.flush().unwrap();
+        let mut s2 = Vec::new();
+        while let Ok(pk) = enc2.receive_packet() {
+            s2.extend_from_slice(&pk.data);
+        }
+        let h2 = FrameHeader::parse(&s2).unwrap();
+        assert!(!h2.copyright);
+        assert!(h2.original);
+        assert!(!h2.private_bit);
+
+        // Bad boolean value is rejected.
+        let mut bad = params(44_100, 2, Some(192_000));
+        bad.options.insert("copyright", "yes");
+        assert!(make_encoder(&bad).is_err());
     }
 
     #[test]
