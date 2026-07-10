@@ -210,6 +210,22 @@ fn crc_opt(s: Option<&str>) -> Result<bool> {
     }
 }
 
+/// Parse the `emphasis` option: `"none"` (default) delivers PCM
+/// unaltered; `"50/15"` (also accepted as `"5015"` / `"50_15"`) selects
+/// the §2.4.2.4 50/15 µs pre-emphasis (applied at encode, undone by the
+/// decoder). The reserved `'10'` code and the CCITT J.17 curve are not
+/// offered on the encode side (J.17 is an unstaged docs gap — see
+/// [`crate::deemphasis`]).
+fn emphasis_opt(s: Option<&str>) -> Result<Emphasis> {
+    match s {
+        None | Some("none") | Some("0") => Ok(Emphasis::None),
+        Some("50/15") | Some("5015") | Some("50_15") => Ok(Emphasis::FiftyFifteen),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: emphasis={other:?} not recognised (none / 50/15)"
+        ))),
+    }
+}
+
 /// Build the fixed per-stream [`FrameHeader`] from encoder parameters,
 /// validating the rate / channel / bitrate combination up front.
 /// `crc = true` sets `protection_bit = '0'` (the §2.4.2.3 inverted
@@ -221,6 +237,7 @@ fn build_header(
     mode_extension: ModeExtension,
     bit_rate: u32,
     crc: bool,
+    emphasis: Emphasis,
 ) -> Result<FrameHeader> {
     let lsf = match sample_rate {
         32_000 | 44_100 | 48_000 => false,
@@ -256,7 +273,7 @@ fn build_header(
         mode_extension,
         copyright: false,
         original: true,
-        emphasis: Emphasis::None,
+        emphasis,
     };
 
     // The (rate, per-channel bitrate) pair must select a defined
@@ -282,7 +299,7 @@ fn build_header(
 ///
 /// # Codec options
 ///
-/// Three `params.options` keys tune the encode (all optional):
+/// Six `params.options` keys tune the encode (all optional):
 ///
 /// * `mode` — for a 2-channel stream: `"stereo"` (default),
 ///   `"joint_stereo"` (intensity stereo), or `"dual_channel"` (two
@@ -304,6 +321,11 @@ fn build_header(
 ///   word in every frame (header `protection_bit = '0'`), protecting
 ///   the Annex B Table B.5 fields (header second half + bit-allocation
 ///   + scfsi); default `"false"` emits unprotected frames.
+/// * `emphasis` — `"50/15"` applies the §2.4.2.4 50/15 µs pre-emphasis
+///   before quantization and signals the header field, so a decoder
+///   undoes it via de-emphasis; default `"none"` encodes the PCM
+///   unaltered. (The reserved `'10'` code and CCITT J.17 are not
+///   offered — J.17 is an unstaged docs gap.)
 ///
 /// # Errors
 ///
@@ -320,6 +342,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let psymodel = psymodel_opt(params.options.get("psymodel"))?;
     let freeformat = freeformat_opt(params.options.get("freeformat"))?;
     let crc = crc_opt(params.options.get("crc"))?;
+    let emphasis = emphasis_opt(params.options.get("emphasis"))?;
 
     // The Annex G.1 demand-driven policy needs a two-channel joint
     // stream to select over (Stereo vs the four intensity bounds).
@@ -350,7 +373,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         None => default_bitrate_bps(sample_rate, mode),
     };
 
-    let header = build_header(sample_rate, mode, mode_extension, bit_rate, crc)?;
+    let header = build_header(sample_rate, mode, mode_extension, bit_rate, crc, emphasis)?;
 
     let mut out_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     out_params.sample_rate = Some(sample_rate);
@@ -811,6 +834,50 @@ mod tests {
         let mut bad_ff = params(44_100, 2, None);
         bad_ff.options.insert("freeformat", "maybe");
         assert!(make_encoder(&bad_ff).is_err());
+
+        // unrecognised emphasis value.
+        let mut bad_emph = params(44_100, 2, None);
+        bad_emph.options.insert("emphasis", "j17");
+        assert!(make_encoder(&bad_emph).is_err());
+    }
+
+    #[test]
+    fn emphasis_opt_parses_accepted_spellings() {
+        assert_eq!(emphasis_opt(None).unwrap(), Emphasis::None);
+        assert_eq!(emphasis_opt(Some("none")).unwrap(), Emphasis::None);
+        for s in ["50/15", "5015", "50_15"] {
+            assert_eq!(emphasis_opt(Some(s)).unwrap(), Emphasis::FiftyFifteen);
+        }
+        assert!(emphasis_opt(Some("garbage")).is_err());
+    }
+
+    #[test]
+    fn emphasis_5015_option_signals_the_header_and_round_trips() {
+        let mut p = params(44_100, 2, Some(192_000));
+        p.options.insert("emphasis", "50/15");
+
+        // The emitted frame headers must signal the 50/15 µs curve.
+        let mut enc = make_encoder(&p).unwrap();
+        let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+        let plane = tone_plane(n, 1_000.0, 44_100, 0.5);
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![plane.clone(), plane],
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+        let mut stream = Vec::new();
+        while let Ok(pk) = enc.receive_packet() {
+            stream.extend_from_slice(&pk.data);
+        }
+        let header = FrameHeader::parse(&stream).expect("parse first frame");
+        assert_eq!(header.emphasis, Emphasis::FiftyFifteen);
+
+        // And the full registry round-trip (pre-emphasis encode →
+        // de-emphasis decode) reproduces the tone at the right shape.
+        let planes = encode_decode_through(&p, 44_100);
+        assert_eq!(planes[0].len(), 4 * PCM_SAMPLES_PER_CHANNEL);
     }
 
     #[test]
@@ -889,9 +956,16 @@ mod tests {
         .unwrap();
         let pkt = enc.receive_packet().expect("one packet after 1152 samples");
         // Packet must be exactly one Layer II frame.
-        let fsz = build_header(44_100, Mode::Stereo, ModeExtension::Bound4, 192_000, false)
-            .unwrap()
-            .frame_size_bytes();
+        let fsz = build_header(
+            44_100,
+            Mode::Stereo,
+            ModeExtension::Bound4,
+            192_000,
+            false,
+            Emphasis::None,
+        )
+        .unwrap()
+        .frame_size_bytes();
         assert_eq!(pkt.data.len(), fsz);
         assert_eq!(pkt.pts, Some(0));
         assert!(pkt.flags.keyframe);
@@ -972,6 +1046,7 @@ mod tests {
             ModeExtension::Bound4,
             128_000,
             false,
+            Emphasis::None,
         )
         .unwrap()
         .frame_size_bytes();
