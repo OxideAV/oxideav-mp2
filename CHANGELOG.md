@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§2.4.2.4 output de-emphasis on decode (`src/deemphasis.rs`,
+  `src/frame.rs`)**. The header emphasis field ("indicates the type of
+  de-emphasis that shall be used") was parsed but never applied. The
+  decoder now runs a first-order de-emphasis IIR on the reconstructed
+  PCM when the header signals the 50/15 µs (`'01'`) curve; the
+  coefficients are derived clean-room from the `τ1 = 50 µs` /
+  `τ2 = 15 µs` time constants via the bilinear transform (unity DC gain,
+  −10.458 dB HF shelf). Per-channel filter state is threaded across
+  frames through `FrameDecodeState` and re-zeroed on `reset()`. The
+  `'00'` (none) and `'11'` (CCITT J.17 — an unstaged docs gap) modes are
+  delivered unfiltered. New: `deemphasis` unit tests + a
+  `tests/deemphasis.rs` integration test that patches an unaltered
+  stream's header emphasis bits and pins the decode against the
+  reference filter.
+
+- **§2.4.2.4 pre-emphasis on encode (`src/deemphasis.rs`,
+  `src/encoder_frame.rs`)**. Symmetric encode counterpart: when a header
+  signals the 50/15 µs curve the encoder pre-emphasises the PCM (per
+  channel, state threaded through `EncodeFrameState`) before both the
+  §C.1.3 analysis filterbank and the Annex D psychoacoustic model.
+  `PreEmphasis` is the exact algebraic inverse of `DeEmphasis`; the
+  pre→de cascade is identity to machine precision, verified across all
+  six Layer II rates, plus an acoustic encode→decode round-trip test.
+
+- **Registry-encoder `emphasis` + `copyright` / `original` / `private`
+  options (`src/codec_encoder.rs`)**. `make_encoder` gains
+  `emphasis=50/15` (applies §2.4.2.4 pre-emphasis and signals the field;
+  default `none`; J.17 not offered) and the three §2.4.2.3 header
+  metadata flags as booleans (round-tripped verbatim on decode).
+  Unrecognised values are rejected; both are covered by round-trip
+  tests.
+
 - **§2.4.2.3 padding-bit rate control (`PaddingScheduler`,
   `src/header.rs` / `src/encoder_frame.rs` / `src/codec_encoder.rs`)**.
   The encoder previously emitted every frame unpadded, so at the

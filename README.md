@@ -64,6 +64,17 @@ are wired into the runtime registry** (frame-in / packet-out
   12 / 16) are honoured.
 - **CRC-16** (§2.4.1.4 / §2.4.3.1) over the Annex B Table B.5 protected
   fields, verified on decode.
+- **§2.4.2.4 de-emphasis** ("emphasis — indicates the type of
+  de-emphasis that shall be used"): the header emphasis field, formerly
+  parsed but never acted on, now drives a first-order de-emphasis IIR on
+  the reconstructed PCM. The `'01'` 50/15 µs curve's coefficients are
+  derived clean-room from its two time constants (`τ1 = 50 µs`,
+  `τ2 = 15 µs`) via the bilinear transform (unity DC gain; the HF shelf
+  asymptote `τ2/τ1 = 0.3` = −10.458 dB), and the per-channel filter
+  state is threaded across frames (re-zeroed on `reset`). `'00'` (none)
+  is delivered unfiltered; the `'11'` CCITT J.17 curve is a docs gap
+  (Recommendation J.17 is not staged) and is likewise delivered
+  unfiltered.
 - **Polyphase synthesis filterbank** (§2.4.3.2, Annex A Figure A.2):
   the 64×32 matrixing, the 512-tap Table 3-B.3 window, and the V ring
   buffer carried across frames — 1152 PCM samples per channel per frame.
@@ -105,6 +116,19 @@ iterative bit allocator (the joint-stereo merged slot pays its single
 shared codeword **once**, per the §2.4.1.6 wire syntax), the
 §2.4.3.3.4 quantizer, and the frame-level orchestrator (`encode_frame`
 / `encoder_frame` module).
+
+**§2.4.2.4 pre-emphasis.** The encode counterpart of decode
+de-emphasis: when a frame header signals the 50/15 µs curve the encoder
+pre-emphasises the PCM (per channel, IIR state threaded across frames
+through `EncodeFrameState`) *before* both the §C.1.3 analysis
+filterbank and the Annex D psychoacoustic model, so the encoded signal
+and its bit allocation stay consistent and the decoder's de-emphasis
+restores the original spectral balance. `PreEmphasis` is the exact
+algebraic inverse of `DeEmphasis` (numerator/denominator time constants
+swapped, same bilinear derivation); the pre→de cascade is identity to
+machine precision, and an acoustic round-trip test confirms a
+pre-emphasis encode → de-emphasis decode reproduces both a low and a
+high-frequency tone (`tests/deemphasis.rs`).
 
 **§2.4.2.3 padding-bit rate control.** The public `PaddingScheduler`
 implements the spec's verbatim `rest`/`dif` decision procedure; the
@@ -184,13 +208,17 @@ framework's frame-in / packet-out trait: it accepts planar-S16
 every 1152 samples (zero-padding a partial trailing frame on `flush`).
 `register_codecs` now carries both decoder and encoder factories under
 the `"mp2"` id, so the registry exposes MP2 encode for the first time.
-Five `CodecParameters::options` keys tune it: `mode` (`stereo` /
+The `CodecParameters::options` keys that tune it are: `mode` (`stereo` /
 `joint_stereo` / `dual_channel`), `bound` (joint-stereo intensity bound
 `4` / `8` / `12` / `16`, or `auto` for the Annex G.1 demand-driven
 per-frame policy), `psymodel` (`model1` / `model2`), `freeformat`
 (`true` to emit §2.4.2.3 free-format frames at the configured constant
-bitrate), and `crc` (`true` to emit the §2.4.1.4 CRC-16 word in every
-frame). The §2.4.2.3 padding schedule is always applied.
+bitrate), `crc` (`true` to emit the §2.4.1.4 CRC-16 word in every
+frame), `emphasis` (`50/15` to apply the §2.4.2.4 pre-emphasis and
+signal the header field; default `none`), and the §2.4.2.3 header
+metadata flags `copyright` / `original` / `private` (booleans,
+round-tripped verbatim on decode). The §2.4.2.3 padding schedule is
+always applied.
 
 **Batch stream encode** — `encode_all_frames` /
 `encode_all_frames_with_smr` / `encode_all_frames_model2` /
@@ -289,6 +317,13 @@ work, not missing core paths:
   - The MPEG-2 **LSF** rates (16 / 22,05 / 24 kHz) fall back to a flat
     0 dB SMR — the standard provides no Annex D Layer II masking tables
     for them (a docs/spec gap, not an implementation one).
+- **§2.4.2.4 CCITT J.17 de-emphasis** (`emphasis == '11'`). The 50/15 µs
+  curve is implemented on both decode (de-emphasis) and encode
+  (pre-emphasis); the J.17 curve's exact response is defined by CCITT
+  Recommendation J.17, which is not part of the staged ISO/IEC 11172-3 /
+  13818-3 material, so its coefficients cannot be derived clean-room. A
+  J.17-flagged stream is decoded unfiltered and J.17 is not offered on
+  encode (a docs gap — staging Recommendation J.17 would close it).
 - An ISO/IEC 11172-4 / 13818-4 *compliance-grade* SNR sweep across the
   full layered-test bitstream set. The decode path is now validated
   end-to-end across the whole channel-mode × sampling-rate matrix —
