@@ -85,9 +85,13 @@ const HEADER_CTL_BYTES: usize = 6;
 /// (`'0'`); `br` the bitrate index (1..=14, never 0 free-format or 15
 /// forbidden); `sr` the sample-rate index (0..=2, 3 reserved/rejected);
 /// `mode` the channel mode; `ext` the mode extension; and `flags` packs
-/// the CRC, padding, private, copyright, and original bits. Layer is
-/// fixed to II (`'10'`) and emphasis to none (`'00'`) so those fields
-/// never trip the up-front rejection.
+/// the CRC, padding, private, copyright, and original bits plus the
+/// emphasis selector (bits 5–6, mapped onto the three *accepted*
+/// §2.4.2.3 codes — none / 50/15 µs / CCITT J.17 — so the per-channel
+/// de-emphasis IIRs and their cross-frame state/rebuild logic are
+/// fuzzed; the reserved `'10'` code would be rejected up front). Layer
+/// is fixed to II (`'10'`) so that field never trips the up-front
+/// rejection.
 fn build_header(id: u8, sr: u8, br: u8, mode: u8, ext: u8, flags: u8) -> [u8; 4] {
     // 12-bit sync (bits 31..20 all ones).
     let mut raw: u32 = 0xFFF << 20;
@@ -115,7 +119,11 @@ fn build_header(id: u8, sr: u8, br: u8, mode: u8, ext: u8, flags: u8) -> [u8; 4]
     // copyright / original.
     raw |= u32::from((flags >> 3) & 1) << 3;
     raw |= u32::from((flags >> 4) & 1) << 2;
-    // emphasis '00' = none (the '10' reserved code is rejected).
+    // emphasis: one of the three accepted codes — '00' none, '01'
+    // 50/15 µs, '11' CCITT J.17 (the '10' reserved code is rejected at
+    // parse, so it would never reach the deep chain).
+    const ACCEPTED_EMPHASIS: [u32; 4] = [0b00, 0b01, 0b11, 0b00];
+    raw |= ACCEPTED_EMPHASIS[usize::from((flags >> 5) & 0b11)];
     raw.to_be_bytes()
 }
 

@@ -250,3 +250,122 @@ fn j17_preemphasis_encode_deemphasis_decode_recovers_tone() {
         "J.17 pre-emphasis changed only {differing_bytes} bytes"
     );
 }
+
+#[test]
+fn emphasis_switching_mid_stream_rebuilds_the_filter_per_curve() {
+    // A stream whose frames signal different emphasis values is legal —
+    // every frame is decoded from its own header. The decoder carries
+    // the per-channel IIR state across frames *while the curve is
+    // unchanged*, rebuilds a fresh filter when the curve switches, and
+    // drops the filter on `'00'`. Pin that exact semantics: patch a
+    // 4-frame `None` stream to '01', '01', '11', '00' and reproduce the
+    // decode with reference filters applied frame by frame.
+    let n = 4 * 1152;
+    let fs = 48_000.0_f64;
+    let mut left = Vec::with_capacity(n);
+    let mut right = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / fs;
+        let lo = 0.3 * (2.0 * std::f64::consts::PI * 1_000.0 * t).sin();
+        let hi = 0.3 * (2.0 * std::f64::consts::PI * 15_000.0 * t).sin();
+        left.push(lo + hi);
+        right.push(lo - hi);
+    }
+    let pcm = vec![left, right];
+
+    let plain = encode_all_frames(&header(Emphasis::None), &pcm, 0).expect("encode plain");
+    const FRAME_SIZE: usize = 576;
+    assert_eq!(plain.len(), 4 * FRAME_SIZE);
+    let per_frame_emphasis: [u8; 4] = [0b01, 0b01, 0b11, 0b00];
+    let mut emph = plain.clone();
+    for (frame, &bits) in per_frame_emphasis.iter().enumerate() {
+        let f = frame * FRAME_SIZE;
+        emph[f + 3] = (emph[f + 3] & 0xFC) | bits;
+    }
+
+    let plain_pcm = decode_all_frames(&plain).expect("decode plain");
+    let emph_pcm = decode_all_frames(&emph).expect("decode emph");
+
+    for ch in 0..2 {
+        // Frames 0–1: one 50/15 µs filter with state carried across the
+        // frame boundary (NOT re-created per frame).
+        let mut fifty = DeEmphasis::fifty_fifteen(48_000);
+        for i in 0..2 * 1152 {
+            let expected = fifty.process_sample(plain_pcm[ch][i]);
+            assert!(
+                (expected - emph_pcm[ch][i]).abs() < 1e-9,
+                "ch{ch}[{i}]: 50/15 span mismatch"
+            );
+        }
+        // Frame 2: a FRESH J.17 filter (curve switch discards the 50/15
+        // state).
+        let mut j17 = DeEmphasis::ccitt_j17(48_000);
+        for i in 2 * 1152..3 * 1152 {
+            let expected = j17.process_sample(plain_pcm[ch][i]);
+            assert!(
+                (expected - emph_pcm[ch][i]).abs() < 1e-9,
+                "ch{ch}[{i}]: J.17 span mismatch"
+            );
+        }
+        // Frame 3: '00' — delivered unfiltered.
+        for i in 3 * 1152..4 * 1152 {
+            assert!(
+                (plain_pcm[ch][i] - emph_pcm[ch][i]).abs() < 1e-12,
+                "ch{ch}[{i}]: none span must be unfiltered"
+            );
+        }
+    }
+}
+
+#[test]
+fn j17_round_trips_at_an_lsf_rate() {
+    // The MPEG-2 LSF header carries the same §2.4.2.3 emphasis field;
+    // exercise the J.17 pre→de acoustic loop at 24 kHz so an LSF-rate
+    // filter fit runs inside the real pipeline (not just the unit
+    // tests).
+    let fs_hz = 24_000_u32;
+    let fs = f64::from(fs_hz);
+    let n = 3 * 1152;
+    let mut left = Vec::with_capacity(n);
+    let mut right = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 / fs;
+        let lo = 0.3 * (2.0 * std::f64::consts::PI * 500.0 * t).sin();
+        let hi = 0.1 * (2.0 * std::f64::consts::PI * 9_000.0 * t).sin();
+        left.push(lo + hi);
+        right.push(lo - hi);
+    }
+    let pcm = vec![left, right];
+
+    let lsf_header = FrameHeader {
+        lsf: true,
+        bit_rate: 160_000,
+        sample_rate: fs_hz,
+        padding: false,
+        private_bit: false,
+        mode: Mode::Stereo,
+        mode_extension: ModeExtension::Bound4,
+        copyright: false,
+        original: true,
+        emphasis: Emphasis::CcittJ17,
+        protection_bit: true,
+    };
+    let stream = encode_all_frames(&lsf_header, &pcm, 0).expect("encode LSF J.17");
+    let out = decode_all_frames(&stream).expect("decode LSF J.17");
+    assert_eq!(out.len(), 2);
+
+    let skip = 512;
+    for (ch, chan) in out.iter().enumerate() {
+        let e_lo = bin_energy(chan, fs, 500.0, skip);
+        let e_hi = bin_energy(chan, fs, 9_000.0, skip);
+        let e_probe = bin_energy(chan, fs, 4_000.0, skip);
+        assert!(
+            e_lo > 50.0 * e_probe,
+            "ch{ch}: 500 Hz tone not recovered (lo={e_lo}, probe={e_probe})"
+        );
+        assert!(
+            e_hi > 50.0 * e_probe,
+            "ch{ch}: 9 kHz tone not recovered after LSF J.17 de-emphasis (hi={e_hi}, probe={e_probe})"
+        );
+    }
+}

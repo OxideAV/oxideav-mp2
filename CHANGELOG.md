@@ -61,6 +61,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   decode). Unrecognised values are rejected; both are covered by
   round-trip tests.
 
+- **Emphasis hardening (`tests/deemphasis.rs`,
+  `fuzz/fuzz_targets/decode.rs`)**. A mid-stream emphasis-switching
+  integration test pins the decoder's per-channel filter lifecycle
+  ('01'→'01' carries IIR state across the frame boundary, '01'→'11'
+  rebuilds a fresh J.17 filter, →'00' drops it), and an LSF-rate
+  (24 kHz) J.17 encode→decode acoustic round-trip exercises an LSF
+  filter fit inside the real pipeline. The decode fuzz target's crafted
+  headers now draw the emphasis field from all three accepted §2.4.2.3
+  codes instead of hardcoding '00', so both de-emphasis IIRs and their
+  cross-frame state machine sit on the fuzzed attacker surface
+  (320k-run bounded session clean).
+
 - **§2.4.2.3 padding-bit rate control (`PaddingScheduler`,
   `src/header.rs` / `src/encoder_frame.rs` / `src/codec_encoder.rs`)**.
   The encoder previously emitted every frame unpadded, so at the
