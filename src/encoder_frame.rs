@@ -66,7 +66,7 @@ use crate::encoder_samples::{write_triplet_scaled, SampleWriteError};
 use crate::encoder_scalefactors::{compute_scalefactors, SUBBAND_SAMPLES_PER_FRAME};
 use crate::encoder_scfsi::select_scfsi;
 use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME};
-use crate::header::{Emphasis, FrameHeader, HeaderError, PaddingScheduler};
+use crate::header::{FrameHeader, HeaderError, PaddingScheduler};
 use crate::psy::{
     annex_d_sampling_rate, compute_smr_model1_frame, compute_smr_model2_layer2_frame,
     Model2Layer2State, NUM_SUBBANDS_LAYER2,
@@ -265,10 +265,11 @@ pub struct EncodeFrameState {
     /// X buffer); only the Model-1 auto-SMR path uses it.
     psy1_history: Vec<Vec<f64>>,
     /// Per-channel §2.4.2.4 pre-emphasis filter, lazily instantiated the
-    /// first time a frame's header signals the 50/15 µs curve and
-    /// carried across frames so the IIR has no per-frame discontinuity
-    /// (the decoder's [`crate::deemphasis::DeEmphasis`] undoes it). Empty
-    /// / `None` per channel means "encode the PCM unaltered".
+    /// first time a frame's header signals the 50/15 µs or CCITT J.17
+    /// curve and carried across frames so the IIR has no per-frame
+    /// discontinuity (the decoder's [`crate::deemphasis::DeEmphasis`]
+    /// undoes it). Empty / `None` per channel means "encode the PCM
+    /// unaltered".
     preemphasis: Vec<Option<PreEmphasis>>,
 }
 
@@ -314,30 +315,25 @@ impl EncodeFrameState {
     /// Apply the §2.4.2.4 pre-emphasis `header` calls for to each
     /// channel's frame PCM, threading the per-channel IIR state across
     /// frames. Returns an owned pre-emphasised copy when the header
-    /// signals the 50/15 µs curve, or [`None`] when no pre-emphasis
-    /// applies (`emphasis == '00'`, or the unstaged J.17 curve, which is
-    /// encoded unaltered). The returned buffer is used for **both** the
-    /// analysis filterbank and the psychoacoustic model so the encoded
-    /// signal and its bit allocation are consistent.
+    /// signals the 50/15 µs or CCITT J.17 curve, or [`None`] when no
+    /// pre-emphasis applies (`emphasis == '00'`). The returned buffer
+    /// is used for **both** the analysis filterbank and the
+    /// psychoacoustic model so the encoded signal and its bit
+    /// allocation are consistent.
     fn apply_preemphasis(
         &mut self,
         header: &FrameHeader,
         pcm: &[Vec<f64>],
     ) -> Option<Vec<Vec<f64>>> {
-        // Only the 50/15 µs curve is clean-room implementable (J.17
-        // needs an unstaged recommendation — see `crate::deemphasis`).
-        if header.emphasis != Emphasis::FiftyFifteen {
-            return None;
-        }
+        let template = PreEmphasis::for_header(header)?;
         while self.preemphasis.len() < pcm.len() {
             self.preemphasis.push(None);
         }
-        let template = PreEmphasis::fifty_fifteen(header.sample_rate);
         let mut out = pcm.to_vec();
         for (ch, samples) in out.iter_mut().enumerate() {
             let slot = &mut self.preemphasis[ch];
             let rebuild = match slot {
-                Some(existing) => existing.coefficients() != template.coefficients(),
+                Some(existing) => existing.sections() != template.sections(),
                 None => true,
             };
             if rebuild {

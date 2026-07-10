@@ -253,6 +253,7 @@ pub mod encoder_scfsi;
 pub mod frame;
 pub mod freeformat;
 pub mod header;
+pub mod j17;
 pub mod psy;
 pub mod requant;
 pub mod synthesis;
@@ -280,7 +281,7 @@ pub use crc::{
     crc16_layer2, crc16_step, crc16_update_bits, crc16_update_packed, verify_layer2_crc,
     INIT_STATE as CRC_INIT_STATE,
 };
-pub use deemphasis::{DeEmphasis, PreEmphasis, TAU1_50US, TAU2_15US};
+pub use deemphasis::{DeEmphasis, PreEmphasis, Section, TAU1_50US, TAU2_15US};
 pub use encoder_bit_allocator::{
     allocate_bits, available_data_bits, demand_bits, fixed_bit_budget, sample_bits_for, snr_db,
     BitAllocError, FixedBitBudget, SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT,

@@ -227,16 +227,17 @@ fn bool_opt(s: Option<&str>, name: &str, default: bool) -> Result<bool> {
 
 /// Parse the `emphasis` option: `"none"` (default) delivers PCM
 /// unaltered; `"50/15"` (also accepted as `"5015"` / `"50_15"`) selects
-/// the §2.4.2.4 50/15 µs pre-emphasis (applied at encode, undone by the
-/// decoder). The reserved `'10'` code and the CCITT J.17 curve are not
-/// offered on the encode side (J.17 is an unstaged docs gap — see
-/// [`crate::deemphasis`]).
+/// the §2.4.2.4 50/15 µs pre-emphasis and `"j17"` (also `"j.17"` /
+/// `"ccitt_j17"`) the CCITT J.17 pre-emphasis (applied at encode,
+/// undone by the decoder — see [`crate::deemphasis`] and
+/// [`crate::j17`]). The reserved `'10'` code is not offered.
 fn emphasis_opt(s: Option<&str>) -> Result<Emphasis> {
     match s {
         None | Some("none") | Some("0") => Ok(Emphasis::None),
         Some("50/15") | Some("5015") | Some("50_15") => Ok(Emphasis::FiftyFifteen),
+        Some("j17") | Some("j.17") | Some("ccitt_j17") => Ok(Emphasis::CcittJ17),
         Some(other) => Err(Error::invalid(format!(
-            "oxideav-mp2: emphasis={other:?} not recognised (none / 50/15)"
+            "oxideav-mp2: emphasis={other:?} not recognised (none / 50/15 / j17)"
         ))),
     }
 }
@@ -337,10 +338,10 @@ fn build_header(
 ///   the Annex B Table B.5 fields (header second half + bit-allocation
 ///   + scfsi); default `"false"` emits unprotected frames.
 /// * `emphasis` — `"50/15"` applies the §2.4.2.4 50/15 µs pre-emphasis
+///   and `"j17"` the CCITT J.17 pre-emphasis (see [`crate::j17`])
 ///   before quantization and signals the header field, so a decoder
 ///   undoes it via de-emphasis; default `"none"` encodes the PCM
-///   unaltered. (The reserved `'10'` code and CCITT J.17 are not
-///   offered — J.17 is an unstaged docs gap.)
+///   unaltered. (The reserved `'10'` code is not offered.)
 /// * `copyright` / `original` / `private` — the §2.4.2.3 header
 ///   metadata flags (`"true"` / `"false"`). They carry no
 ///   signal-processing effect and are round-tripped verbatim on decode;
@@ -863,9 +864,10 @@ mod tests {
         bad_ff.options.insert("freeformat", "maybe");
         assert!(make_encoder(&bad_ff).is_err());
 
-        // unrecognised emphasis value.
+        // unrecognised emphasis value (the reserved '10' code has no
+        // accepted spelling).
         let mut bad_emph = params(44_100, 2, None);
-        bad_emph.options.insert("emphasis", "j17");
+        bad_emph.options.insert("emphasis", "reserved");
         assert!(make_encoder(&bad_emph).is_err());
     }
 
@@ -875,6 +877,9 @@ mod tests {
         assert_eq!(emphasis_opt(Some("none")).unwrap(), Emphasis::None);
         for s in ["50/15", "5015", "50_15"] {
             assert_eq!(emphasis_opt(Some(s)).unwrap(), Emphasis::FiftyFifteen);
+        }
+        for s in ["j17", "j.17", "ccitt_j17"] {
+            assert_eq!(emphasis_opt(Some(s)).unwrap(), Emphasis::CcittJ17);
         }
         assert!(emphasis_opt(Some("garbage")).is_err());
     }
@@ -904,6 +909,36 @@ mod tests {
 
         // And the full registry round-trip (pre-emphasis encode →
         // de-emphasis decode) reproduces the tone at the right shape.
+        let planes = encode_decode_through(&p, 44_100);
+        assert_eq!(planes[0].len(), 4 * PCM_SAMPLES_PER_CHANNEL);
+    }
+
+    #[test]
+    fn emphasis_j17_option_signals_the_header_and_round_trips() {
+        let mut p = params(44_100, 2, Some(192_000));
+        p.options.insert("emphasis", "j17");
+
+        // The emitted frame headers must signal the CCITT J.17 curve.
+        let mut enc = make_encoder(&p).unwrap();
+        let n = 4 * PCM_SAMPLES_PER_CHANNEL;
+        let plane = tone_plane(n, 1_000.0, 44_100, 0.5);
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![plane.clone(), plane],
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+        let mut stream = Vec::new();
+        while let Ok(pk) = enc.receive_packet() {
+            stream.extend_from_slice(&pk.data);
+        }
+        let header = FrameHeader::parse(&stream).expect("parse first frame");
+        assert_eq!(header.emphasis, Emphasis::CcittJ17);
+
+        // And the full registry round-trip (J.17 pre-emphasis encode →
+        // J.17 de-emphasis decode) reproduces the tone at the right
+        // shape.
         let planes = encode_decode_through(&p, 44_100);
         assert_eq!(planes[0].len(), 4 * PCM_SAMPLES_PER_CHANNEL);
     }

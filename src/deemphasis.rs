@@ -63,28 +63,63 @@
 //!
 //! ## CCITT J.17 (`'11'`)
 //!
-//! The J.17 curve's exact response is defined by CCITT Recommendation
-//! J.17, which is **not** part of the staged ISO/IEC 11172-3 /
-//! 13818-3 material, so its filter coefficients cannot be derived
-//! clean-room here. A J.17-flagged stream is therefore delivered
-//! unfiltered (the historical behaviour of this decoder for *all*
-//! emphasis modes) and [`DeEmphasis::for_header`] returns [`None`] for
-//! it; see the crate README "Not yet supported" note. Enabling J.17
-//! de-emphasis requires staging Recommendation J.17.
+//! The J.17 characteristic — a first-order shelf with the pre-emphasis
+//! zero at ≈ 477.5 Hz and pole at ≈ 4134 Hz, 18.75 dB asymptote span —
+//! is staged in `docs/audio/mp3/mpeg-audio-emphasis-j17-deemphasis.md`
+//! and implemented in [`crate::j17`]: because a single bilinear
+//! first-order section cannot hold the curve's ± 0.25 dB tolerance
+//! across the Layer II rates, the digital realisation is an order-3
+//! cascade of real-pole/zero sections fitted per sample rate (see the
+//! [`crate::j17`] module docs for the derivation and normalisation).
+//! Both [`DeEmphasis::ccitt_j17`] (decode) and
+//! [`PreEmphasis::ccitt_j17`] (its exact inverse, encode) are exposed,
+//! and [`DeEmphasis::for_header`] selects the curve for
+//! `emphasis == '11'` frames.
 
 use crate::header::{Emphasis, FrameHeader};
 
-/// First-order §2.4.2.4 de-emphasis IIR, one instance per output
-/// channel. State (`x[n−1]`, `y[n−1]`) persists across frames so the
-/// filter has no per-frame discontinuity — a single logical stream
-/// shares one filter per channel, re-created only on a decoder reset.
+/// One first-order direct-form-I stage of an emphasis filter:
+/// `H(z) = (b0 + b1·z⁻¹) / (1 + a1·z⁻¹)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Section {
+    /// Numerator tap on `x[n]`.
+    pub b0: f64,
+    /// Numerator tap on `x[n−1]`.
+    pub b1: f64,
+    /// Denominator tap on `y[n−1]` (`a0` is 1).
+    pub a1: f64,
+}
+
+impl Section {
+    /// The exact inverse stage: `1/H(z) = (1 + a1·z⁻¹)/(b0 + b1·z⁻¹)`,
+    /// i.e. `(b0, b1, a1) ↦ (1/b0, a1/b0, b1/b0)`. Stable whenever the
+    /// original section is minimum-phase (its zero inside the unit
+    /// circle).
+    #[must_use]
+    pub fn inverse(&self) -> Section {
+        Section {
+            b0: 1.0 / self.b0,
+            b1: self.a1 / self.b0,
+            a1: self.b1 / self.b0,
+        }
+    }
+}
+
+/// Maximum number of cascaded first-order sections an emphasis filter
+/// uses (the J.17 realisation needs [`crate::j17::J17_SECTIONS`] = 3;
+/// 50/15 µs needs one).
+pub const MAX_SECTIONS: usize = crate::j17::J17_SECTIONS;
+
+/// §2.4.2.4 de-emphasis IIR — a short cascade of first-order sections,
+/// one instance per output channel. Per-section state (`x[n−1]`,
+/// `y[n−1]`) persists across frames so the filter has no per-frame
+/// discontinuity — a single logical stream shares one filter per
+/// channel, re-created only on a decoder reset.
 #[derive(Debug, Clone, Copy)]
 pub struct DeEmphasis {
-    b0: f64,
-    b1: f64,
-    a1: f64,
-    x1: f64,
-    y1: f64,
+    sections: [Section; MAX_SECTIONS],
+    state: [(f64, f64); MAX_SECTIONS],
+    len: usize,
 }
 
 /// 50/15 µs first time constant (the `τ1 = 50 µs` de-emphasis pole).
@@ -92,50 +127,95 @@ pub const TAU1_50US: f64 = 50e-6;
 /// 50/15 µs second time constant (the `τ2 = 15 µs` zero).
 pub const TAU2_15US: f64 = 15e-6;
 
+/// Compute one direct-form-I step through a section cascade, advancing
+/// each section's `(x[n−1], y[n−1])` state.
+#[inline]
+fn cascade_step(
+    sections: &[Section; MAX_SECTIONS],
+    state: &mut [(f64, f64); MAX_SECTIONS],
+    len: usize,
+    x: f64,
+) -> f64 {
+    let mut v = x;
+    for i in 0..len {
+        let s = &sections[i];
+        let (x1, y1) = state[i];
+        let y = s.b0 * v + s.b1 * x1 - s.a1 * y1;
+        state[i] = (v, y);
+        v = y;
+    }
+    v
+}
+
+/// The single 50/15 µs de-emphasis section (bilinear transform of the
+/// two-time-constant curve — see the module docs).
+fn fifty_fifteen_deemphasis_section(fs: u32) -> Section {
+    let k = 2.0 * f64::from(fs);
+    let t1k = TAU1_50US * k;
+    let t2k = TAU2_15US * k;
+    let denom = 1.0 + t1k;
+    Section {
+        b0: (1.0 + t2k) / denom,
+        b1: (1.0 - t2k) / denom,
+        a1: (1.0 - t1k) / denom,
+    }
+}
+
 impl DeEmphasis {
+    fn from_sections(sections: &[Section]) -> Self {
+        let mut all = [Section {
+            b0: 1.0,
+            b1: 0.0,
+            a1: 0.0,
+        }; MAX_SECTIONS];
+        all[..sections.len()].copy_from_slice(sections);
+        DeEmphasis {
+            sections: all,
+            state: [(0.0, 0.0); MAX_SECTIONS],
+            len: sections.len(),
+        }
+    }
+
     /// Build the 50/15 µs de-emphasis filter for output sample rate
     /// `fs` (Hz), deriving the coefficients from the time constants via
     /// the bilinear transform (see the module docs). State starts at
     /// rest (`x[−1] = y[−1] = 0`).
     #[must_use]
     pub fn fifty_fifteen(fs: u32) -> Self {
-        let k = 2.0 * f64::from(fs);
-        let t1k = TAU1_50US * k;
-        let t2k = TAU2_15US * k;
-        let denom = 1.0 + t1k;
-        DeEmphasis {
-            b0: (1.0 + t2k) / denom,
-            b1: (1.0 - t2k) / denom,
-            a1: (1.0 - t1k) / denom,
-            x1: 0.0,
-            y1: 0.0,
-        }
+        Self::from_sections(&[fifty_fifteen_deemphasis_section(fs)])
+    }
+
+    /// Build the CCITT J.17 de-emphasis filter for output sample rate
+    /// `fs` (Hz) — the order-3 minimum-phase cascade fitted to the
+    /// staged J.17 shelf (see [`crate::j17`]). State starts at rest.
+    #[must_use]
+    pub fn ccitt_j17(fs: u32) -> Self {
+        Self::from_sections(&crate::j17::deemphasis_sections(fs))
     }
 
     /// Build the de-emphasis filter a `header` calls for, or [`None`]
-    /// when no clean-room-implementable de-emphasis applies:
+    /// when the PCM is delivered unfiltered:
     ///
     /// * [`Emphasis::None`] → `None` (deliver PCM unfiltered);
     /// * [`Emphasis::FiftyFifteen`] → the 50/15 µs filter at
     ///   `header.sample_rate`;
-    /// * [`Emphasis::CcittJ17`] → `None` (docs gap — Recommendation
-    ///   J.17 is not staged; see module docs).
+    /// * [`Emphasis::CcittJ17`] → the J.17 filter at
+    ///   `header.sample_rate`.
     #[must_use]
     pub fn for_header(header: &FrameHeader) -> Option<Self> {
         match header.emphasis {
             Emphasis::FiftyFifteen => Some(Self::fifty_fifteen(header.sample_rate)),
-            Emphasis::None | Emphasis::CcittJ17 => None,
+            Emphasis::CcittJ17 => Some(Self::ccitt_j17(header.sample_rate)),
+            Emphasis::None => None,
         }
     }
 
-    /// Filter one sample, advancing the `x[n−1]` / `y[n−1]` state.
+    /// Filter one sample, advancing each section's `x[n−1]` / `y[n−1]`
+    /// state.
     #[must_use]
     #[inline]
     pub fn process_sample(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.b1 * self.x1 - self.a1 * self.y1;
-        self.x1 = x;
-        self.y1 = y;
-        y
+        cascade_step(&self.sections, &mut self.state, self.len, x)
     }
 
     /// Filter a whole channel's PCM block in place.
@@ -145,10 +225,24 @@ impl DeEmphasis {
         }
     }
 
-    /// The direct-form-I coefficients `(b0, b1, a1)` (a0 is 1).
+    /// The direct-form-I coefficients `(b0, b1, a1)` of the **first**
+    /// (for 50/15 µs: the only) section; `a0` is 1. See [`Self::sections`]
+    /// for the whole cascade.
     #[must_use]
     pub fn coefficients(&self) -> (f64, f64, f64) {
-        (self.b0, self.b1, self.a1)
+        (
+            self.sections[0].b0,
+            self.sections[0].b1,
+            self.sections[0].a1,
+        )
+    }
+
+    /// The active first-order sections of the cascade, in processing
+    /// order. Comparing two filters' section slices tells whether they
+    /// realise the same curve at the same rate (state excluded).
+    #[must_use]
+    pub fn sections(&self) -> &[Section] {
+        &self.sections[..self.len]
     }
 }
 
@@ -168,30 +262,62 @@ impl DeEmphasis {
 /// so `b0 = (1 + τ1·k)/(1 + τ2·k)`, `b1 = (1 − τ1·k)/(1 + τ2·k)`,
 /// `a1 = (1 − τ2·k)/(1 + τ2·k)` with `k = 2·fs`. DC gain is again 1 and
 /// the high-frequency asymptote is `τ1/τ2 = 3.33` (+10.458 dB boost).
+///
+/// The CCITT J.17 pre-emphasis ([`Self::ccitt_j17`]) is likewise the
+/// exact section-by-section inverse of [`DeEmphasis::ccitt_j17`] —
+/// well-defined because the fitted de-emphasis cascade is minimum-phase
+/// (see [`crate::j17`]).
 #[derive(Debug, Clone, Copy)]
 pub struct PreEmphasis {
-    b0: f64,
-    b1: f64,
-    a1: f64,
-    x1: f64,
-    y1: f64,
+    sections: [Section; MAX_SECTIONS],
+    state: [(f64, f64); MAX_SECTIONS],
+    len: usize,
 }
 
 impl PreEmphasis {
+    fn from_sections(sections: &[Section]) -> Self {
+        let mut all = [Section {
+            b0: 1.0,
+            b1: 0.0,
+            a1: 0.0,
+        }; MAX_SECTIONS];
+        all[..sections.len()].copy_from_slice(sections);
+        PreEmphasis {
+            sections: all,
+            state: [(0.0, 0.0); MAX_SECTIONS],
+            len: sections.len(),
+        }
+    }
+
     /// Build the 50/15 µs pre-emphasis filter for sample rate `fs`
     /// (Hz). State starts at rest.
     #[must_use]
     pub fn fifty_fifteen(fs: u32) -> Self {
-        let k = 2.0 * f64::from(fs);
-        let t1k = TAU1_50US * k;
-        let t2k = TAU2_15US * k;
-        let denom = 1.0 + t2k;
-        PreEmphasis {
-            b0: (1.0 + t1k) / denom,
-            b1: (1.0 - t1k) / denom,
-            a1: (1.0 - t2k) / denom,
-            x1: 0.0,
-            y1: 0.0,
+        Self::from_sections(&[fifty_fifteen_deemphasis_section(fs).inverse()])
+    }
+
+    /// Build the CCITT J.17 pre-emphasis filter for sample rate `fs`
+    /// (Hz): the section-by-section inverse of
+    /// [`DeEmphasis::ccitt_j17`], so the pre → de cascade is identity.
+    /// State starts at rest.
+    #[must_use]
+    pub fn ccitt_j17(fs: u32) -> Self {
+        let de = crate::j17::deemphasis_sections(fs);
+        let mut inv = de;
+        for (dst, src) in inv.iter_mut().zip(&de) {
+            *dst = src.inverse();
+        }
+        Self::from_sections(&inv)
+    }
+
+    /// Build the pre-emphasis filter a `header` calls for, or [`None`]
+    /// when the PCM is encoded unaltered (`emphasis == '00'`).
+    #[must_use]
+    pub fn for_header(header: &FrameHeader) -> Option<Self> {
+        match header.emphasis {
+            Emphasis::FiftyFifteen => Some(Self::fifty_fifteen(header.sample_rate)),
+            Emphasis::CcittJ17 => Some(Self::ccitt_j17(header.sample_rate)),
+            Emphasis::None => None,
         }
     }
 
@@ -199,10 +325,7 @@ impl PreEmphasis {
     #[must_use]
     #[inline]
     pub fn process_sample(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.b1 * self.x1 - self.a1 * self.y1;
-        self.x1 = x;
-        self.y1 = y;
-        y
+        cascade_step(&self.sections, &mut self.state, self.len, x)
     }
 
     /// Filter a whole channel's PCM block in place.
@@ -212,10 +335,23 @@ impl PreEmphasis {
         }
     }
 
-    /// The direct-form-I coefficients `(b0, b1, a1)` (a0 is 1).
+    /// The direct-form-I coefficients `(b0, b1, a1)` of the **first**
+    /// (for 50/15 µs: the only) section; `a0` is 1. See [`Self::sections`]
+    /// for the whole cascade.
     #[must_use]
     pub fn coefficients(&self) -> (f64, f64, f64) {
-        (self.b0, self.b1, self.a1)
+        (
+            self.sections[0].b0,
+            self.sections[0].b1,
+            self.sections[0].a1,
+        )
+    }
+
+    /// The active first-order sections of the cascade, in processing
+    /// order (state excluded).
+    #[must_use]
+    pub fn sections(&self) -> &[Section] {
+        &self.sections[..self.len]
     }
 }
 
@@ -241,9 +377,14 @@ mod tests {
     }
 
     #[test]
-    fn none_and_j17_yield_no_filter() {
+    fn none_yields_no_filter_and_j17_yields_the_j17_cascade() {
         assert!(DeEmphasis::for_header(&header_with(Emphasis::None, 48_000)).is_none());
-        assert!(DeEmphasis::for_header(&header_with(Emphasis::CcittJ17, 48_000)).is_none());
+        assert!(PreEmphasis::for_header(&header_with(Emphasis::None, 48_000)).is_none());
+        let j17 = DeEmphasis::for_header(&header_with(Emphasis::CcittJ17, 48_000)).unwrap();
+        assert_eq!(j17.sections(), DeEmphasis::ccitt_j17(48_000).sections());
+        assert_eq!(j17.sections().len(), crate::j17::J17_SECTIONS);
+        let pre = PreEmphasis::for_header(&header_with(Emphasis::CcittJ17, 48_000)).unwrap();
+        assert_eq!(pre.sections(), PreEmphasis::ccitt_j17(48_000).sections());
     }
 
     #[test]
@@ -337,5 +478,74 @@ mod tests {
             y = f.process_sample(0.25);
         }
         assert!((y - 0.25).abs() < 1e-9, "pre-emphasis DC gain drifted: {y}");
+    }
+
+    #[test]
+    fn j17_dc_gain_is_unity() {
+        // The J.17 de-emphasis (and its inverse) are normalised to
+        // unity DC gain, like the 50/15 µs pair — see `crate::j17`.
+        for fs in [16_000, 22_050, 24_000, 32_000, 44_100, 48_000] {
+            let mut de = DeEmphasis::ccitt_j17(fs);
+            let mut pre = PreEmphasis::ccitt_j17(fs);
+            let (mut yd, mut yp) = (0.0, 0.0);
+            for _ in 0..8000 {
+                yd = de.process_sample(0.5);
+                yp = pre.process_sample(0.5);
+            }
+            assert!((yd - 0.5).abs() < 1e-6, "fs={fs}: de-emphasis DC {yd}");
+            assert!((yp - 0.5).abs() < 1e-6, "fs={fs}: pre-emphasis DC {yp}");
+        }
+    }
+
+    #[test]
+    fn j17_nyquist_shelf_matches_the_analytic_curve() {
+        // A full-scale Nyquist alternation settles to the analytic
+        // shelf value |H(f = fs/2)| (≈ −18.6 dB at 48 kHz — close to
+        // the 10·log10(75) = 18.75 dB asymptote).
+        let fs = 48_000;
+        let mut f = DeEmphasis::ccitt_j17(fs);
+        let mut last = 0.0;
+        for n in 0..8000 {
+            let x = if n % 2 == 0 { 1.0 } else { -1.0 };
+            last = f.process_sample(x);
+        }
+        let expected = crate::j17::deemphasis_power_gain(f64::from(fs) / 2.0).sqrt();
+        assert!(
+            (last.abs() - expected).abs() < 1e-3,
+            "nyquist magnitude {} != analytic {expected}",
+            last.abs()
+        );
+    }
+
+    #[test]
+    fn j17_pre_then_de_is_identity() {
+        // The J.17 pre-emphasis is the exact section-by-section inverse
+        // of the de-emphasis, so the cascade reconstructs the input.
+        for fs in [16_000, 22_050, 24_000, 32_000, 44_100, 48_000] {
+            let mut pre = PreEmphasis::ccitt_j17(fs);
+            let mut de = DeEmphasis::ccitt_j17(fs);
+            let mut acc = 0.123_456_f64;
+            for n in 0..3000 {
+                acc = (acc * 1.1 + 0.017).fract();
+                let x = 2.0 * acc - 1.0;
+                let recon = de.process_sample(pre.process_sample(x));
+                if n > 50 {
+                    assert!(
+                        (recon - x).abs() < 1e-9,
+                        "fs={fs} n={n}: J.17 cascade not identity ({recon} != {x})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn section_inverse_round_trips() {
+        let s = fifty_fifteen_deemphasis_section(44_100);
+        let inv = s.inverse();
+        let back = inv.inverse();
+        assert!((back.b0 - s.b0).abs() < 1e-12);
+        assert!((back.b1 - s.b1).abs() < 1e-12);
+        assert!((back.a1 - s.a1).abs() < 1e-12);
     }
 }

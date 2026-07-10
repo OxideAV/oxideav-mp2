@@ -17,28 +17,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `τ2 = 15 µs` time constants via the bilinear transform (unity DC gain,
   −10.458 dB HF shelf). Per-channel filter state is threaded across
   frames through `FrameDecodeState` and re-zeroed on `reset()`. The
-  `'00'` (none) and `'11'` (CCITT J.17 — an unstaged docs gap) modes are
-  delivered unfiltered. New: `deemphasis` unit tests + a
-  `tests/deemphasis.rs` integration test that patches an unaltered
-  stream's header emphasis bits and pins the decode against the
-  reference filter.
+  `'00'` (none) mode is delivered unfiltered. New: `deemphasis` unit
+  tests + a `tests/deemphasis.rs` integration test that patches an
+  unaltered stream's header emphasis bits and pins the decode against
+  the reference filter.
+
+- **§2.4.2.4 CCITT J.17 de-emphasis / pre-emphasis (`src/j17.rs`,
+  `src/deemphasis.rs`)**. The `'11'` emphasis mode is now implemented
+  on both decode and encode from the staged
+  `docs/audio/mp3/mpeg-audio-emphasis-j17-deemphasis.md` note: a
+  first-order shelf (pre-emphasis zero ≈ 477.5 Hz, pole ≈ 4134 Hz,
+  `10·log10(75) = 18.75 dB` asymptote span, ± 0.25 dB tolerance),
+  normalised here to unity DC gain like the 50/15 µs pair. Because the
+  bilinear warp breaks a single digital section's tolerance across the
+  Layer II rates, the realisation is an order-3 minimum-phase cascade
+  of real-pole/zero sections fitted **per sample rate** by a
+  Levenberg–Marquardt log-magnitude fit seeded from the bilinear shelf
+  (`DeEmphasis`/`PreEmphasis` are now section cascades; `Section` is
+  public). The fit stays < 0.02 dB from the analytic curve at all six
+  rates (measured to Nyquist on an independent dense grid) and the
+  44.1 kHz result is cross-checked against the note's reference 3-pole
+  fit; the pre→de cascade is identity to machine precision. New:
+  `j17` unit tests (fit tolerance / stability / minimum phase /
+  reference cross-check) plus `tests/deemphasis.rs` J.17 header-patch
+  and acoustic round-trip integration tests.
 
 - **§2.4.2.4 pre-emphasis on encode (`src/deemphasis.rs`,
   `src/encoder_frame.rs`)**. Symmetric encode counterpart: when a header
-  signals the 50/15 µs curve the encoder pre-emphasises the PCM (per
-  channel, state threaded through `EncodeFrameState`) before both the
-  §C.1.3 analysis filterbank and the Annex D psychoacoustic model.
-  `PreEmphasis` is the exact algebraic inverse of `DeEmphasis`; the
-  pre→de cascade is identity to machine precision, verified across all
-  six Layer II rates, plus an acoustic encode→decode round-trip test.
+  signals the 50/15 µs or CCITT J.17 curve the encoder pre-emphasises
+  the PCM (per channel, state threaded through `EncodeFrameState`)
+  before both the §C.1.3 analysis filterbank and the Annex D
+  psychoacoustic model. `PreEmphasis` is the exact algebraic inverse of
+  `DeEmphasis` (per-section inversion, `PreEmphasis::for_header` mirrors
+  the decode-side selection); the pre→de cascade is identity to machine
+  precision, verified across all six Layer II rates, plus acoustic
+  encode→decode round-trip tests for both curves.
 
 - **Registry-encoder `emphasis` + `copyright` / `original` / `private`
   options (`src/codec_encoder.rs`)**. `make_encoder` gains
-  `emphasis=50/15` (applies §2.4.2.4 pre-emphasis and signals the field;
-  default `none`; J.17 not offered) and the three §2.4.2.3 header
-  metadata flags as booleans (round-tripped verbatim on decode).
-  Unrecognised values are rejected; both are covered by round-trip
-  tests.
+  `emphasis=50/15` and `emphasis=j17` (applies the matching §2.4.2.4
+  pre-emphasis and signals the field; default `none`) and the three
+  §2.4.2.3 header metadata flags as booleans (round-tripped verbatim on
+  decode). Unrecognised values are rejected; both are covered by
+  round-trip tests.
 
 - **§2.4.2.3 padding-bit rate control (`PaddingScheduler`,
   `src/header.rs` / `src/encoder_frame.rs` / `src/codec_encoder.rs`)**.

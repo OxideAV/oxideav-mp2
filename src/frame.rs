@@ -215,12 +215,11 @@ pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame, FrameError> {
 #[derive(Debug, Default)]
 pub struct FrameDecodeState {
     filterbank: Vec<SynthesisFilterbank>,
-    /// Per-channel §2.4.2.4 de-emphasis filter, lazily instantiated the
-    /// first time a frame signals a non-`None` (and implementable)
-    /// `emphasis`, and carried across frames so the IIR has no
-    /// per-frame discontinuity. `None` per channel means "deliver
-    /// unfiltered" (either `emphasis == '00'` or the unstaged J.17
-    /// curve — see [`crate::deemphasis`]).
+    /// Per-channel §2.4.2.4 de-emphasis filter (50/15 µs or CCITT
+    /// J.17 — see [`crate::deemphasis`]), lazily instantiated the first
+    /// time a frame signals a non-`None` `emphasis`, and carried across
+    /// frames so the IIR has no per-frame discontinuity. `None` per
+    /// channel means "deliver unfiltered" (`emphasis == '00'`).
     deemphasis: Vec<Option<DeEmphasis>>,
 }
 
@@ -259,8 +258,7 @@ impl FrameDecodeState {
     /// channel's reconstructed PCM in place, threading the per-channel
     /// IIR state across frames. The per-channel filter is (re)built the
     /// first time a channel needs one and whenever the required curve
-    /// changes; `emphasis == '00'` (or the unstaged J.17 curve) leaves
-    /// the samples untouched.
+    /// changes; `emphasis == '00'` leaves the samples untouched.
     fn apply_deemphasis(&mut self, header: &FrameHeader, pcm: &mut [Vec<f64>]) {
         let wanted = DeEmphasis::for_header(header);
         for (ch, samples) in pcm.iter_mut().enumerate() {
@@ -269,10 +267,10 @@ impl FrameDecodeState {
                 Some(template) => {
                     // Instantiate on first need; preserve running state
                     // across frames once created. If a frame switches to
-                    // a rate whose coefficients differ (a variable-rate
-                    // stream), rebuild the filter at the new rate.
+                    // another curve or rate (a variable stream), rebuild
+                    // the filter with the new sections.
                     let rebuild = match slot {
-                        Some(existing) => existing.coefficients() != template.coefficients(),
+                        Some(existing) => existing.sections() != template.sections(),
                         None => true,
                     };
                     if rebuild {
