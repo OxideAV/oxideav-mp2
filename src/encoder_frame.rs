@@ -60,12 +60,13 @@ use crate::analysis::{AnalysisFilterbank, NUM_SUBBANDS};
 use crate::audio_data::{write_audio_data_with_section_bits, AudioDataWriteError, Scfsi};
 use crate::bitalloc::{class_of_quantization, BitAllocTable};
 use crate::crc::crc16_layer2;
+use crate::deemphasis::PreEmphasis;
 use crate::encoder_bit_allocator::{allocate_bits, BitAllocError, SmrTable};
 use crate::encoder_samples::{write_triplet_scaled, SampleWriteError};
 use crate::encoder_scalefactors::{compute_scalefactors, SUBBAND_SAMPLES_PER_FRAME};
 use crate::encoder_scfsi::select_scfsi;
 use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME};
-use crate::header::{FrameHeader, HeaderError, PaddingScheduler};
+use crate::header::{Emphasis, FrameHeader, HeaderError, PaddingScheduler};
 use crate::psy::{
     annex_d_sampling_rate, compute_smr_model1_frame, compute_smr_model2_layer2_frame,
     Model2Layer2State, NUM_SUBBANDS_LAYER2,
@@ -263,6 +264,12 @@ pub struct EncodeFrameState {
     /// Zero-filled at stream start (consistent with the §C.1.3 zeroed
     /// X buffer); only the Model-1 auto-SMR path uses it.
     psy1_history: Vec<Vec<f64>>,
+    /// Per-channel §2.4.2.4 pre-emphasis filter, lazily instantiated the
+    /// first time a frame's header signals the 50/15 µs curve and
+    /// carried across frames so the IIR has no per-frame discontinuity
+    /// (the decoder's [`crate::deemphasis::DeEmphasis`] undoes it). Empty
+    /// / `None` per channel means "encode the PCM unaltered".
+    preemphasis: Vec<Option<PreEmphasis>>,
 }
 
 /// The §D.1 Step-1 net Layer II window delay in samples:
@@ -281,6 +288,7 @@ impl EncodeFrameState {
             filterbank: Vec::new(),
             model2: Vec::new(),
             psy1_history: Vec::new(),
+            preemphasis: Vec::new(),
         }
     }
 
@@ -298,6 +306,48 @@ impl EncodeFrameState {
         for h in &mut self.psy1_history {
             h.iter_mut().for_each(|s| *s = 0.0);
         }
+        for p in &mut self.preemphasis {
+            *p = None;
+        }
+    }
+
+    /// Apply the §2.4.2.4 pre-emphasis `header` calls for to each
+    /// channel's frame PCM, threading the per-channel IIR state across
+    /// frames. Returns an owned pre-emphasised copy when the header
+    /// signals the 50/15 µs curve, or [`None`] when no pre-emphasis
+    /// applies (`emphasis == '00'`, or the unstaged J.17 curve, which is
+    /// encoded unaltered). The returned buffer is used for **both** the
+    /// analysis filterbank and the psychoacoustic model so the encoded
+    /// signal and its bit allocation are consistent.
+    fn apply_preemphasis(
+        &mut self,
+        header: &FrameHeader,
+        pcm: &[Vec<f64>],
+    ) -> Option<Vec<Vec<f64>>> {
+        // Only the 50/15 µs curve is clean-room implementable (J.17
+        // needs an unstaged recommendation — see `crate::deemphasis`).
+        if header.emphasis != Emphasis::FiftyFifteen {
+            return None;
+        }
+        while self.preemphasis.len() < pcm.len() {
+            self.preemphasis.push(None);
+        }
+        let template = PreEmphasis::fifty_fifteen(header.sample_rate);
+        let mut out = pcm.to_vec();
+        for (ch, samples) in out.iter_mut().enumerate() {
+            let slot = &mut self.preemphasis[ch];
+            let rebuild = match slot {
+                Some(existing) => existing.coefficients() != template.coefficients(),
+                None => true,
+            };
+            if rebuild {
+                *slot = Some(template);
+            }
+            slot.as_mut()
+                .expect("pre-emphasis filter just set")
+                .process_in_place(samples);
+        }
+        Some(out)
     }
 
     fn ensure_channels(&mut self, channels: usize) {
@@ -1051,6 +1101,17 @@ fn encode_frame_inner_impl(
     }
 
     state.ensure_channels(channels);
+
+    // ---- §2.4.2.4 pre-emphasis ----
+    //
+    // When the header signals the 50/15 µs curve, pre-emphasise the PCM
+    // (per channel, state threaded across frames) *before* both the
+    // analysis filterbank and the psychoacoustic model so the encoded
+    // signal and its bit allocation are consistent; the decoder's
+    // matching de-emphasis restores the original spectral balance. The
+    // owned buffer must outlive every borrow of `pcm` below.
+    let preemph_pcm = state.apply_preemphasis(header, pcm);
+    let pcm: &[Vec<f64>] = preemph_pcm.as_deref().unwrap_or(pcm);
 
     // ---- §C.1.3 analysis filterbank ----
     //

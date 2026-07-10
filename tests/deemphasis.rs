@@ -1,14 +1,14 @@
-//! End-to-end §2.4.2.4 de-emphasis: a stream whose header signals the
-//! 50/15 µs curve decodes to PCM with the de-emphasis IIR applied,
-//! whereas an otherwise-identical `emphasis == '00'` stream does not.
+//! End-to-end §2.4.2.4 emphasis coverage:
 //!
-//! The `emphasis` field is a header flag that does not influence bit
-//! allocation or sample coding, so two streams encoded from the same
-//! PCM — one flagged `None`, one flagged `FiftyFifteen` — carry
-//! byte-identical audio-data sections. Their decodes therefore differ
-//! *only* by the decoder-applied de-emphasis, which this test pins
-//! exactly by running the reference [`DeEmphasis`] filter over the
-//! `None` decode and comparing.
+//! * `fifty_fifteen_stream_decodes_with_deemphasis_applied` isolates the
+//!   *decoder's* de-emphasis by hand-patching the header emphasis field
+//!   of an unaltered (`None`) stream, so the two decodes differ only by
+//!   the decoder-applied filter — pinned exactly against the reference
+//!   [`DeEmphasis`].
+//! * `preemphasis_encode_deemphasis_decode_recovers_tone` exercises the
+//!   full acoustic loop: the encoder pre-emphasises when the header
+//!   signals the curve, the decoder de-emphasises, and the original
+//!   spectrum is recovered.
 
 use oxideav_mp2::deemphasis::DeEmphasis;
 use oxideav_mp2::encoder_frame::encode_all_frames;
@@ -52,14 +52,28 @@ fn source_pcm() -> Vec<Vec<f64>> {
 
 #[test]
 fn fifty_fifteen_stream_decodes_with_deemphasis_applied() {
+    // Isolate the *decoder's* de-emphasis: encode with `None`, then
+    // hand-patch every frame header's 2-bit emphasis field to `'01'`
+    // (50/15 µs). At 48 kHz / 192 kbit/s each frame is a constant
+    // 144·192000/48000 = 576 bytes with no padding, and with the CRC
+    // suppressed (`protection_bit == true`) the emphasis bits — the two
+    // LSBs of header byte 3 — can be flipped without touching the
+    // audio-data payload. The two decodes then differ *only* by the
+    // decoder-applied de-emphasis.
     let pcm = source_pcm();
 
     let plain = encode_all_frames(&header(Emphasis::None), &pcm, 0).expect("encode plain");
-    let emph = encode_all_frames(&header(Emphasis::FiftyFifteen), &pcm, 0).expect("encode emph");
-
-    // The audio-data payload must be identical (only the header byte
-    // carrying the emphasis field differs).
-    assert_eq!(plain.len(), emph.len(), "frame sizing must match");
+    const FRAME_SIZE: usize = 576;
+    assert_eq!(
+        plain.len() % FRAME_SIZE,
+        0,
+        "expected constant 576-byte frames"
+    );
+    let mut emph = plain.clone();
+    for f in (0..emph.len()).step_by(FRAME_SIZE) {
+        // emphasis == word & 0x3 → the two LSBs of header byte 3.
+        emph[f + 3] = (emph[f + 3] & 0xFC) | 0x01;
+    }
 
     let plain_pcm = decode_all_frames(&plain).expect("decode plain");
     let emph_pcm = decode_all_frames(&emph).expect("decode emph");
@@ -105,4 +119,58 @@ fn ccitt_j17_stream_decodes_unfiltered() {
             assert!((a - b).abs() < 1e-12, "j17 must be unfiltered like none");
         }
     }
+}
+
+/// Naive single-bin energy at frequency `f` (Hz) over `x` sampled at
+/// `fs`, skipping the filterbank group-delay preamble.
+fn bin_energy(x: &[f64], fs: f64, f: f64, skip: usize) -> f64 {
+    let (mut re, mut im) = (0.0, 0.0);
+    for (n, &s) in x.iter().enumerate().skip(skip) {
+        let w = 2.0 * std::f64::consts::PI * f * (n as f64) / fs;
+        re += s * w.cos();
+        im += s * w.sin();
+    }
+    re * re + im * im
+}
+
+#[test]
+fn preemphasis_encode_deemphasis_decode_recovers_tone() {
+    // Encoding with the 50/15 µs curve pre-emphasises the PCM before
+    // quantization; the decoder de-emphasises it. The round-trip must
+    // reproduce the *original* spectral content (both the 1 kHz and the
+    // 15 kHz component), not the pre-emphasised one.
+    let pcm = source_pcm();
+    let fs = 48_000.0;
+
+    let stream = encode_all_frames(&header(Emphasis::FiftyFifteen), &pcm, 0).expect("encode");
+    let out = decode_all_frames(&stream).expect("decode");
+    assert_eq!(out.len(), 2);
+
+    // Skip the combined analysis+synthesis filterbank group delay.
+    let skip = 512;
+    for (ch, chan) in out.iter().enumerate() {
+        let e_lo = bin_energy(chan, fs, 1_000.0, skip);
+        let e_hi = bin_energy(chan, fs, 15_000.0, skip);
+        let e_probe = bin_energy(chan, fs, 7_000.0, skip);
+        // Both source tones dominate an unrelated probe bin, proving the
+        // right spectrum is reproduced rather than broadband noise.
+        assert!(
+            e_lo > 50.0 * e_probe,
+            "ch{ch}: 1 kHz tone not recovered (lo={e_lo}, probe={e_probe})"
+        );
+        assert!(
+            e_hi > 50.0 * e_probe,
+            "ch{ch}: 15 kHz tone not recovered after de-emphasis (hi={e_hi}, probe={e_probe})"
+        );
+    }
+
+    // The pre-emphasis genuinely altered the encoded audio data (the two
+    // streams differ beyond the single header emphasis byte per frame).
+    let plain = encode_all_frames(&header(Emphasis::None), &pcm, 0).expect("encode plain");
+    assert_eq!(plain.len(), stream.len());
+    let differing_bytes = plain.iter().zip(&stream).filter(|(a, b)| a != b).count();
+    assert!(
+        differing_bytes > 3,
+        "pre-emphasis changed only {differing_bytes} bytes — audio data not re-encoded"
+    );
 }

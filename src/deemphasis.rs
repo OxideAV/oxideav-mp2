@@ -152,6 +152,73 @@ impl DeEmphasis {
     }
 }
 
+/// Encoder-side §2.4.2.4 **pre-emphasis** — the exact inverse of
+/// [`DeEmphasis`]. Applying pre-emphasis before quantization and
+/// signalling the matching `emphasis` field lets a decoder recover the
+/// original spectral balance via [`DeEmphasis`]. Same clean-room
+/// bilinear derivation, with the numerator / denominator time constants
+/// swapped:
+///
+/// ```text
+///            1 + s·τ1
+///   H_pre(s) = --------      (τ1 = 50 µs, τ2 = 15 µs)
+///            1 + s·τ2
+/// ```
+///
+/// so `b0 = (1 + τ1·k)/(1 + τ2·k)`, `b1 = (1 − τ1·k)/(1 + τ2·k)`,
+/// `a1 = (1 − τ2·k)/(1 + τ2·k)` with `k = 2·fs`. DC gain is again 1 and
+/// the high-frequency asymptote is `τ1/τ2 = 3.33` (+10.458 dB boost).
+#[derive(Debug, Clone, Copy)]
+pub struct PreEmphasis {
+    b0: f64,
+    b1: f64,
+    a1: f64,
+    x1: f64,
+    y1: f64,
+}
+
+impl PreEmphasis {
+    /// Build the 50/15 µs pre-emphasis filter for sample rate `fs`
+    /// (Hz). State starts at rest.
+    #[must_use]
+    pub fn fifty_fifteen(fs: u32) -> Self {
+        let k = 2.0 * f64::from(fs);
+        let t1k = TAU1_50US * k;
+        let t2k = TAU2_15US * k;
+        let denom = 1.0 + t2k;
+        PreEmphasis {
+            b0: (1.0 + t1k) / denom,
+            b1: (1.0 - t1k) / denom,
+            a1: (1.0 - t2k) / denom,
+            x1: 0.0,
+            y1: 0.0,
+        }
+    }
+
+    /// Filter one sample, advancing state.
+    #[must_use]
+    #[inline]
+    pub fn process_sample(&mut self, x: f64) -> f64 {
+        let y = self.b0 * x + self.b1 * self.x1 - self.a1 * self.y1;
+        self.x1 = x;
+        self.y1 = y;
+        y
+    }
+
+    /// Filter a whole channel's PCM block in place.
+    pub fn process_in_place(&mut self, pcm: &mut [f64]) {
+        for s in pcm.iter_mut() {
+            *s = self.process_sample(*s);
+        }
+    }
+
+    /// The direct-form-I coefficients `(b0, b1, a1)` (a0 is 1).
+    #[must_use]
+    pub fn coefficients(&self) -> (f64, f64, f64) {
+        (self.b0, self.b1, self.a1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +304,38 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(f.process_sample(0.0), 0.0);
         }
+    }
+
+    #[test]
+    fn pre_then_de_is_identity() {
+        // Pre-emphasis followed by de-emphasis reconstructs the input to
+        // machine precision (they are exact inverses).
+        for fs in [16_000, 22_050, 24_000, 32_000, 44_100, 48_000] {
+            let mut pre = PreEmphasis::fifty_fifteen(fs);
+            let mut de = DeEmphasis::fifty_fifteen(fs);
+            // deterministic pseudo-random-ish signal
+            let mut acc = 0.123_456_f64;
+            for n in 0..3000 {
+                acc = (acc * 1.1 + 0.017).fract();
+                let x = 2.0 * acc - 1.0;
+                let recon = de.process_sample(pre.process_sample(x));
+                if n > 50 {
+                    assert!(
+                        (recon - x).abs() < 1e-9,
+                        "fs={fs} n={n}: cascade not identity ({recon} != {x})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pre_emphasis_dc_gain_is_unity() {
+        let mut f = PreEmphasis::fifty_fifteen(48_000);
+        let mut y = 0.0;
+        for _ in 0..2000 {
+            y = f.process_sample(0.25);
+        }
+        assert!((y - 0.25).abs() < 1e-9, "pre-emphasis DC gain drifted: {y}");
     }
 }
