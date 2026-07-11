@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **r411 whole-stream decode-conformance corpus
+  (`tests/fixtures/`, `tests/decode_matrix_conformance.rs`)**. Sixteen
+  new black-box-encoded Layer II streams widen the reference-validated
+  matrix along the bit-allocation axis: every Table 3-B.2 sub-table
+  (B.2a/b/c/d) in both channel modes, the bitrate-ladder extremes
+  (32 kbit/s mono … 384 kbit/s stereo, LSF 8 … 160 kbit/s), the
+  LSF-only 144 kbit/s index, and heavy §2.4.2.3 padding at the
+  fractional rates (up to 22 of 23 frames padded at 44.1 kHz). The new
+  cells store the reference decoder's **float** PCM (`pcm_f32le`),
+  tightening the assertable decode bound from the ISO ±1 LSB envelope
+  to **≤ 0.05 LSB in the float domain** (measured ≤ 0.025 LSB across
+  all cells — the reference's own f32 precision floor) plus a ≥ 99 %
+  bit-exact s16 projection with residual flips confined to
+  rounding-boundary straddles. A two-independent-reference latitude
+  study (recorded in `tests/fixtures/GENERATION.md` with the exact
+  generation commands and SHA-256 sums) shows the references disagree
+  with *each other* at the same ±1 s16 magnitude, pinning the residual
+  divergence on ISO/IEC 11172-4's bounded-difference rounding latitude
+  rather than any decode-chain difference; one cell (`mono_16k_8`)
+  reaches 100 % s16 bit-exactness against the second reference.
+
 - **§2.4.2.4 output de-emphasis on decode (`src/deemphasis.rs`,
   `src/frame.rs`)**. The header emphasis field ("indicates the type of
   de-emphasis that shall be used") was parsed but never applied. The

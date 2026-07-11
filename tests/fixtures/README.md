@@ -25,6 +25,18 @@ under `docs/audio/mp3/fixtures/`:
 | `stereo_24k_64`        | stereo         | 24 kHz   | MPEG-2 LSF|
 | `stereo_16k_64`        | stereo         | 16 kHz   | MPEG-2 LSF|
 
+The r411 corpus (`mono_44k_32` … `stereo_24k_160`, sixteen cells) widens
+the matrix along the **bit-allocation axis**: every Table 3-B.2
+sub-table (B.2a/b/c/d) in both channel modes, the bitrate-ladder
+extremes (32 kbit/s mono … 384 kbit/s stereo; LSF 8 … 160 kbit/s), the
+LSF-only 144 kbit/s bitrate index, and heavy §2.4.2.3 padding at the
+fractional rates. Those cells store the reference decoder's
+**floating-point** output (`pcm_f32le` WAVs) rather than s16, which
+tightens the assertable bound from ±1 LSB to **≤ 0.05 LSB** (measured
+≤ 0.025) — see `GENERATION.md` for the exact commands, SHA-256 sums,
+the float-vs-s16 rationale, and a two-independent-reference latitude
+study pinning the residual s16 ±1 flips on integer-rounding latitude.
+
 The reference decoder applies no startup delay on these streams (decoded
 sample count == frames × 1152 exactly, alignment offset 0), so the
 comparison in `tests/decode_matrix_conformance.rs` is sample-aligned
