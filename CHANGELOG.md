@@ -602,9 +602,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     does not need to be in the list"): the ladder-match requirement is
     gone; `bitrate_from_base_slots` returns the nominal `⌈N·Fs/144⌉` as
     metadata for an off-ladder size and only rejects sizes above the
-    §2.4.2.3 **384 kbit/s Layer II free-format support ceiling** (new
-    `FREE_FORMAT_MAX_BIT_RATE`). Pinned by an
-    ancillary-extended off-ladder stream decoding bit-identically.
+    per-standard Layer II free-format decoder-support ceiling — 11172-3
+    §2.4.2.3 **384 kbit/s** for MPEG-1 (new `FREE_FORMAT_MAX_BIT_RATE`),
+    13818-3 §2.4.2.3 **160 kbit/s** for LSF (new
+    `FREE_FORMAT_MAX_BIT_RATE_LSF`; "The decoder is not required to
+    support bitrates higher than 256 kbit/s, 160 kbit/s, 160 kbit/s in
+    respect to Layer I, II and III when in free format mode"). Pinned
+    by an ancillary-extended off-ladder stream decoding bit-identically
+    and by boundary tests at both standards' exact ladder tops.
   - **No (bitrate, mode) matrix for free format**: the §2.4.2.3 matrix
     row for free format reads "all modes"; `resolve` no longer rejects
     recovered-rate/mode pairs (`recovered_pair_is_valid` is now

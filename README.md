@@ -47,8 +47,9 @@ are wired into the runtime registry** (frame-in / packet-out
   **100 % bit-exactly**). The fixed rate need not be on the §2.4.2.3
   ladder ("a fixed bitrate which does not need to be in the list"):
   off-ladder streams decode, with the nominal rate `⌈N·Fs/144⌉`
-  recovered as metadata, bounded only by the §2.4.2.3 384 kbit/s
-  free-format decoder-support ceiling; the §2.4.2.3 bitrate/mode
+  recovered as metadata, bounded only by the per-standard free-format
+  decoder-support ceiling (11172-3: 384 kbit/s; 13818-3 LSF:
+  160 kbit/s); the §2.4.2.3 bitrate/mode
   matrix's free-format row is "all modes", so no mode restriction
   applies either. `decode_free_format_stream` walks a whole free-format
   stream; the registry `Mp2CoreDecoder` also handles a free-format

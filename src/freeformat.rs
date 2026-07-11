@@ -96,7 +96,8 @@ impl core::fmt::Display for FreeFormatError {
             } => write!(
                 f,
                 "free-format: measured base size {base_slots} slots at {sample_rate} Hz \
-                 exceeds the §2.4.2.3 384 kbit/s Layer II free-format support ceiling"
+                 exceeds the §2.4.2.3 Layer II free-format support ceiling \
+                 (384 kbit/s MPEG-1 / 160 kbit/s LSF)"
             ),
             FreeFormatError::ImplausibleDistance { distance } => write!(
                 f,
@@ -202,11 +203,17 @@ fn confirm_lock(buf: &[u8], distance: usize, base: usize) -> bool {
     false
 }
 
-/// The §2.4.2.3 free-format decoder-support ceiling for Layer II, in
-/// bit/s: "The decoder is also not required to support bitrates higher
-/// than … 384 kbits/s in respect to Layer … II … when in free format
-/// mode."
+/// The ISO/IEC 11172-3 §2.4.2.3 free-format decoder-support ceiling for
+/// MPEG-1 Layer II, in bit/s: "The decoder is also not required to
+/// support bitrates higher than … 384 kbits/s in respect to Layer … II
+/// … when in free format mode."
 pub const FREE_FORMAT_MAX_BIT_RATE: u32 = 384_000;
+
+/// The ISO/IEC 13818-3 §2.4.2.3 free-format decoder-support ceiling for
+/// MPEG-2 LSF Layer II, in bit/s: "The decoder is not required to
+/// support bitrates higher than 256 kbit/s, 160 kbit/s, 160 kbit/s in
+/// respect to Layer I, II and III when in free format mode."
+pub const FREE_FORMAT_MAX_BIT_RATE_LSF: u32 = 160_000;
 
 /// Recover the constant free-format bitrate (in bit/s) from a base slot
 /// count `N`, for the given header's sampling frequency / LSF flag.
@@ -220,9 +227,11 @@ pub const FREE_FORMAT_MAX_BIT_RATE: u32 = 384_000;
 /// free format is keyed on the sampling frequency alone (see the module
 /// docs and [`crate::bitalloc::select_table`]), never on this rate.
 ///
-/// A base size implying more than [`FREE_FORMAT_MAX_BIT_RATE`] is
-/// rejected as [`FreeFormatError::UnsupportedBitrate`], the §2.4.2.3
-/// decoder-support ceiling.
+/// A base size implying more than the layer's decoder-support ceiling —
+/// [`FREE_FORMAT_MAX_BIT_RATE`] (384 kbit/s, 11172-3 §2.4.2.3) for
+/// MPEG-1, [`FREE_FORMAT_MAX_BIT_RATE_LSF`] (160 kbit/s, 13818-3
+/// §2.4.2.3) for LSF — is rejected as
+/// [`FreeFormatError::UnsupportedBitrate`].
 pub fn bitrate_from_base_slots(
     header: &FrameHeader,
     base_slots: usize,
@@ -244,8 +253,13 @@ pub fn bitrate_from_base_slots(
     }
     // Off-ladder fixed rate: nominal bitrate = smallest rate sizing to
     // `N` slots, i.e. ⌈N · Fs / 144⌉.
+    let ceiling = if header.lsf {
+        FREE_FORMAT_MAX_BIT_RATE_LSF
+    } else {
+        FREE_FORMAT_MAX_BIT_RATE
+    };
     let nominal = (base_slots as u64 * fs as u64).div_ceil(144);
-    if nominal > u64::from(FREE_FORMAT_MAX_BIT_RATE) {
+    if nominal > u64::from(ceiling) {
         return Err(FreeFormatError::UnsupportedBitrate {
             base_slots,
             sample_rate: fs,
@@ -492,6 +506,32 @@ mod tests {
         // (⌊144 · 384000 / 44100⌋ = 1253 slots) matches the ladder scan
         // and is accepted.
         assert_eq!(bitrate_from_base_slots(&h, 1253), Ok(384_000));
+    }
+
+    #[test]
+    fn lsf_free_format_ceiling_is_160_kbit_s() {
+        // ISO/IEC 13818-3 §2.4.2.3: "The decoder is not required to
+        // support bitrates higher than 256 kbit/s, 160 kbit/s,
+        // 160 kbit/s in respect to Layer I, II and III when in free
+        // format mode." Build an LSF free-format header at 24 kHz
+        // (ID = '0', sampling_frequency = '01').
+        let word: u32 = (0xFFFu32 << 20) | (0b10 << 17) | (1 << 16) | (0b01 << 10);
+        let bytes = word.to_be_bytes();
+        let h = FrameHeader::parse_allow_free_format(&bytes).expect("LSF free-format header");
+        assert!(h.lsf);
+        assert_eq!(h.sample_rate, 24_000);
+        // 960 slots = the exact 160 kbit/s ladder base at 24 kHz.
+        assert_eq!(bitrate_from_base_slots(&h, 960), Ok(160_000));
+        // 900 slots is off-ladder: nominal ⌈900 · 24000 / 144⌉ =
+        // 150 000 bit/s, under the LSF ceiling — accepted.
+        assert_eq!(bitrate_from_base_slots(&h, 900), Ok(150_000));
+        // 961 slots → ⌈961 · 24000 / 144⌉ = 160 167 > 160 000 → refused.
+        match bitrate_from_base_slots(&h, 961) {
+            Err(FreeFormatError::UnsupportedBitrate { base_slots, .. }) => {
+                assert_eq!(base_slots, 961);
+            }
+            other => panic!("expected UnsupportedBitrate, got {other:?}"),
+        }
     }
 
     #[test]
