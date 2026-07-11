@@ -26,25 +26,28 @@
 //!
 //! # Table selection
 //!
-//! The §2.4.3.1 bit-allocation table is keyed on `(sampling frequency,
-//! per-channel bitrate)`, and the spec tabulates only the standard ladder
-//! bitrates (Table 3-B.2 headers). A free-format stream may run at any
-//! constant bitrate; the standard does **not** define which Annex B table
-//! to use for an off-ladder bitrate. This module therefore recovers the
-//! free-format bitrate from the measured base slot count `N` by inverting
-//! the §2.4.3.1 size formula and matching it against the standard ladder
-//! (the common in-the-wild case: a stream that uses free-format framing
-//! but a bitrate that *happens* to coincide with a ladder value, which
-//! then selects a well-defined table). A measured size that does not map
-//! to a ladder bitrate is reported as
-//! [`FreeFormatError::UnsupportedBitrate`] rather than guessed — the
-//! Annex B table for a genuinely off-ladder free-format bitrate is a
-//! documented spec gap, not something this clean-room implementation
-//! invents.
+//! The Annex B table for a free-format stream is fixed by the **sampling
+//! frequency alone** — the Table 3-B.2a header (PDF page 46) lists
+//! "Fs = 48 kHz: bit rates per channel = 56 … 192 kbits/s, **and free
+//! format**", the Table 3-B.2b header (PDF page 47) lists free format
+//! under both Fs = 44,1 kHz and Fs = 32 kHz, and tables B.2c / B.2d
+//! (PDF pages 48–49) carry no free-format row. So free format @ 48 kHz →
+//! Table B.2a; @ 44,1 / 32 kHz → Table B.2b; LSF → the single 13818-3
+//! Table B.1. [`crate::bitalloc::select_table`] implements this directly
+//! for a free-format header (`bit_rate == 0`); the measured frame size
+//! and the recovered bitrate play **no part** in the table choice.
+//!
+//! The actual fixed bitrate therefore need not be on the §2.4.2.3
+//! ladder at all — "a fixed bitrate which does not need to be in the
+//! list" — and per the §2.4.2.3 mode table the free-format row allows
+//! **all modes**, so no (bitrate, mode) matrix applies either. The only
+//! bound this module enforces is the §2.4.2.3 decoder-support ceiling:
+//! "The decoder is also not required to support bitrates higher than
+//! … 384 kbits/s in respect to Layer … II … when in free format mode" —
+//! a measured base size implying more than 384 kbit/s is reported as
+//! [`FreeFormatError::UnsupportedBitrate`].
 
-use crate::header::{
-    decode_bitrate, decode_bitrate_lsf, find_sync, FrameHeader, HeaderError, Mode,
-};
+use crate::header::{decode_bitrate, decode_bitrate_lsf, find_sync, FrameHeader, HeaderError};
 
 /// Errors raised while determining a free-format frame's size.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,9 +61,10 @@ pub enum FreeFormatError {
     /// cannot be measured. (The very last frame of a stream needs the
     /// `N` recovered from an earlier frame instead.)
     NoFollowingSync,
-    /// The measured base slot count does not correspond to any §2.4.2.3
-    /// Layer II ladder bitrate at this sampling frequency, so no Annex B
-    /// bit-allocation table is defined for it.
+    /// The measured base slot count implies a fixed bitrate above the
+    /// §2.4.2.3 free-format decoder-support ceiling ("the decoder is
+    /// also not required to support bitrates higher than … 384 kbits/s
+    /// in respect to Layer … II … when in free format mode").
     UnsupportedBitrate {
         /// The measured base slot count (`N`, padding removed).
         base_slots: usize,
@@ -92,7 +96,7 @@ impl core::fmt::Display for FreeFormatError {
             } => write!(
                 f,
                 "free-format: measured base size {base_slots} slots at {sample_rate} Hz \
-                 maps to no Layer II ladder bitrate (Annex B table undefined)"
+                 exceeds the §2.4.2.3 384 kbit/s Layer II free-format support ceiling"
             ),
             FreeFormatError::ImplausibleDistance { distance } => write!(
                 f,
@@ -198,13 +202,27 @@ fn confirm_lock(buf: &[u8], distance: usize, base: usize) -> bool {
     false
 }
 
+/// The §2.4.2.3 free-format decoder-support ceiling for Layer II, in
+/// bit/s: "The decoder is also not required to support bitrates higher
+/// than … 384 kbits/s in respect to Layer … II … when in free format
+/// mode."
+pub const FREE_FORMAT_MAX_BIT_RATE: u32 = 384_000;
+
 /// Recover the constant free-format bitrate (in bit/s) from a base slot
 /// count `N`, for the given header's sampling frequency / LSF flag.
 ///
-/// Inverts the §2.4.3.1 size formula `N = floor(144 · bitrate / Fs)` by
-/// scanning the §2.4.2.3 Layer II ladder for the bitrate whose computed
-/// base size equals `N`. Returns the ladder `bit_rate` (bit/s) on a
-/// match, or [`FreeFormatError::UnsupportedBitrate`] otherwise.
+/// Inverts the §2.4.3.1 size formula `N = floor(144 · bitrate / Fs)`:
+/// when `N` matches a §2.4.2.3 Layer II ladder rate exactly, that
+/// ladder value is returned; otherwise ("a fixed bitrate which does not
+/// need to be in the list") the **nominal** rate `⌈N · Fs / 144⌉` — the
+/// smallest bitrate whose base size is `N` — is returned. The value is
+/// informational (stream metadata): the Annex B table selection for
+/// free format is keyed on the sampling frequency alone (see the module
+/// docs and [`crate::bitalloc::select_table`]), never on this rate.
+///
+/// A base size implying more than [`FREE_FORMAT_MAX_BIT_RATE`] is
+/// rejected as [`FreeFormatError::UnsupportedBitrate`], the §2.4.2.3
+/// decoder-support ceiling.
 pub fn bitrate_from_base_slots(
     header: &FrameHeader,
     base_slots: usize,
@@ -224,19 +242,27 @@ pub fn bitrate_from_base_slots(
             return Ok(bit_rate);
         }
     }
-    Err(FreeFormatError::UnsupportedBitrate {
-        base_slots,
-        sample_rate: fs,
-    })
+    // Off-ladder fixed rate: nominal bitrate = smallest rate sizing to
+    // `N` slots, i.e. ⌈N · Fs / 144⌉.
+    let nominal = (base_slots as u64 * fs as u64).div_ceil(144);
+    if nominal > u64::from(FREE_FORMAT_MAX_BIT_RATE) {
+        return Err(FreeFormatError::UnsupportedBitrate {
+            base_slots,
+            sample_rate: fs,
+        });
+    }
+    Ok(nominal as u32)
 }
 
-/// A free-format frame's resolved size + the recovered ladder bitrate.
+/// A free-format frame's resolved size + the recovered (nominal)
+/// bitrate.
 ///
-/// The `bit_rate` is the constant free-format rate recovered from the
-/// measured base slot count; it lets the caller build a
-/// [`FrameHeader`] with a concrete `bit_rate` so the existing
-/// bit-allocation-table selection (`crate::bitalloc::select_table`) and
-/// the standard frame-decode path apply unchanged.
+/// The `bit_rate` is stream **metadata** only (a ladder value when the
+/// measured base size matches one, else the nominal `⌈N · Fs / 144⌉`).
+/// It plays no part in decoding: the bit-allocation table for a
+/// free-format header is selected from the sampling frequency alone by
+/// [`crate::bitalloc::select_table`] (Table 3-B.2a/B.2b headers), and
+/// frame sizing uses the measured `base_slots` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FreeFormatLayout {
     /// Constant base slot count `N` (this frame's padding removed).
@@ -248,9 +274,13 @@ pub struct FreeFormatLayout {
 }
 
 /// Fully resolve the free-format frame at the front of `buf`: measure its
-/// base slot count, recover the constant bitrate, and validate the
-/// recovered (bitrate, mode) pair against the §2.4.2.3 matrix exactly as
-/// a normal frame would be.
+/// base slot count and recover the (nominal) constant bitrate.
+///
+/// No §2.4.2.3 (bitrate, mode) matrix is applied: the matrix's
+/// free-format row reads "**all modes**" (PDF page 21) — the
+/// mode restrictions attach to *signalled* ladder rates only, so a
+/// free-format stream whose measured size happens to equal, say, the
+/// 32 kbit/s base is still valid in stereo.
 pub fn resolve(buf: &[u8]) -> Result<FreeFormatLayout, FreeFormatError> {
     let header = FrameHeader::parse_allow_free_format(buf)?;
     if !header.is_free_format() {
@@ -258,16 +288,6 @@ pub fn resolve(buf: &[u8]) -> Result<FreeFormatLayout, FreeFormatError> {
     }
     let base_slots = measure_base_slots(buf)?;
     let bit_rate = bitrate_from_base_slots(&header, base_slots)?;
-    // Re-apply the §2.4.2.3 (bitrate, mode) matrix on the *recovered*
-    // bitrate (MPEG-1 only); the LSF ladder does not restate it.
-    if !header.lsf && !crate::header::is_layer2_bitrate_mode_allowed(bit_rate, header.mode) {
-        return Err(FreeFormatError::Header(
-            HeaderError::DisallowedBitrateModeCombination {
-                bit_rate,
-                mode: header.mode,
-            },
-        ));
-    }
     let frame_size = base_slots + if header.padding { 1 } else { 0 };
     Ok(FreeFormatLayout {
         base_slots,
@@ -277,8 +297,16 @@ pub fn resolve(buf: &[u8]) -> Result<FreeFormatLayout, FreeFormatError> {
 }
 
 /// Build a [`FrameHeader`] with the free-format `bit_rate` filled in from
-/// a recovered ladder bitrate, so the standard decode path can size and
-/// allocate the frame as if the header had named the bitrate directly.
+/// a recovered (nominal) bitrate — **metadata only**.
+///
+/// The returned header is for reporting (e.g. exposing a concrete rate
+/// to a caller inspecting stream parameters). It must **not** be fed to
+/// the decode path: filling in a numeric `bit_rate` makes
+/// [`crate::bitalloc::select_table`] key on the (Fs, per-channel rate)
+/// pair, but a free-format stream's Annex B table is fixed by the
+/// sampling frequency alone (Table 3-B.2a/B.2b headers) — decode with
+/// the original `bit_rate == 0` header instead, as
+/// [`crate::frame::decode_free_format_stream`] does.
 ///
 /// `mode` is unchanged; only `bit_rate` is rewritten from `0` to the
 /// recovered constant rate.
@@ -288,17 +316,15 @@ pub fn header_with_recovered_bitrate(header: &FrameHeader, bit_rate: u32) -> Fra
     h
 }
 
-/// True if the recovered (bitrate, mode) pair is a single-channel-only
-/// ladder row but the frame declared two channels — a malformed
-/// free-format stream. Exposed for callers that want to validate without
-/// triggering the full `resolve` path.
+/// Whether a recovered (bitrate, mode) pair is acceptable for a
+/// free-format stream — always `true`: the §2.4.2.3 bitrate/mode
+/// matrix's free-format row reads "**all modes**" (PDF page 21), so the
+/// per-rate mode restrictions attach to *signalled* ladder rates only
+/// and never to a rate recovered from a free-format frame's measured
+/// size. Retained for API continuity.
 pub fn recovered_pair_is_valid(header: &FrameHeader, bit_rate: u32) -> bool {
-    if header.lsf {
-        return true;
-    }
-    let two_channel = !matches!(header.mode, Mode::SingleChannel);
-    let _ = two_channel;
-    crate::header::is_layer2_bitrate_mode_allowed(bit_rate, header.mode)
+    let _ = (header, bit_rate);
+    true
 }
 
 /// Rewrite a standard-bitrate Layer II frame (or a contiguous run of them)
@@ -312,6 +338,19 @@ pub fn recovered_pair_is_valid(header: &FrameHeader, bit_rate: u32) -> bool {
 /// frame at a ladder bitrate is byte-identical to the standard frame's
 /// size, so the bytes that follow are already correctly placed. The
 /// constant bitrate is recoverable on decode from the frame size.
+///
+/// # Conformance constraint
+///
+/// The rewritten stream is only **bitstream-conformant** when the source
+/// stream's Annex B allocation table coincides with the free-format
+/// table for its sampling frequency — Table B.2a at 48 kHz (per-channel
+/// rate ≥ 56 kbit/s), Table B.2b at 44,1 / 32 kHz (per-channel rate
+/// ≥ 96 kbit/s), any LSF rate (single Table B.1). Rewriting, say, a
+/// 96 kbit/s stereo 48 kHz stream (Table B.2c) produces frames whose
+/// audio data was *laid out* with B.2c but which a conforming decoder
+/// *reads* with B.2a — well-formed but decoding to garbage. The registry
+/// encoder's `freeformat` option enforces this constraint at
+/// construction.
 ///
 /// `frame_size` is the constant size in bytes of each frame in `frames`
 /// (the unpadded base `N`, or `N + 1` for a uniformly-padded run). Frames
@@ -417,20 +456,42 @@ mod tests {
     }
 
     #[test]
-    fn off_ladder_base_size_is_reported_not_guessed() {
+    fn off_ladder_base_size_recovers_nominal_bitrate() {
+        // §2.4.2.3: free format is "a fixed bitrate which does not need
+        // to be in the list" — an off-ladder base size is valid and the
+        // nominal rate ⌈N · Fs / 144⌉ is recovered as metadata.
         let bytes = free_format_header_bytes(0b00, 0b00, 0);
         let h = FrameHeader::parse_allow_free_format(&bytes).unwrap();
-        // 500 base slots at 44.1 kHz matches no ladder bitrate.
-        match bitrate_from_base_slots(&h, 500) {
+        // 500 base slots at 44.1 kHz matches no ladder bitrate:
+        // ⌈500 · 44100 / 144⌉ = 153 125 bit/s.
+        let nominal = bitrate_from_base_slots(&h, 500).expect("off-ladder is decodable");
+        assert_eq!(nominal, 153_125);
+        // The nominal rate re-sizes to the same base slot count.
+        assert_eq!((144u64 * u64::from(nominal) / 44_100) as usize, 500);
+    }
+
+    #[test]
+    fn base_size_above_384k_support_ceiling_is_rejected() {
+        // §2.4.2.3: "The decoder is also not required to support
+        // bitrates higher than … 384 kbits/s in respect to Layer … II …
+        // when in free format mode."
+        let bytes = free_format_header_bytes(0b00, 0b00, 0); // 44.1 kHz
+        let h = FrameHeader::parse_allow_free_format(&bytes).unwrap();
+        // 1254 slots at 44.1 kHz → ⌈1254 · 44100 / 144⌉ = 384 029 > 384 000.
+        match bitrate_from_base_slots(&h, 1254) {
             Err(FreeFormatError::UnsupportedBitrate {
                 base_slots,
                 sample_rate,
             }) => {
-                assert_eq!(base_slots, 500);
+                assert_eq!(base_slots, 1254);
                 assert_eq!(sample_rate, 44_100);
             }
             other => panic!("expected UnsupportedBitrate, got {other:?}"),
         }
+        // …while the exact 384 kbit/s ladder base
+        // (⌊144 · 384000 / 44100⌋ = 1253 slots) matches the ladder scan
+        // and is accepted.
+        assert_eq!(bitrate_from_base_slots(&h, 1253), Ok(384_000));
     }
 
     #[test]

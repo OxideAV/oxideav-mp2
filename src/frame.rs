@@ -550,17 +550,18 @@ pub fn decode_all_frames(buf: &[u8]) -> Result<Vec<Vec<f64>>, FrameError> {
 /// Free-format frames (`bitrate_index == '0000'`) carry no signalled
 /// bitrate; the constant base slot count `N` is recovered once by
 /// measuring the distance between the first two syncwords (see
-/// [`crate::freeformat::resolve`]), the constant bitrate is recovered from
-/// `N`, and every frame is then sized `N + its padding_bit` and decoded
-/// through the standard path with the recovered bitrate filled into a
-/// synthetic [`FrameHeader`] (so the existing bit-allocation-table
-/// selection applies unchanged).
-///
-/// The recovered bitrate must coincide with a §2.4.2.3 Layer II ladder
-/// rate — the Annex B table for an off-ladder free-format bitrate is a
-/// documented spec gap, surfaced as
-/// [`FrameError::FreeFormat`] wrapping
-/// [`crate::freeformat::FreeFormatError::UnsupportedBitrate`].
+/// [`crate::freeformat::resolve`]), and every frame is then sized
+/// `N + its padding_bit` and decoded through the standard path with the
+/// **original free-format header** — the Annex B bit-allocation table
+/// for free format is fixed by the sampling frequency alone (Table
+/// 3-B.2a at 48 kHz, Table 3-B.2b at 44,1 / 32 kHz, per the table
+/// headers on PDF pages 46–47; LSF uses the single 13818-3 Table B.1),
+/// which [`crate::bitalloc::select_table`] applies directly to a
+/// `bit_rate == 0` header. The fixed rate need not be on the §2.4.2.3
+/// ladder ("a fixed bitrate which does not need to be in the list");
+/// only a rate above the §2.4.2.3 384 kbit/s Layer II free-format
+/// support ceiling is refused, surfaced as [`FrameError::FreeFormat`]
+/// wrapping [`crate::freeformat::FreeFormatError::UnsupportedBitrate`].
 ///
 /// Returns per-channel concatenated PCM, exactly like
 /// [`decode_all_frames`].
@@ -574,11 +575,12 @@ pub fn decode_free_format_stream(buf: &[u8]) -> Result<Vec<Vec<f64>>, FrameError
         None => return Ok(pcm),
     };
 
-    // Recover the constant base slot count + bitrate from the first frame's
-    // sync-to-sync distance.
+    // Recover the constant base slot count from the first frame's
+    // sync-to-sync distance (resolve also enforces the §2.4.2.3
+    // 384 kbit/s free-format support ceiling; its recovered bit_rate is
+    // metadata we don't need for decoding).
     let layout = crate::freeformat::resolve(&buf[offset..]).map_err(FrameError::FreeFormat)?;
     let base_slots = layout.base_slots;
-    let bit_rate = layout.bit_rate;
 
     while offset + 4 <= buf.len() {
         if !(buf[offset] == 0xFF && (buf[offset + 1] & 0xF0) == 0xF0) {
@@ -597,10 +599,12 @@ pub fn decode_free_format_stream(buf: &[u8]) -> Result<Vec<Vec<f64>>, FrameError
         if offset + frame_size > buf.len() {
             break; // truncated trailing frame — emit what decoded so far
         }
-        let resolved = crate::freeformat::header_with_recovered_bitrate(&ff_header, bit_rate);
+        // Decode with the free-format header itself (`bit_rate == 0`):
+        // `select_table` keys the free-format case on the sampling
+        // frequency alone (Table 3-B.2a/B.2b headers).
         let frame = decode_frame_with_known_header(
             &buf[offset..offset + frame_size],
-            resolved,
+            ff_header,
             &mut state,
         )?;
         if frame.pcm.len() > pcm.len() {

@@ -157,13 +157,18 @@ impl Mp2CoreDecoder {
     /// Decode one packet's worth of Layer II data, transparently handling
     /// the §2.4.2.3 free-format case.
     ///
-    /// A demuxer hands one frame per packet, so for a free-format frame the
-    /// packet length **is** the frame size (`N` or `N + 1` slots). We need
-    /// no sync-to-sync measurement here: the constant bitrate is recovered
-    /// directly by inverting the §2.4.3.1 size formula on
-    /// `packet_len − padding_bit`, then the standard decode path runs with
-    /// the recovered bitrate filled into the header. Non-free-format
-    /// packets take the ordinary [`decode_frame_with`] path unchanged.
+    /// A demuxer hands one frame per packet, so for a free-format frame
+    /// the packet length **is** the frame size (`N` or `N + 1` slots) —
+    /// no sync-to-sync measurement is needed. The frame is decoded with
+    /// the free-format header itself: the Annex B table for free format
+    /// is fixed by the sampling frequency alone (Table 3-B.2a at 48 kHz
+    /// / 3-B.2b at 44,1 & 32 kHz, per the table headers; LSF uses the
+    /// single 13818-3 Table B.1), applied by
+    /// [`crate::bitalloc::select_table`] to the `bit_rate == 0` header.
+    /// The fixed rate may be off-ladder; only a packet size implying
+    /// more than the §2.4.2.3 384 kbit/s Layer II free-format support
+    /// ceiling is refused. Non-free-format packets take the ordinary
+    /// [`decode_frame_with`] path unchanged.
     fn decode_one_packet(&mut self, data: &[u8]) -> Result<DecodedFrame> {
         // Peek the header in free-format-tolerant mode.
         let header = FrameHeader::parse_allow_free_format(data)
@@ -172,13 +177,14 @@ impl Mp2CoreDecoder {
             return decode_frame_with(data, &mut self.state)
                 .map_err(|e| Error::other(format!("oxideav-mp2: decode_frame: {e}")));
         }
-        // Free format: the packet length is this frame's size.
+        // Free format: the packet length is this frame's size. The
+        // recovered bitrate is metadata; the call enforces the §2.4.2.3
+        // support ceiling.
         let frame_size = data.len();
         let base_slots = frame_size - if header.padding { 1 } else { 0 };
-        let bit_rate = crate::freeformat::bitrate_from_base_slots(&header, base_slots)
+        let _bit_rate = crate::freeformat::bitrate_from_base_slots(&header, base_slots)
             .map_err(|e| Error::other(format!("oxideav-mp2: free-format: {e}")))?;
-        let resolved = crate::freeformat::header_with_recovered_bitrate(&header, bit_rate);
-        decode_frame_with_known_header(data, resolved, &mut self.state)
+        decode_frame_with_known_header(data, header, &mut self.state)
             .map_err(|e| Error::other(format!("oxideav-mp2: free-format decode: {e}")))
     }
 
@@ -466,10 +472,15 @@ mod tests {
         use crate::header::{Emphasis, Mode, ModeExtension};
         use crate::NUM_SUBBANDS;
 
+        // 192 kbit/s stereo at 44,1 kHz: 96 kbit/s per channel selects
+        // Table B.2b — the same table conforming decoders use for free
+        // format at 44,1 kHz (Table 3-B.2b header lists free format), so
+        // clearing the bitrate_index below leaves the audio-data layout
+        // valid under the free-format read.
         let header = FrameHeader {
             lsf: false,
             protection_bit: true,
-            bit_rate: 128_000,
+            bit_rate: 192_000,
             sample_rate: 44_100,
             padding: false,
             private_bit: false,

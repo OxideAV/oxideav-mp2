@@ -149,6 +149,26 @@ with a **live intensity-stereo bound** is now decoded against an
 independent reference (previously only covered by round-trip and
 adversarial-payload fuzz).
 
+## Free-format validation (r411)
+
+Clearing the `bitrate_index` nibble of every frame of `stereo_48k_192`
+(192 kbit/s stereo = 96 kbit/s per channel → Table B.2a, which is also
+the free-format table at 48 kHz per the Table 3-B.2a header) yields a
+free-format stream that `mpg123 -w` decodes **byte-identically** to the
+signalled stream — confirming the Annex B rule that free format is read
+with the table fixed by the sampling frequency. (The same experiment on
+`stereo_48k_96` — whose signalled table is B.2c — produces a stream the
+reference reads with B.2a, i.e. mutually garbage: that observation is
+what exposed the crate's pre-r411 recovered-bitrate table keying, fixed
+in the same round. ffmpeg's demuxer refuses free-format Layer II
+entirely, "Failed to find two consecutive MPEG audio frames", so mpg123
+is the reference for this path.) After the fix, this crate's
+free-format decode of the rewritten `stereo_48k_192` is **100 % s16
+bit-exact** against the mpg123 decode (19 584 samples/channel). The
+in-tree `free_format_rewrite_of_real_48k_fixture_decodes_identically`
+test pins the crate-side equivalence; no extra fixture files are
+needed (the rewrite is derived from the committed `.mp2` at test time).
+
 ## SHA-256
 
 ```

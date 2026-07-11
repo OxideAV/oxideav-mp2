@@ -38,17 +38,27 @@ are wired into the runtime registry** (frame-in / packet-out
   recovered by measuring the distance between consecutive syncwords
   (with a two-frame sync-lock that rejects false-positive sync patterns
   inside the payload — §2.4.2.3 "a frame contains either N or N+1 slots,
-  depending on the value of the padding bit"). The recovered base slot
-  count is inverted through the §2.4.3.1 size formula to recover the
-  constant bitrate, which selects the standard Annex B bit-allocation
-  table. `decode_free_format_stream` walks a whole free-format stream;
-  the registry `Mp2CoreDecoder` also handles a free-format packet directly
-  (the packet length is the frame size). An off-ladder free-format bitrate
-  (whose Annex B table the standard leaves undefined) is reported, not
-  guessed. The §2.4.2.3 free-format **encode** path (`to_free_format` /
-  `rewrite_to_free_format`) emits a free-format stream that round-trips
-  bit-exactly back through the decoder
-  (`tests/free_format.rs`).
+  depending on the value of the padding bit"). The Annex B
+  bit-allocation table is fixed by the **sampling frequency alone** —
+  the Table 3-B.2a header lists free format at 48 kHz and the Table
+  3-B.2b header lists it at 44,1 / 32 kHz (r411 correction: the table
+  was previously keyed on the recovered bitrate, which an independent
+  reference decoder's free-format output disproved — it now agrees
+  **100 % bit-exactly**). The fixed rate need not be on the §2.4.2.3
+  ladder ("a fixed bitrate which does not need to be in the list"):
+  off-ladder streams decode, with the nominal rate `⌈N·Fs/144⌉`
+  recovered as metadata, bounded only by the §2.4.2.3 384 kbit/s
+  free-format decoder-support ceiling; the §2.4.2.3 bitrate/mode
+  matrix's free-format row is "all modes", so no mode restriction
+  applies either. `decode_free_format_stream` walks a whole free-format
+  stream; the registry `Mp2CoreDecoder` also handles a free-format
+  packet directly (the packet length is the frame size). The §2.4.2.3
+  free-format **encode** path (`to_free_format` /
+  `rewrite_to_free_format`, and the registry `freeformat` option — which
+  now rejects a bitrate whose signalled table differs from the
+  free-format table, the configuration that would decode to garbage on
+  every conforming decoder) emits a free-format stream that round-trips
+  bit-exactly back through the decoder (`tests/free_format.rs`).
 - **Bit allocation, scfsi and scalefactors** (§2.4.1.6 / §2.4.3.3):
   the Annex B Tables 3-B.2a..d, Table 3-B.4 quantization classes, and
   the 13818-3 Table B.1 LSF allocation table; `select_table` routes

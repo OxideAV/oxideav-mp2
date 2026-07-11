@@ -235,10 +235,14 @@ fn registry_encoder_packets_follow_the_padding_schedule() {
 fn padded_free_format_stream_resolves_and_decodes_bit_identically() {
     // "Padding may also be required in free format." A padded stream
     // whose bitrate_index nibbles are cleared must still resolve its
-    // constant bitrate through the §2.4.2.3 sync-to-sync measurement
+    // constant base size through the §2.4.2.3 sync-to-sync measurement
     // (frames are N or N+1 slots) and decode to bit-identical PCM.
+    // 192 kbit/s stereo at 44.1 kHz keeps the signalled table (96 kbit/s
+    // per channel → B.2b) equal to the free-format table at 44.1 kHz, so
+    // the decode-identity premise holds (Table 3-B.2b header lists free
+    // format).
     let n_frames = 16;
-    let header = stereo_header(false, 44_100, 128_000);
+    let header = stereo_header(false, 44_100, 192_000);
     let stream = tone_stream(600.0, 0.4, 44_100, n_frames);
     let standard = encode_all_frames(&header, &stream, 0).expect("encode");
 

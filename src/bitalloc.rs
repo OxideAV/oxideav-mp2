@@ -231,6 +231,17 @@ impl BitAllocTable {
 /// table for every (Fs ∈ {16, 22.05, 24 kHz}, bitrate) combination,
 /// replacing the four 11172-3 sub-tables wholesale.
 ///
+/// For a **free-format** MPEG-1 header (`bitrate_index == '0000'`,
+/// surfaced as `bit_rate == 0` by
+/// [`FrameHeader::parse_allow_free_format`]) the table is fixed by the
+/// sampling frequency alone: the Table 3-B.2a header (PDF page 46)
+/// lists "Fs = 48 kHz: bit rates per channel = 56 … 192 kbits/s, and
+/// **free format**", and the Table 3-B.2b header (PDF page 47) lists
+/// free format under both Fs = 44,1 kHz and Fs = 32 kHz; tables B.2c /
+/// B.2d (PDF pages 48–49) list no free-format row. The actual fixed
+/// bitrate of the stream — ladder or off-ladder — never enters the
+/// selection.
+///
 /// For MPEG-1 headers returns `None` if the (Fs, per-channel bitrate)
 /// pair is not covered by any of the four B.2 sub-tables. With
 /// [`crate::header::is_layer2_bitrate_mode_allowed`] enforced at parse
@@ -239,6 +250,13 @@ impl BitAllocTable {
 pub fn select_table(header: &FrameHeader) -> Option<BitAllocTable> {
     if header.lsf {
         return Some(BitAllocTable::B1Lsf);
+    }
+    if header.is_free_format() {
+        return match header.sample_rate {
+            48_000 => Some(BitAllocTable::B2a),
+            44_100 | 32_000 => Some(BitAllocTable::B2b),
+            _ => None,
+        };
     }
     let per_ch = bitrate_per_channel_kbps(header)?;
     match header.sample_rate {

@@ -404,6 +404,29 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     header.original = original;
     header.private_bit = private_bit;
 
+    // §2.4.2.3 free-format conformance: the emitted frames are laid out
+    // with the signalled rate's Annex B table, but a conforming decoder
+    // reads a free-format frame with the table fixed by the sampling
+    // frequency alone (Table 3-B.2a at 48 kHz / 3-B.2b at 44,1 & 32 kHz,
+    // per the table headers; LSF's single Table B.1 always coincides).
+    // Reject a configuration whose two tables differ — the rewrite would
+    // be well-formed but decode to garbage on every conforming decoder.
+    if freeformat {
+        let mut ff_probe = header;
+        ff_probe.bit_rate = 0; // free-format sentinel
+        if select_table(&header) != select_table(&ff_probe) {
+            return Err(Error::invalid(format!(
+                "oxideav-mp2: freeformat=true at {} kbit/s / {sample_rate} Hz would lay frames \
+                 out with allocation table {:?}, but conforming decoders read free format with \
+                 {:?}; use >= 56 kbit/s per channel at 48000 Hz or >= 96 kbit/s per channel at \
+                 44100/32000 Hz (any LSF rate is fine)",
+                bit_rate / 1000,
+                select_table(&header),
+                select_table(&ff_probe),
+            )));
+        }
+    }
+
     let mut out_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
     out_params.sample_rate = Some(sample_rate);
     out_params.channels = Some(channels);

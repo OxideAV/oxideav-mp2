@@ -44,6 +44,48 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   pins the fixture premises (per-frame mode, clamped bound, allocated
   above-bound subband, CRC presence) directly from the bitstream.
 
+### Fixed
+
+- **Free-format bit-allocation table selection (§2.4.2.3 / Annex B)** —
+  found by decoding a free-format rewrite with an independent black-box
+  reference decoder (0.5 % of samples agreed; every decode stage after
+  the table diverged). The Annex B table for a free-format frame is
+  fixed by the **sampling frequency alone**: the Table 3-B.2a header
+  (PDF p. 46) lists "Fs = 48 kHz … and free format" and the Table
+  3-B.2b header (PDF p. 47) lists free format under 44,1 and 32 kHz;
+  B.2c/B.2d have no free-format row. The decoder previously recovered
+  the bitrate from the measured frame size and keyed the table on it —
+  correct only when the two selections happened to coincide.
+  `select_table` now routes a free-format header (`bit_rate == 0`) by
+  sampling frequency directly; both free-format decode paths (stream +
+  registry packet) decode with the original free-format header. After
+  the fix our free-format decode is **100 % s16 bit-exact** against the
+  independent reference on a real 48 kHz stream
+  (`free_format_rewrite_of_real_48k_fixture_decodes_identically` pins
+  the equivalence in-tree).
+
+  Consequences implemented with it:
+  - **Off-ladder free-format rates decode** ("a fixed bitrate which
+    does not need to be in the list"): the ladder-match requirement is
+    gone; `bitrate_from_base_slots` returns the nominal `⌈N·Fs/144⌉` as
+    metadata for an off-ladder size and only rejects sizes above the
+    §2.4.2.3 **384 kbit/s Layer II free-format support ceiling** (new
+    `FREE_FORMAT_MAX_BIT_RATE`). Pinned by an
+    ancillary-extended off-ladder stream decoding bit-identically.
+  - **No (bitrate, mode) matrix for free format**: the §2.4.2.3 matrix
+    row for free format reads "all modes"; `resolve` no longer rejects
+    recovered-rate/mode pairs (`recovered_pair_is_valid` is now
+    constant-true, retained for API continuity).
+  - **Registry encoder `freeformat` guard**: `freeformat=true` with a
+    bitrate whose signalled Annex B table differs from the free-format
+    table (e.g. 96 kbit/s stereo at 48 kHz → B.2c laid out, B.2a read)
+    is rejected at construction — such a stream is well-formed but
+    decodes to garbage on every conforming decoder. Valid: per-channel
+    ≥ 56 kbit/s at 48 kHz, ≥ 96 kbit/s at 44,1/32 kHz, any LSF rate.
+  - `header_with_recovered_bitrate` is metadata-only now (feeding it to
+    decode would re-key the table on the recovered rate); docs state
+    this explicitly.
+
 - **§2.4.2.4 output de-emphasis on decode (`src/deemphasis.rs`,
   `src/frame.rs`)**. The header emphasis field ("indicates the type of
   de-emphasis that shall be used") was parsed but never applied. The
