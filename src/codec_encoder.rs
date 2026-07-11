@@ -1067,6 +1067,39 @@ mod tests {
     }
 
     #[test]
+    fn freeformat_rejects_bitrates_whose_table_differs_from_the_free_format_table() {
+        // §2.4.2.3 / Annex B: conforming decoders read free format with
+        // the table fixed by the sampling frequency (B.2a at 48 kHz,
+        // B.2b at 44,1 / 32 kHz). A signalled rate that lays frames out
+        // with a *different* table (e.g. 96 kbit/s stereo at 48 kHz →
+        // B.2c) would emit well-formed streams that decode to garbage
+        // everywhere, so the constructor refuses it.
+        let mut p = params(48_000, 2, Some(96_000));
+        p.options.insert("freeformat", "true");
+        let err = match make_encoder(&p) {
+            Err(e) => e,
+            Ok(_) => panic!("table-mismatched freeformat must be rejected"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("free format"),
+            "error names the free-format constraint: {msg}"
+        );
+
+        // The same bitrate without freeformat is fine…
+        assert!(make_encoder(&params(48_000, 2, Some(96_000))).is_ok());
+        // …and coinciding-table freeformat configs are accepted: 48 kHz
+        // stereo 192 kbit/s (96 kbit/s per channel → B.2a) and any LSF
+        // rate (single Table B.1).
+        let mut ok = params(48_000, 2, Some(192_000));
+        ok.options.insert("freeformat", "true");
+        assert!(make_encoder(&ok).is_ok());
+        let mut lsf = params(24_000, 2, Some(64_000));
+        lsf.options.insert("freeformat", "true");
+        assert!(make_encoder(&lsf).is_ok());
+    }
+
+    #[test]
     fn send_frame_buffers_until_1152_then_emits_one_packet() {
         let mut enc = make_encoder(&params(44_100, 2, Some(192_000))).unwrap();
 

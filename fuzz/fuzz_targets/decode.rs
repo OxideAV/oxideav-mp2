@@ -63,6 +63,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Decoder, Packet, Rational, TimeBase};
+use oxideav_mp2::frame::decode_free_format_stream;
 use oxideav_mp2::{decode_all_frames, decode_frame, FrameHeader};
 
 const MAX_FRAMES_PER_ITER: usize = 12;
@@ -216,7 +217,23 @@ fuzz_target!(|data: &[u8]| {
             // body bytes.
             let body_start = cursor.min(data.len());
             match craft_frame(&ctl, &data[body_start..]) {
-                Some(frame) => crafted.push(frame),
+                Some(mut frame) => {
+                    // §2.4.2.3 free format: clear the bitrate_index
+                    // nibble on an attacker-chosen subset of crafted
+                    // frames so the free-format surfaces (the fixed-by-
+                    // sampling-frequency table selection, the measured
+                    // frame sizing, the off-ladder nominal-rate path and
+                    // the 384 kbit/s support ceiling) sit on the fuzzed
+                    // surface — both via `decode_free_format_stream`
+                    // below and via the registry packet path, where the
+                    // packet length (here: whatever the signalled-rate
+                    // header implied) is fully attacker-influenced and
+                    // usually off-ladder.
+                    if ctl_byte & 0b0100_0000 != 0 {
+                        frame[2] &= 0x0F;
+                    }
+                    crafted.push(frame);
+                }
                 None => crafted.push(data[body_start..].to_vec()),
             }
             cursor = (cursor + 16).min(data.len());
@@ -227,12 +244,16 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // 1. Streaming chain over the concatenated multi-frame buffer.
+    // 1. Streaming chain over the concatenated multi-frame buffer —
+    // both the signalled-rate walker and the §2.4.2.3 free-format
+    // walker (sync-to-sync measurement, two-frame lock, fixed-by-Fs
+    // table, off-ladder sizing, 384 kbit/s ceiling).
     let mut stream: Vec<u8> = Vec::new();
     for frame in &crafted {
         stream.extend_from_slice(frame);
     }
     let _ = decode_all_frames(&stream);
+    let _ = decode_free_format_stream(&stream);
 
     // 2. Trait-object decode session over the crafted frames.
     let Some(mut dec) = build_decoder() else {
