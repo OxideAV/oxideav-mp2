@@ -37,8 +37,10 @@
 //!   independent reference decoders disagree with *each other* at the
 //!   same magnitude).
 
+use oxideav_core::bits::BitReader;
+use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
 use oxideav_mp2::frame::{decode_frame_with, FrameDecodeState};
-use oxideav_mp2::header::FrameHeader;
+use oxideav_mp2::header::{FrameHeader, Mode, ModeExtension};
 use oxideav_mp2::{decode_all_frames, PCM_SAMPLES_PER_CHANNEL};
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
@@ -125,6 +127,51 @@ const MATRIX: &[(&str, usize, &str)] = &[
         2,
         "MPEG-2 LSF stereo 24 kHz 160k (LSF ladder top)",
     ),
+    // ── r411: joint-stereo / dual-channel / CRC cells ───────────────────
+    // Encoded by this crate's own encoder (no black-box encoder emits
+    // Layer II joint_stereo / dual_channel / CRC frames) and
+    // reference-decoded by the independent black-box decoder — see
+    // `gen_conformance_fixtures.rs` and `fixtures/GENERATION.md`. The
+    // premises (live intensity bound, CRC presence, …) are pinned by
+    // `r411_js_dual_crc_fixture_premises_hold` below.
+    (
+        "js_b4_44k_128",
+        2,
+        "joint-stereo bound4 44.1 kHz 128k B.2a (live intensity)",
+    ),
+    (
+        "js_b8_48k_192",
+        2,
+        "joint-stereo bound8 48 kHz 192k B.2a (live intensity)",
+    ),
+    (
+        "js_b12_32k_192",
+        2,
+        "joint-stereo bound12 32 kHz 192k B.2b (live intensity)",
+    ),
+    (
+        "js_b16_44k_256",
+        2,
+        "joint-stereo bound16 44.1 kHz 256k B.2b (live intensity)",
+    ),
+    (
+        "js_b4_32k_64",
+        2,
+        "joint-stereo bound4 32 kHz 64k B.2d narrow (live intensity)",
+    ),
+    (
+        "js_b8_48k_96",
+        2,
+        "joint-stereo bound8 48 kHz 96k B.2c (bound clamped to sblimit)",
+    ),
+    (
+        "js_b4_22k_64",
+        2,
+        "joint-stereo bound4 22.05 kHz 64k LSF (live intensity)",
+    ),
+    ("dual_44k_128", 2, "dual-channel 44.1 kHz 128k"),
+    ("dual_24k_64", 2, "dual-channel 24 kHz 64k LSF"),
+    ("crc_48k_192", 2, "stereo 48 kHz 192k with §2.4.1.4 CRC-16"),
 ];
 
 /// Symmetric `2^15` full-scale fractional → `i16` map, matching the
@@ -405,6 +452,132 @@ fn streaming_decode_equals_batch_decode() {
                 "{label}: ch {ch} streaming decode diverged from batch decode (bit-identical f64 expected)"
             );
         }
+    }
+}
+
+#[test]
+fn r411_js_dual_crc_fixture_premises_hold() {
+    // The joint-stereo / dual-channel / CRC cells only earn their place
+    // in the matrix if the streams genuinely exercise what their names
+    // claim. Pin the premises directly from the bitstream so a
+    // regenerated fixture cannot silently degenerate (e.g. an encoder
+    // change emitting no above-bound allocation would turn the "live
+    // intensity" cells into plain-stereo lookalikes).
+    //
+    // (stem, expected mode, mode_extension, live intensity region?)
+    let cells: &[(&str, Mode, ModeExtension, bool)] = &[
+        (
+            "js_b4_44k_128",
+            Mode::JointStereo,
+            ModeExtension::Bound4,
+            true,
+        ),
+        (
+            "js_b8_48k_192",
+            Mode::JointStereo,
+            ModeExtension::Bound8,
+            true,
+        ),
+        (
+            "js_b12_32k_192",
+            Mode::JointStereo,
+            ModeExtension::Bound12,
+            true,
+        ),
+        (
+            "js_b16_44k_256",
+            Mode::JointStereo,
+            ModeExtension::Bound16,
+            true,
+        ),
+        (
+            "js_b4_32k_64",
+            Mode::JointStereo,
+            ModeExtension::Bound4,
+            true,
+        ),
+        // B.2c has sblimit 8, so the bound-8 request clamps to an empty
+        // intensity region — the §2.4.2.3 clamp edge itself.
+        (
+            "js_b8_48k_96",
+            Mode::JointStereo,
+            ModeExtension::Bound8,
+            false,
+        ),
+        (
+            "js_b4_22k_64",
+            Mode::JointStereo,
+            ModeExtension::Bound4,
+            true,
+        ),
+        (
+            "dual_44k_128",
+            Mode::DualChannel,
+            ModeExtension::Bound4,
+            false,
+        ),
+        (
+            "dual_24k_64",
+            Mode::DualChannel,
+            ModeExtension::Bound4,
+            false,
+        ),
+        ("crc_48k_192", Mode::Stereo, ModeExtension::Bound4, false),
+    ];
+    for &(stem, mode, ext, live_intensity) in cells {
+        let Some((mp2, _ch, _expected)) = load(stem) else {
+            continue;
+        };
+        // Walk every frame: the premise must hold stream-wide, not just
+        // on frame 0.
+        let mut offset = 0usize;
+        let mut n_frames = 0usize;
+        while offset + 4 <= mp2.len() {
+            let header = FrameHeader::parse(&mp2[offset..]).expect("header");
+            assert_eq!(header.mode, mode, "{stem}: frame {n_frames} mode");
+            assert_eq!(
+                header.mode_extension, ext,
+                "{stem}: frame {n_frames} mode_extension"
+            );
+            assert_eq!(
+                header.protection_bit,
+                stem != "crc_48k_192",
+                "{stem}: frame {n_frames} CRC presence"
+            );
+            // Inspect the side info: §2.4.2.3 clamped bound and the
+            // above-bound allocation.
+            let after_header = if header.protection_bit { 4 } else { 6 };
+            let mut reader = BitReader::with_position(&mp2[offset..], after_header);
+            let (audio, _, _) =
+                parse_audio_data_with_section_bits(&header, &mut reader).expect("audio data");
+            if header.mode == Mode::JointStereo {
+                let expected_bound = ext.bound().min(audio.sblimit);
+                assert_eq!(audio.bound, expected_bound, "{stem}: clamped bound");
+                if live_intensity {
+                    assert!(
+                        audio.bound < audio.sblimit,
+                        "{stem}: intensity region must be non-empty"
+                    );
+                    assert!(
+                        (audio.bound..audio.sblimit).any(|sb| audio.nb_steps[0][sb] != 0),
+                        "{stem}: frame {n_frames} has no allocated above-bound subband"
+                    );
+                } else {
+                    assert_eq!(
+                        audio.bound, audio.sblimit,
+                        "{stem}: clamp edge must collapse the intensity region"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    audio.bound, audio.sblimit,
+                    "{stem}: non-joint modes have no intensity region"
+                );
+            }
+            offset += header.frame_size_bytes();
+            n_frames += 1;
+        }
+        assert!(n_frames > 5, "{stem}: expected a multi-frame stream");
     }
 }
 

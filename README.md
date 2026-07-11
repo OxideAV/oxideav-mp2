@@ -90,28 +90,41 @@ are wired into the runtime registry** (frame-in / packet-out
   bitrates (or `mode`) decode frame-by-frame — §2.4.2.3 leaves
   variable-bitrate support optional for a Layer II decoder; this one
   provides it (`mixed_bitrate_stream_decodes_frame_by_frame`).
-- **PCM conformance vs. real fixtures across the whole rate matrix**:
-  the full decode chain is validated end-to-end against the staged
-  `layer2-stereo-44100-192kbps` fixture's `expected.wav`
-  (31 frames → 71 424 interleaved s16 samples) **and** against an
-  independent black-box reference decoder over the complete Layer II
-  channel-mode × sampling-rate matrix — MPEG-1 single-channel and stereo
-  at 32 / 44,1 / 48 kHz, plus MPEG-2 LSF at 16 / 22,05 / 24 kHz
-  (`tests/decode_matrix_conformance.rs`, fixtures under
-  `tests/fixtures/`). Every fixture decodes with exact sample count and
-  a per-sample error envelope of **max abs ≤ 1 LSB, rms ≈ 0.5 LSB,
-  ~75 % bit-exact**, and the envelope holds **per individual 1152-sample
-  frame** (including the cold-start frame 0 whose §2.4.3.3.5 V buffer is
-  zero per Annex A Figure A.2 footnote 1). A streaming-equivalence check
+- **PCM conformance vs. real fixtures across the whole rate ×
+  allocation matrix**: the full decode chain is validated end-to-end
+  against the staged `layer2-stereo-44100-192kbps` fixture's
+  `expected.wav` (31 frames → 71 424 interleaved s16 samples) **and**
+  against an independent black-box reference decoder over a
+  32-stream corpus (`tests/decode_matrix_conformance.rs`, fixtures +
+  generation notes with SHA-256 sums under `tests/fixtures/`) spanning
+  the complete Layer II matrix: MPEG-1 mono/stereo at 32 / 44,1 /
+  48 kHz **plus** every Table 3-B.2 bit-allocation sub-table
+  (B.2a/b/c/d) in both channel modes, the bitrate-ladder extremes
+  (32 kbit/s mono … 384 kbit/s stereo), MPEG-2 LSF at 16 / 22,05 /
+  24 kHz including the ladder extremes (8 … 160 kbit/s) and the
+  LSF-only 144 kbit/s index, padding-heavy fractional-rate streams
+  (up to 22 of 23 frames padded), joint-stereo at **every**
+  `mode_extension` bound with a live §2.4.1.6 intensity region (plus
+  the B.2c bound-clamp edge), dual-channel, and §2.4.1.4 CRC-protected
+  frames. The r411 cells store the reference decoder's **float** PCM,
+  so the assertable bound is **≤ 0.05 LSB in the float domain**
+  (measured ≤ 0.025 LSB — the reference's own f32 precision floor; our
+  chain is f64 end-to-end) with a ≥ 99 % bit-exact s16 projection whose
+  residual ±1 flips sit only on rounding-boundary straddles; a
+  two-independent-reference latitude study in
+  `tests/fixtures/GENERATION.md` shows the references disagree with
+  *each other* at that same magnitude (ISO/IEC 11172-4 defines
+  conformance as a bounded difference signal; §2.4.3.2 / §2.4.3.3.5
+  specify the filterbank in floating point with no fixed accumulation
+  order), and one cell is 100 % s16 bit-exact against the second
+  reference. The envelope holds **per individual 1152-sample frame**
+  (including the cold-start frame 0 whose §2.4.3.3.5 V buffer is zero
+  per Annex A Figure A.2 footnote 1). A streaming-equivalence check
   confirms frame-by-frame `decode_frame_with` with persisted state is
-  bit-identical to the batch `decode_all_frames` path. (§2.4.3.2 /
-  §2.4.3.3.5 specify the filterbank in floating point with no fixed
-  accumulation order or integer-rounding rule, so an independent
-  clean-room decoder reproduces a reference decoder's output only within
-  that envelope, not byte-for-byte; ISO/IEC 11172-4 defines conformance
-  itself as a bounded difference signal.) The fractional→`i16` map uses
-  the symmetric `2^15` full-scale (`−1.0 ↦ −32768`) matching the
-  §2.4.3.3.4 "MSB represents −1" convention.
+  bit-identical to the batch `decode_all_frames` path. The
+  fractional→`i16` map uses the symmetric `2^15` full-scale
+  (`−1.0 ↦ −32768`) matching the §2.4.3.3.4 "MSB represents −1"
+  convention.
 
 **Encode** — the frame-assembly path is in place: the CRC-16 write
 primitives, the header writer (`FrameHeader::emit_bytes`), the §C.1.3
@@ -325,18 +338,15 @@ work, not missing core paths:
     0 dB SMR — the standard provides no Annex D Layer II masking tables
     for them (a docs/spec gap, not an implementation one).
 - An ISO/IEC 11172-4 / 13818-4 *compliance-grade* SNR sweep across the
-  full layered-test bitstream set. The decode path is now validated
-  end-to-end across the whole channel-mode × sampling-rate matrix —
-  MPEG-1 mono/stereo at 32 / 44,1 / 48 kHz and MPEG-2 LSF at
-  16 / 22,05 / 24 kHz (see **PCM conformance** above). The one remaining
-  decode-fixture gap is a stream with a **live intensity-stereo bound**
-  (`mode_extension != bound4`, so `bound < sblimit`) decoded against an
-  **independent reference**: the available black-box encoder only emits
-  full stereo for Layer II, so the live-bound intensity region is
-  currently exercised by the crate's own encode→decode round-trip and by
-  encoder-independent adversarial-payload fuzz (see **Joint-stereo +
-  dual-channel mode×rate matrix** above) rather than against a
-  third-party reference decoder's PCM.
+  official layered-test bitstream set (the ISO test bitstreams
+  themselves are not staged; the corpus above is built from black-box
+  encoders instead). The former live-intensity-bound fixture gap is
+  closed: joint-stereo streams at every `mode_extension` bound —
+  including narrow-table B.2d and the B.2c bound-clamp edge — plus
+  dual-channel and CRC-protected streams are now decoded against an
+  independent reference decoder's float PCM to ≤ 0.024 LSB, with both
+  independent decoders accepting every crate-encoded stream (see **PCM
+  conformance** above and `tests/fixtures/GENERATION.md`).
 
 ## Robustness
 

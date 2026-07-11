@@ -102,6 +102,53 @@ better than the references agree between themselves, reaching full
 bit-exactness on `mono_16k_8`. That is the documented rounding
 latitude; there is no decode-chain divergence left to root-cause.
 
+## Joint-stereo / dual-channel / CRC cells
+
+No available black-box encoder emits Layer II `joint_stereo`
+(§2.4.1.6 intensity stereo), `dual_channel`, or CRC-protected frames —
+the ffmpeg `mp2`/`mp2fixed` encoders support mono/stereo only. Those
+streams are therefore produced by **this crate's own encoder** through
+its public batch API and reference-decoded by the *independent*
+black-box decoders. That still breaks encoder/decoder symmetry: a
+shared misreading of the §2.4.1.6 intensity wire syntax or the
+§2.4.1.4 CRC coverage would diverge against the reference. The
+premises (live intensity bound, per-frame CRC, mode) are pinned
+bitstream-side by `r411_js_dual_crc_fixture_premises_hold`.
+
+```sh
+# encode (same multi-tone; see the example source for the exact cells):
+cargo run --example gen_conformance_fixtures -- tests/fixtures
+
+# reference decode, same as the black-box-encoded cells:
+ffmpeg -y -c:a mp2float -i <stem>.mp2 -c:a pcm_f32le <stem>.ref.wav
+```
+
+| stem            | rate  | bitrate | mode          | note                                    |
+| --------------- | ----- | ------- | ------------- | --------------------------------------- |
+| js_b4_44k_128   | 44100 | 128k    | joint bound4  | B.2a, live intensity, padding           |
+| js_b8_48k_192   | 48000 | 192k    | joint bound8  | B.2a, live intensity                    |
+| js_b12_32k_192  | 32000 | 192k    | joint bound12 | B.2b, live intensity                    |
+| js_b16_44k_256  | 44100 | 256k    | joint bound16 | B.2b, live intensity                    |
+| js_b4_32k_64    | 32000 | 64k     | joint bound4  | B.2d narrow, live intensity             |
+| js_b8_48k_96    | 48000 | 96k     | joint bound8  | B.2c: bound clamps to sblimit 8 (empty) |
+| js_b4_22k_64    | 22050 | 64k     | joint bound4  | LSF Table B.1, live intensity, padding  |
+| dual_44k_128    | 44100 | 128k    | dual_channel  | two independent programmes              |
+| dual_24k_64     | 24000 | 64k     | dual_channel  | LSF                                     |
+| crc_48k_192     | 48000 | 192k    | stereo        | §2.4.1.4 CRC-16 in every frame          |
+
+Results, same three-way comparison as above (both independent decoders
+**accept every stream** — mpg123 verifies the CRC cell's checksum —
+and align at offset 0):
+
+- float domain vs reference: **max ≤ 0.024 LSB** across all ten cells;
+- s16 projection vs reference: 99.54 % … 99.80 % bit-exact, max ±1;
+- s16 vs mpg123: 99.89 % … 99.96 % bit-exact, max ±1.
+
+This closes the long-standing gap noted in the crate README: a stream
+with a **live intensity-stereo bound** is now decoded against an
+independent reference (previously only covered by round-trip and
+adversarial-payload fuzz).
+
 ## SHA-256
 
 ```
@@ -137,4 +184,24 @@ fc36421d0992c09bfdc3f7f9bef991bab7c200add9f575be2c5f0552574cc5b4  mono_16k_8.ref
 3905035625db8d3a296d1d82794b61b12b762a79c9648f196a681e7ca64c88cf  stereo_22k_96.ref.wav
 e4b23980b9f1c983c3649f284e17b54565499332f8d29225baa2e7814059ecd7  mono_24k_144.ref.wav
 1e0e77d42425a1ba2edff1d80dc45194df35253a112dec11ae12e6bf875222f7  stereo_24k_160.ref.wav
+6d97647eb69222b02943fec7fbacc94acf978010ebca5d7847737e9580074b5c  js_b4_44k_128.mp2
+93fef5c73e645e18fa6cad27148bddc504534a8a57220c56315675e7307822cb  js_b8_48k_192.mp2
+4f965ff74d073ba061add544f4f9150d89dabd935fa521ef64d21bbcee499342  js_b12_32k_192.mp2
+93def1797bbd7eba1259286e69c5ad0ea0ab5ab6959d8215999e69a86aeeaca9  js_b16_44k_256.mp2
+ecb555a9e17501af3fa46092f653388f91d11c757b8c57b1393aab23f28dc926  js_b4_32k_64.mp2
+ef12343330df8d9b5d57536203bc55b8ad2e6b9a9ff9db5139ef56cf48e8d329  js_b8_48k_96.mp2
+0d966ca48128d1e5bbbf35e5c8bae96f6057b37991f7d8fa6f116d214c26ba46  js_b4_22k_64.mp2
+51a26fa8526ff69849a939dd360cc06153cf9b005e89a2ffb15d89cda4d9b0cf  dual_44k_128.mp2
+24af5fcfbfd1c425773f6b5acbc92b0e84f816ef838fcefbd9b0549e44818756  dual_24k_64.mp2
+e839971e25b2810bea8fc4db871955a573a7560308ed76284cf10a4538eebefc  crc_48k_192.mp2
+5619696d00ef41425b14195961dc34a2bf0779715a353c2eb5666b4e60ba49aa  js_b4_44k_128.ref.wav
+91ef1a36b7ee4be8d0a9e0d4e42812556a4cbb8419ba49dc1f72ff24f6509c6e  js_b8_48k_192.ref.wav
+da07b8697ff0d7c8852cdd6483a1d52a73b5e249187eac88e330756a230d7185  js_b12_32k_192.ref.wav
+cc020061cccfe38cda302bbf4e921e66d5991e0b2decf871083cde15ec945514  js_b16_44k_256.ref.wav
+5e210b54267c00ada137e9154a16de831c198d758bfd8860a2b98e5c648b6fb9  js_b4_32k_64.ref.wav
+85a0736a34182fe512746ec49fa193be276d98d7e8a4e64e967bf0cb5d3d9739  js_b8_48k_96.ref.wav
+9f045168df4ed341d1cc518e4dcc4858684771fefad5bea7ac2b3937cf322eed  js_b4_22k_64.ref.wav
+c0a6fe24349d1ab04e2d18d0ef95e64c8aff57f7f9b59edf3db56429864751b1  dual_44k_128.ref.wav
+68304ddd85e16f22a0cbaa4ef279dd50250850bc7e3d61e873691ab4a6f0600b  dual_24k_64.ref.wav
+ce40cc9679965b7f85bf8edaf86e32915238a9c5f3bd64722aed4746a07d61f8  crc_48k_192.ref.wav
 ```

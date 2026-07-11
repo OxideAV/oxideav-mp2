@@ -29,6 +29,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rather than any decode-chain difference; one cell (`mono_16k_8`)
   reaches 100 % s16 bit-exactness against the second reference.
 
+- **Joint-stereo / dual-channel / CRC conformance cells + generator
+  example (`examples/gen_conformance_fixtures.rs`)**. No black-box
+  encoder emits Layer II `joint_stereo` / `dual_channel` / CRC frames,
+  so ten further corpus cells are encoded by this crate's own public
+  batch API and reference-decoded by the independent black-box
+  decoders — closing the README's long-standing gap: a stream with a
+  **live §2.4.1.6 intensity-stereo bound** is now validated against an
+  independent reference (every `mode_extension` bound incl. narrow
+  B.2d, the B.2c bound-clamp edge, and LSF joint stereo), plus
+  dual-channel and §2.4.1.4 CRC-protected streams (both independent
+  decoders accept the CRC cell). Float-domain agreement ≤ 0.024 LSB
+  across all ten; a new `r411_js_dual_crc_fixture_premises_hold` test
+  pins the fixture premises (per-frame mode, clamped bound, allocated
+  above-bound subband, CRC presence) directly from the bitstream.
+
 - **§2.4.2.4 output de-emphasis on decode (`src/deemphasis.rs`,
   `src/frame.rs`)**. The header emphasis field ("indicates the type of
   de-emphasis that shall be used") was parsed but never applied. The
