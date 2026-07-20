@@ -180,10 +180,11 @@ fn encode_decode_round_trips_a_tone_at_every_layer2_rate() {
             err_energy += e * e;
         }
         assert!(sig_energy > 0.0, "non-trivial signal at {sample_rate} Hz");
-        // LSF rates use a flat 0 dB SMR (no Annex D Layer II curves),
-        // so their reconstruction is rate-driven and noisier than the
-        // perceptually-shaped MPEG-1 rates; both stay well under half
-        // the signal energy. A broken allocation blows far past 1.0.
+        // All six rates are perceptually shaped (13818-3's own Annex D
+        // drives the LSF rates as of r419); the envelope keeps the
+        // pre-r419 headroom since it exists to catch a *broken*
+        // allocation, which blows far past 1.0. The tighter psy-driven
+        // LSF floors are pinned by tests/lsf_psy_conformance.rs.
         let ratio = err_energy / sig_energy;
         assert!(
             ratio < 0.5,

@@ -61,9 +61,10 @@ fn scheduled_stream_len(header: &FrameHeader, n_frames: usize) -> usize {
 }
 
 /// (is_lsf, sample_rate_hz, total_bitrate_bps). Model-2 perceptual
-/// curves are tabulated only for the three MPEG-1 rates; the LSF rates
-/// degenerate to a flat 0 dB table (same as Model-1) and are included
-/// to prove the path stays usable at every rate.
+/// curves are tabulated for **all six** Layer II rates (the 11172-3
+/// tables at the MPEG-1 rates, the 13818-3 D.2-clause replacement
+/// partitions at the LSF rates), so every row of this matrix runs a
+/// genuinely perceptual Model-2 encode.
 const RATE_MATRIX: &[(bool, u32, u32)] = &[
     (false, 32_000, 128_000),
     (false, 44_100, 192_000),
