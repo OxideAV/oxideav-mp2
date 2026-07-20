@@ -207,7 +207,7 @@ fn lsf_round_trip_snr_clears_conformance_floors() {
         let stream = structured_stream(sample_rate, n_frames);
         let flat_table: SmrTable = [[0.0; NUM_SUBBANDS]; 2];
 
-        let mut snr = |bytes: &[u8]| {
+        let snr = |bytes: &[u8]| {
             let planes = decode_all_frames(bytes).expect("decode");
             round_trip_snr_db(&stream, &planes, n_frames)
         };
