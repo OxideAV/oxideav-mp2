@@ -65,6 +65,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   signal-shaped (non-flat) Model-1 and Model-2 SMR at every LSF rate,
   and auto-vs-flat allocation divergence in a real LSF encode.
 
+- **LSF psychoacoustic conformance suite
+  (`tests/lsf_psy_conformance.rs`)**. The LSF counterpart of the
+  MPEG-1 allocation-shaping suite plus measured round-trip SNR
+  floors: at every LSF rate the Model-1/Model-2 encodes differ from
+  the flat (rate-driven) encode byte-wise, in the first-frame
+  per-subband allocation, and from each other, and both models
+  **beat** the flat baseline's delay-aligned time-domain SNR by
+  ≥ 2,7 dB measured (16 kHz: 6,07 → 9,43 dB; 22,05 kHz: 8,92 →
+  11,95 dB; 24 kHz: 10,17 → 12,97 dB at 64 kbit/s stereo; asserted
+  floors sit ~3 dB under the measured values with a 1 dB
+  beats-flat margin).
+
 ### Fixed
 
 - **§D.1 Step 4(c) critical-band ranges resolved to the raw FFT-line
