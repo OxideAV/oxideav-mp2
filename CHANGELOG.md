@@ -48,6 +48,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   threshold-in-quiet column entry-for-entry bar documented print
   errata).
 
+- **LSF encoding is now psychoacoustically driven — both models, all
+  six Layer II rates.** `SamplingRate` gains the `Fs16kHz` /
+  `Fs22k05Hz` / `Fs24kHz` variants (with `is_lsf()`), and
+  `psy::annex_d_sampling_rate` maps every Layer II sampling frequency,
+  so the `encode_frame_auto*` / `encode_all_frames*` families and the
+  registry encoder derive real SMR tables at 16 / 22,05 / 24 kHz
+  instead of the former flat-0 dB fallback (which now only covers
+  non-Layer-II frequencies). LSF-specific §D.1 adaptations per the
+  13818-3 printed text: rate-dependent Step 4(b) tonality
+  neighbourhoods (`tonal_neighbourhood_layer2_for_rate` — `j = ±4`
+  innermost row, three rows, `4 < k < 500` domain, with `is_tonal` /
+  `zero` / `list_tonal` `_for_rate` companions), and Step 3 applied
+  **without** the 11172-3 overall-bit-rate −12 dB offset (the 13818-3
+  Step 3 text omits it). New tests pin the LSF neighbourhood rows, a
+  signal-shaped (non-flat) Model-1 and Model-2 SMR at every LSF rate,
+  and auto-vs-flat allocation divergence in a real LSF encode.
+
 ### Fixed
 
 - **§D.1 Step 4(c) critical-band ranges resolved to the raw FFT-line

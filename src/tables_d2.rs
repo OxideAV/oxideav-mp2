@@ -550,6 +550,12 @@ pub const TABLE_D_2F_LAYER_II_48KHZ: [CriticalBandBoundary; 27] = [
 /// that the non-tonal listing primitive in `psy` can pick the right
 /// critical-band-boundary table (D.2d / D.2e / D.2f) without the
 /// caller having to know which constant to import.
+///
+/// Covers **all six** Layer II sampling rates: the three ISO/IEC
+/// 11172-3 (MPEG-1) rates whose Annex D tables live in this module,
+/// and the three ISO/IEC 13818-3 (MPEG-2 LSF) rates whose own Annex D
+/// tables live in [`crate::tables_lsf`] (Model 1) and
+/// [`crate::tables_model2`] (Model 2 LSF partitions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SamplingRate {
     /// 32 kHz — Table D.2d (25 boundary entries).
@@ -558,30 +564,63 @@ pub enum SamplingRate {
     Fs44k1Hz,
     /// 48 kHz — Table D.2f (27 boundary entries).
     Fs48kHz,
+    /// 16 kHz (MPEG-2 LSF) — 13818-3 Table D.2d (21 boundary entries).
+    Fs16kHz,
+    /// 22.05 kHz (MPEG-2 LSF) — 13818-3 Table D.2e (23 boundary
+    /// entries).
+    Fs22k05Hz,
+    /// 24 kHz (MPEG-2 LSF) — 13818-3 Table D.2f (23 boundary entries).
+    Fs24kHz,
 }
 
 impl SamplingRate {
     /// Returns the Layer II Annex D Table D.2 critical-band-boundary
-    /// slice for this sampling rate.
+    /// slice for this sampling rate (11172-3 tables for the MPEG-1
+    /// rates, 13818-3 tables for the LSF rates).
     #[must_use]
     pub fn critical_band_boundaries(self) -> &'static [CriticalBandBoundary] {
         match self {
             SamplingRate::Fs32kHz => &TABLE_D_2D_LAYER_II_32KHZ,
             SamplingRate::Fs44k1Hz => &TABLE_D_2E_LAYER_II_44K1HZ,
             SamplingRate::Fs48kHz => &TABLE_D_2F_LAYER_II_48KHZ,
+            SamplingRate::Fs16kHz => &crate::tables_lsf::TABLE_LSF_D_2D_LAYER_II_16KHZ,
+            SamplingRate::Fs22k05Hz => &crate::tables_lsf::TABLE_LSF_D_2E_LAYER_II_22K05HZ,
+            SamplingRate::Fs24kHz => &crate::tables_lsf::TABLE_LSF_D_2F_LAYER_II_24KHZ,
         }
     }
 
     /// Returns the Layer II Annex D Table D.1d / D.1e / D.1f
-    /// threshold-in-quiet (`LTq`) slice for this sampling rate, used by
-    /// the §D.1 Step 5(a) threshold-in-quiet decimation in `psy`.
+    /// "Frequencies, critical band rates and absolute threshold" slice
+    /// for this sampling rate, used by the §D.1 Step 5(a)
+    /// threshold-in-quiet decimation, the Step 6 `z(i)` lookup and the
+    /// Step 4(c) boundary resolution in `psy` (11172-3 tables for the
+    /// MPEG-1 rates, 13818-3 tables for the LSF rates).
     #[must_use]
     pub fn ltq_table_layer2(self) -> &'static [LtqEntry] {
         match self {
             SamplingRate::Fs32kHz => &TABLE_D_1D_LTQ_LAYER_II_32,
             SamplingRate::Fs44k1Hz => &TABLE_D_1E_LTQ_LAYER_II_44_1HZ,
             SamplingRate::Fs48kHz => &TABLE_D_1F_LTQ_LAYER_II_48,
+            SamplingRate::Fs16kHz => &crate::tables_lsf::TABLE_LSF_D_1D_LTQ_LAYER_II_16,
+            SamplingRate::Fs22k05Hz => &crate::tables_lsf::TABLE_LSF_D_1E_LTQ_LAYER_II_22K05,
+            SamplingRate::Fs24kHz => &crate::tables_lsf::TABLE_LSF_D_1F_LTQ_LAYER_II_24,
         }
+    }
+
+    /// `true` for the three ISO/IEC 13818-3 MPEG-2 Lower Sampling
+    /// Frequencies (16 / 22,05 / 24 kHz).
+    ///
+    /// The LSF Annex D repeats Model 1 "with the necessary
+    /// adaptations": rate-dependent §D.1 Step 4(b) tonality
+    /// neighbourhoods, and a Step 3 printed **without** the 11172-3
+    /// overall-bit-rate −12 dB threshold offset — `psy` keys both on
+    /// this predicate.
+    #[must_use]
+    pub fn is_lsf(self) -> bool {
+        matches!(
+            self,
+            SamplingRate::Fs16kHz | SamplingRate::Fs22k05Hz | SamplingRate::Fs24kHz
+        )
     }
 }
 

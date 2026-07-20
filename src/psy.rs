@@ -654,9 +654,9 @@ pub fn is_local_maximum(spl_db: &[f64], k: usize) -> bool {
     spl_db[k] > spl_db[k - 1] && spl_db[k] >= spl_db[k + 1]
 }
 
-/// §D.1 Step 4(b) Layer II tonality-neighbourhood widths. Verbatim
-/// spec table for the 1024-point Layer II FFT (PDF page 117,
-/// printed 111):
+/// §D.1 Step 4(b) Layer II tonality-neighbourhood widths for the
+/// **MPEG-1** (ISO/IEC 11172-3) rates. Verbatim spec table for the
+/// 1024-point Layer II FFT (PDF page 117, printed 111):
 ///
 /// ```text
 /// j = -2, +2                       for   2 < k <  63
@@ -669,15 +669,16 @@ pub fn is_local_maximum(spl_db: &[f64], k: usize) -> bool {
 /// tonality undefined at the spectrum's edges). The returned slice
 /// is the set of strictly-non-zero offsets — `j = 0` (the line
 /// itself) is excluded by construction.
+///
+/// All three 11172-3 rates share this one table; the MPEG-2 LSF
+/// rates print their own, rate-dependent tables — use
+/// [`tonal_neighbourhood_layer2_for_rate`] when the sampling rate is
+/// in hand.
 #[must_use]
 pub fn tonal_neighbourhood_layer2(k: usize) -> Option<&'static [i32]> {
     // Static neighbourhood slices, one per spec row.
     static N_TWO: &[i32] = &[-2, 2];
     static N_THREE: &[i32] = &[-3, -2, 2, 3];
-    static N_SIX: &[i32] = &[-6, -5, -4, -3, -2, 2, 3, 4, 5, 6];
-    static N_TWELVE: &[i32] = &[
-        -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-    ];
     if k <= 2 {
         None
     } else if k < 63 {
@@ -690,6 +691,77 @@ pub fn tonal_neighbourhood_layer2(k: usize) -> Option<&'static [i32]> {
         Some(N_TWELVE)
     } else {
         None
+    }
+}
+
+/// Shared `-6…+6` neighbourhood row (both spec families print it).
+static N_SIX: &[i32] = &[-6, -5, -4, -3, -2, 2, 3, 4, 5, 6];
+/// Shared `-12…+12` neighbourhood row (both spec families print it).
+static N_TWELVE: &[i32] = &[
+    -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+];
+
+/// §D.1 Step 4(b) Layer II tonality-neighbourhood widths, keyed by
+/// sampling rate.
+///
+/// The MPEG-1 rates share the 11172-3 table (see
+/// [`tonal_neighbourhood_layer2`]). The MPEG-2 LSF rates use the
+/// ISO/IEC 13818-3 §D.1 Step 4(b) tables, which are rate-dependent
+/// (printed at PDF printed pages 88–89):
+///
+/// ```text
+/// Layer II, Fs = 16 kHz:
+/// j = -4, +4                       for   4 < k < 192
+/// j = -6, ..., -2, +2, ..., +6     for 192 <= k < 384
+/// j = -12, ..., -2, +2, ..., +12   for 384 <= k < 500
+///
+/// Layer II, Fs = 22,05 / 24 kHz:
+/// j = -4, +4                       for   4 < k < 128
+/// j = -6, ..., -2, +2, ..., +6     for 128 <= k < 256
+/// j = -12, ..., -2, +2, ..., +12   for 256 <= k < 500
+/// ```
+///
+/// Note the LSF deltas from the MPEG-1 table: the innermost row is
+/// the sparse pair `j = −4, +4` (not `−2, +2`), the definition domain
+/// starts at `k > 4` (not `k > 2`), the upper bound is exclusive
+/// (`k < 500`), and there are three rows instead of four.
+#[must_use]
+pub fn tonal_neighbourhood_layer2_for_rate(
+    fs: crate::tables_d2::SamplingRate,
+    k: usize,
+) -> Option<&'static [i32]> {
+    use crate::tables_d2::SamplingRate;
+    static N_FOUR: &[i32] = &[-4, 4];
+    match fs {
+        SamplingRate::Fs32kHz | SamplingRate::Fs44k1Hz | SamplingRate::Fs48kHz => {
+            tonal_neighbourhood_layer2(k)
+        }
+        SamplingRate::Fs16kHz => {
+            if k <= 4 {
+                None
+            } else if k < 192 {
+                Some(N_FOUR)
+            } else if k < 384 {
+                Some(N_SIX)
+            } else if k < 500 {
+                Some(N_TWELVE)
+            } else {
+                None
+            }
+        }
+        SamplingRate::Fs22k05Hz | SamplingRate::Fs24kHz => {
+            if k <= 4 {
+                None
+            } else if k < 128 {
+                Some(N_FOUR)
+            } else if k < 256 {
+                Some(N_SIX)
+            } else if k < 500 {
+                Some(N_TWELVE)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -706,7 +778,28 @@ pub fn tonal_neighbourhood_layer2(k: usize) -> Option<&'static [i32]> {
 /// range and for any `k + j` that would fall outside `spl_db`.
 #[must_use]
 pub fn is_tonal_layer2(spl_db: &[f64], k: usize) -> bool {
-    let Some(neighbourhood) = tonal_neighbourhood_layer2(k) else {
+    is_tonal_with_neighbourhood(spl_db, k, tonal_neighbourhood_layer2(k))
+}
+
+/// Rate-keyed variant of [`is_tonal_layer2`]: same §D.1 Step 4(b)
+/// inequality, with the neighbourhood taken from
+/// [`tonal_neighbourhood_layer2_for_rate`] so the MPEG-2 LSF rates
+/// use their own 13818-3 `j` tables.
+#[must_use]
+pub fn is_tonal_layer2_for_rate(
+    spl_db: &[f64],
+    fs: crate::tables_d2::SamplingRate,
+    k: usize,
+) -> bool {
+    is_tonal_with_neighbourhood(spl_db, k, tonal_neighbourhood_layer2_for_rate(fs, k))
+}
+
+fn is_tonal_with_neighbourhood(
+    spl_db: &[f64],
+    k: usize,
+    neighbourhood: Option<&'static [i32]>,
+) -> bool {
+    let Some(neighbourhood) = neighbourhood else {
         return false;
     };
     // The X(k) reference must itself be a local maximum per the
@@ -1037,7 +1130,23 @@ pub fn relevant_maskers_for_target_line(maskers: &[Masker], z_i_bark: f64) -> Ve
 /// of a confirmed tonal component and confirmed components live
 /// inside the `tonal_neighbourhood_layer2` definition domain.
 pub fn zero_tonal_neighbourhood_layer2(spl_db: &mut [f64], k: usize) {
-    let Some(neighbourhood) = tonal_neighbourhood_layer2(k) else {
+    zero_with_neighbourhood(spl_db, k, tonal_neighbourhood_layer2(k));
+}
+
+/// Rate-keyed variant of [`zero_tonal_neighbourhood_layer2`], zeroing
+/// the neighbourhood of [`tonal_neighbourhood_layer2_for_rate`] so
+/// the MPEG-2 LSF rates blank their own (wider `−4/+4` innermost)
+/// examined range.
+pub fn zero_tonal_neighbourhood_layer2_for_rate(
+    spl_db: &mut [f64],
+    fs: crate::tables_d2::SamplingRate,
+    k: usize,
+) {
+    zero_with_neighbourhood(spl_db, k, tonal_neighbourhood_layer2_for_rate(fs, k));
+}
+
+fn zero_with_neighbourhood(spl_db: &mut [f64], k: usize, neighbourhood: Option<&'static [i32]>) {
+    let Some(neighbourhood) = neighbourhood else {
         return;
     };
     // Zero the line itself first; downstream Step 4(c) reads
@@ -1150,21 +1259,36 @@ pub struct TonalCandidate {
 /// neighbourhood ends two bins apart, so an upper bound of
 /// `spl_db.len() / 3` is sufficient for any input.
 pub fn list_tonal_layer2(spl_db: &mut [f64]) -> Vec<TonalCandidate> {
+    list_tonal_layer2_for_rate(spl_db, crate::tables_d2::SamplingRate::Fs48kHz)
+}
+
+/// Rate-keyed variant of [`list_tonal_layer2`]: the same Step
+/// 4(a)/(b) sweep, driven by the sampling rate's own tonality
+/// neighbourhood table ([`tonal_neighbourhood_layer2_for_rate`]) so
+/// the MPEG-2 LSF rates apply their 13818-3 `j` ranges. For the
+/// MPEG-1 rates this is byte-identical to [`list_tonal_layer2`]
+/// (all three share one neighbourhood table).
+pub fn list_tonal_layer2_for_rate(
+    spl_db: &mut [f64],
+    fs: crate::tables_d2::SamplingRate,
+) -> Vec<TonalCandidate> {
     let mut out: Vec<TonalCandidate> = Vec::new();
     if spl_db.len() < 4 {
         return out;
     }
     // The §D.1 Step 4(b) tonality test is defined on `2 < k <= 500`
-    // (cf. `tonal_neighbourhood_layer2`). Iterate the intersection
-    // of that domain with the spectrum length; the inclusive upper
+    // for the MPEG-1 rates and `4 < k < 500` for the LSF rates (cf.
+    // `tonal_neighbourhood_layer2_for_rate`, which returns `None`
+    // outside each rate's own domain). Iterate the union domain
+    // intersected with the spectrum length; the inclusive upper
     // bound is `spl_db.len() - 2` because `is_local_maximum`
     // requires both `k - 1` and `k + 1` to exist.
     let k_end = core::cmp::min(500usize, spl_db.len() - 2);
     let mut k = 3_usize;
     while k <= k_end {
-        // `is_tonal_layer2` enforces Step 4(a) internally; on a
-        // positive result the three-line SPL is well-defined.
-        if is_tonal_layer2(spl_db, k) {
+        // `is_tonal_layer2_for_rate` enforces Step 4(a) internally; on
+        // a positive result the three-line SPL is well-defined.
+        if is_tonal_layer2_for_rate(spl_db, fs, k) {
             if let Some(x_tm) = tonal_spl_db(spl_db, k) {
                 out.push(TonalCandidate { k, spl_db: x_tm });
                 // Apply the spec's "set to −∞ dB" instruction
@@ -1172,7 +1296,7 @@ pub fn list_tonal_layer2(spl_db: &mut [f64]) -> Vec<TonalCandidate> {
                 // this neighbourhood are now ineligible for their
                 // own tonal classification, matching the spec's
                 // "examined frequency range" exclusion rule.
-                zero_tonal_neighbourhood_layer2(spl_db, k);
+                zero_tonal_neighbourhood_layer2_for_rate(spl_db, fs, k);
             }
         }
         k += 1;
@@ -1946,21 +2070,25 @@ pub fn critical_band_line_ranges(fs: crate::tables_d2::SamplingRate) -> Vec<(usi
 
 /// Map a Layer II sampling frequency in Hz to the Annex D
 /// [`crate::tables_d2::SamplingRate`] enum that selects the
-/// rate-specific D.1 / D.2 / D.4 tables.
+/// rate-specific psychoacoustic tables.
 ///
-/// The §D.1 / §D.2 psychoacoustic tables are tabulated only for the
-/// three MPEG-1 Layer II rates (32 / 44,1 / 48 kHz). The MPEG-2 LSF
-/// rates (16 / 22,05 / 24 kHz, ISO/IEC 13818-3) have **no** Annex D
-/// Layer II masking tables in the standard, so this returns `None`
-/// for them — the [`compute_smr_model1_frame`] caller then has to
-/// fall back to a rate-driven SMR (the spec provides no perceptual
-/// model for the LSF rates).
+/// Covers **all six** Layer II rates: the three MPEG-1 rates (32 /
+/// 44,1 / 48 kHz — ISO/IEC 11172-3 Annex D tables) and the three
+/// MPEG-2 LSF rates (16 / 22,05 / 24 kHz — ISO/IEC 13818-3 carries
+/// its **own** Annex D "Psychoacoustic model 1/2 for Lower Sampling
+/// Frequencies" with Layer II tables of its own, transcribed in
+/// [`crate::tables_lsf`] and [`crate::tables_model2`]). Returns
+/// `None` only for a frequency that is not a Layer II sampling rate
+/// at all — the caller then falls back to a rate-driven flat SMR.
 #[must_use]
 pub fn annex_d_sampling_rate(sample_rate_hz: u32) -> Option<crate::tables_d2::SamplingRate> {
     match sample_rate_hz {
         32_000 => Some(crate::tables_d2::SamplingRate::Fs32kHz),
         44_100 => Some(crate::tables_d2::SamplingRate::Fs44k1Hz),
         48_000 => Some(crate::tables_d2::SamplingRate::Fs48kHz),
+        16_000 => Some(crate::tables_d2::SamplingRate::Fs16kHz),
+        22_050 => Some(crate::tables_d2::SamplingRate::Fs22k05Hz),
+        24_000 => Some(crate::tables_d2::SamplingRate::Fs24kHz),
         _ => None,
     }
 }
@@ -2045,15 +2173,25 @@ pub fn compute_smr_model1_frame(
 
     // ---- Step 4: tonal / non-tonal masker extraction ----
     //
-    // `list_tonal_layer2` mutates its argument (zeroing the examined
-    // neighbourhoods), so work on a copy; the non-tonal pass then
-    // reads the tonal-zeroed copy per §D.1 Step 4(c).
+    // `list_tonal_layer2_for_rate` mutates its argument (zeroing the
+    // examined neighbourhoods), so work on a copy; the non-tonal pass
+    // then reads the tonal-zeroed copy per §D.1 Step 4(c). The rate
+    // key selects the 13818-3 tonality neighbourhoods at the LSF
+    // rates.
     let mut work = spectrum.clone();
-    let tonal = list_tonal_layer2(&mut work);
+    let tonal = list_tonal_layer2_for_rate(&mut work, fs);
     let non_tonal = list_non_tonal_candidates_layer2(&work, fs);
 
     // ---- Step 3 + Step 5(a): threshold-in-quiet decimation ----
-    let offset_db = absolute_threshold_offset_db(bitrate_per_channel_kbps);
+    //
+    // The 13818-3 §D.1 Step 3 text repeats the model *without* the
+    // 11172-3 overall-bit-rate offset sentence, so the LSF rates take
+    // a 0 dB offset as printed (see `SamplingRate::is_lsf`).
+    let offset_db = if fs.is_lsf() {
+        0.0
+    } else {
+        absolute_threshold_offset_db(bitrate_per_channel_kbps)
+    };
     let kept = decimate_below_threshold_in_quiet(&tonal, &non_tonal, fs, offset_db);
 
     // ---- Step 5(b): 0.5-Bark tonal-masker decimation ----
@@ -2178,10 +2316,15 @@ fn model2_plus_one_lsb_reference_energy() -> f64 {
 /// rolling two-block history; the first two frames predict against the
 /// zeroed-startup state.
 ///
-/// LSF (16 / 22,05 / 24 kHz) rates are **not** handled: Annex D provides
-/// no Model-2 calculation-partition or absolute-threshold tables for the
-/// lower sampling frequencies, so `fs` is one of the three Model-2 rates
-/// ([`crate::tables_d2::SamplingRate`]).
+/// All six Layer II rates are handled: the MPEG-1 rates run against
+/// the 11172-3 D.3/D.4 tables, and the MPEG-2 LSF rates (16 / 22,05 /
+/// 24 kHz) against the 13818-3 D.3.a/b/c calculation partitions with
+/// the D.1-derived step-(l) thresholds (see [`crate::tables_model2`]'s
+/// LSF section). The LSF partition tables top out just below the
+/// Nyquist line (491 / 489 / 509 of 513); lines above the last
+/// partition carry no computed threshold, so the top one-or-two
+/// subbands there take the 0,0 dB degenerate below, exactly like a
+/// silent partition.
 #[must_use]
 pub fn compute_smr_model2_frame(
     pcm: &[f64],
@@ -2330,8 +2473,11 @@ impl Model2Layer2State {
 /// caller streaming consecutive frames through one [`Model2Layer2State`]
 /// gets the spec's continuous rolling history.
 ///
-/// LSF rates are not handled (no Annex D Model-2 tables); `fs` is one of
-/// the three Model-2 rates.
+/// All six Layer II rates are handled; the LSF rates select the
+/// 13818-3 Model-2 tables (see [`compute_smr_model2_frame`]). The
+/// §D.2.1 *twice-per-frame, more-stringent-of-the-pair* rule and the
+/// `iblen = 576` shift are layer properties, not rate properties, and
+/// apply unchanged at the LSF rates.
 #[must_use]
 pub fn compute_smr_model2_layer2_frame(
     pcm: &[f64],
@@ -4512,14 +4658,134 @@ mod tests {
     }
 
     #[test]
-    fn annex_d_sampling_rate_maps_mpeg1_rates_only() {
+    fn annex_d_sampling_rate_maps_all_six_layer2_rates() {
         assert_eq!(annex_d_sampling_rate(32_000), Some(SamplingRate::Fs32kHz));
         assert_eq!(annex_d_sampling_rate(44_100), Some(SamplingRate::Fs44k1Hz));
         assert_eq!(annex_d_sampling_rate(48_000), Some(SamplingRate::Fs48kHz));
-        // LSF rates have no Annex D Layer II masking tables.
-        assert_eq!(annex_d_sampling_rate(16_000), None);
-        assert_eq!(annex_d_sampling_rate(22_050), None);
-        assert_eq!(annex_d_sampling_rate(24_000), None);
+        // The LSF rates map to the 13818-3 Annex D tables.
+        assert_eq!(annex_d_sampling_rate(16_000), Some(SamplingRate::Fs16kHz));
+        assert_eq!(annex_d_sampling_rate(22_050), Some(SamplingRate::Fs22k05Hz));
+        assert_eq!(annex_d_sampling_rate(24_000), Some(SamplingRate::Fs24kHz));
+        // Non-Layer-II frequencies still refuse.
+        assert_eq!(annex_d_sampling_rate(8_000), None);
+        assert_eq!(annex_d_sampling_rate(11_025), None);
+        assert_eq!(annex_d_sampling_rate(96_000), None);
+    }
+
+    #[test]
+    fn lsf_tonal_neighbourhoods_follow_the_13818_3_rows() {
+        use crate::tables_d2::SamplingRate as R;
+        // 16 kHz rows: ±4 for 4 < k < 192; ±6-run for 192 <= k < 384;
+        // ±12-run for 384 <= k < 500; undefined outside.
+        assert_eq!(tonal_neighbourhood_layer2_for_rate(R::Fs16kHz, 4), None);
+        assert_eq!(
+            tonal_neighbourhood_layer2_for_rate(R::Fs16kHz, 5),
+            Some(&[-4, 4][..])
+        );
+        assert_eq!(
+            tonal_neighbourhood_layer2_for_rate(R::Fs16kHz, 191).unwrap(),
+            &[-4, 4][..]
+        );
+        assert_eq!(
+            tonal_neighbourhood_layer2_for_rate(R::Fs16kHz, 192)
+                .unwrap()
+                .len(),
+            10
+        );
+        assert_eq!(
+            tonal_neighbourhood_layer2_for_rate(R::Fs16kHz, 384)
+                .unwrap()
+                .len(),
+            22
+        );
+        assert_eq!(tonal_neighbourhood_layer2_for_rate(R::Fs16kHz, 500), None);
+        // 22,05 / 24 kHz rows: breaks at 128 / 256 / 500.
+        for fs in [R::Fs22k05Hz, R::Fs24kHz] {
+            assert_eq!(tonal_neighbourhood_layer2_for_rate(fs, 4), None);
+            assert_eq!(
+                tonal_neighbourhood_layer2_for_rate(fs, 127).unwrap(),
+                &[-4, 4][..]
+            );
+            assert_eq!(
+                tonal_neighbourhood_layer2_for_rate(fs, 128).unwrap().len(),
+                10
+            );
+            assert_eq!(
+                tonal_neighbourhood_layer2_for_rate(fs, 256).unwrap().len(),
+                22
+            );
+            assert_eq!(
+                tonal_neighbourhood_layer2_for_rate(fs, 499).unwrap().len(),
+                22
+            );
+            assert_eq!(tonal_neighbourhood_layer2_for_rate(fs, 500), None);
+        }
+        // The MPEG-1 rates delegate to the shared 11172-3 table.
+        for fs in [R::Fs32kHz, R::Fs44k1Hz, R::Fs48kHz] {
+            for k in [3usize, 100, 200, 400, 500] {
+                assert_eq!(
+                    tonal_neighbourhood_layer2_for_rate(fs, k),
+                    tonal_neighbourhood_layer2(k)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lsf_model1_smr_is_signal_shaped_not_flat() {
+        // A two-tone signal at an LSF rate must now produce a
+        // non-flat, finite SMR table through the full Model-1 chain
+        // (formerly the LSF rates degenerated to flat 0 dB).
+        for fs in [
+            SamplingRate::Fs16kHz,
+            SamplingRate::Fs22k05Hz,
+            SamplingRate::Fs24kHz,
+        ] {
+            let mut pcm = vec![0.0_f64; LAYER2_FFT_LEN];
+            for (i, s) in pcm.iter_mut().enumerate() {
+                let t = i as f64;
+                *s = 0.4 * (2.0 * core::f64::consts::PI * 40.0 * t / 1024.0).sin()
+                    + 0.05 * (2.0 * core::f64::consts::PI * 300.0 * t / 1024.0).sin();
+            }
+            let scf_max = [1.0_f64; NUM_SUBBANDS_LAYER2];
+            let smr = compute_smr_model1_frame(&pcm, &scf_max, fs, 64.0);
+            assert!(smr.iter().all(|v| v.is_finite()), "{fs:?}: SMR not finite");
+            let min = smr.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = smr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                max - min > 1.0,
+                "{fs:?}: SMR table is flat ({min}..{max}) — LSF chain not driving"
+            );
+        }
+    }
+
+    #[test]
+    fn lsf_model2_smr_is_signal_shaped_not_flat() {
+        for fs in [
+            SamplingRate::Fs16kHz,
+            SamplingRate::Fs22k05Hz,
+            SamplingRate::Fs24kHz,
+        ] {
+            let mut state = Model2Layer2State::new();
+            let mut pcm = vec![0.0_f64; crate::frame::PCM_SAMPLES_PER_CHANNEL];
+            for (i, s) in pcm.iter_mut().enumerate() {
+                let t = i as f64;
+                *s = 0.4 * (2.0 * core::f64::consts::PI * 40.0 * t / 1024.0).sin()
+                    + 0.05 * (2.0 * core::f64::consts::PI * 300.0 * t / 1024.0).sin();
+            }
+            // Stream a few frames so the predictor has real history.
+            let mut smr = [0.0_f64; NUM_SUBBANDS_LAYER2];
+            for _ in 0..3 {
+                smr = compute_smr_model2_layer2_frame(&pcm, fs, &mut state);
+            }
+            assert!(smr.iter().all(|v| v.is_finite()), "{fs:?}: SMR not finite");
+            let min = smr.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = smr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                max - min > 1.0,
+                "{fs:?}: Model-2 SMR table is flat ({min}..{max})"
+            );
+        }
     }
 
     #[test]

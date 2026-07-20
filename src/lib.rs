@@ -217,22 +217,15 @@
 //!     §C.1.3 analysis filterbank's X ring buffer so the rolling
 //!     history stays continuous across frames.
 //!
-//!   Both models are perceptually active at the MPEG-1 Layer II rates
-//!   (32 / 44,1 / 48 kHz). For a caller-supplied table, the explicit
+//!   Both models are perceptually active at **all six** Layer II
+//!   sampling rates: the MPEG-1 rates (32 / 44,1 / 48 kHz) via the
+//!   ISO/IEC 11172-3 Annex D tables, and the MPEG-2 LSF rates (16 /
+//!   22,05 / 24 kHz) via ISO/IEC 13818-3's **own** Annex D
+//!   ("Psychoacoustic model 1/2 for Lower Sampling Frequencies") —
+//!   its Layer II threshold-in-quiet / critical-band tables live in
+//!   [`tables_lsf`], its Model-2 calculation partitions in
+//!   [`tables_model2`]. For a caller-supplied table, the explicit
 //!   [`encode_frame`] / [`encode_all_frames_with_smr`] paths remain.
-//!
-//! ## What does not work yet
-//!
-//! * **No Annex D Layer II masking curves for the MPEG-2 LSF rates**
-//!   (16 / 22,05 / 24 kHz). ISO/IEC 11172-3 Annex D tabulates the
-//!   threshold-in-quiet / critical-band / calculation-partition tables
-//!   only for the three MPEG-1 sampling rates; the standard provides
-//!   none for the LSF rates. Both auto-SMR models therefore degenerate
-//!   to a flat 0 dB SMR table at the LSF rates (rate-driven
-//!   allocation, identical to a caller-supplied constant table). This
-//!   is a documented spec gap, not an implementation one — a perceptual
-//!   model for the LSF rates would need masking tables the standard
-//!   does not publish.
 
 #![warn(missing_debug_implementations)]
 
@@ -321,15 +314,17 @@ pub use header::{
 };
 pub use psy::{
     annex_d_sampling_rate, complex_spectrum_polar_layer2, compute_smr_model1_frame,
-    compute_smr_model2_frame, compute_smr_model2_layer2_frame, decimate_tonal_maskers,
-    fft_line_to_subband_layer2, global_masking_threshold_db, hann_window_layer2,
-    individual_masking_threshold_db, is_local_maximum, is_tonal_layer2, list_non_tonal_layer2,
+    compute_smr_model2_frame, compute_smr_model2_layer2_frame, critical_band_line_ranges,
+    decimate_tonal_maskers, fft_line_to_subband_layer2, global_masking_threshold_db,
+    hann_window_layer2, individual_masking_threshold_db, is_local_maximum, is_tonal_layer2,
+    is_tonal_layer2_for_rate, list_non_tonal_layer2, list_tonal_layer2_for_rate,
     masker_in_target_window, masking_function_vf, masking_index_non_tonal, masking_index_tonal,
     minimum_masking_threshold_subband, model2_hann_window_layer2, non_tonal_band_index,
     non_tonal_spl_db, normalize_to_spl_reference, partition_energy_and_unpredictability,
     power_density_spectrum_layer2, relevant_maskers_for_target_line, scalefactor_spl_term_db,
     signal_to_mask_ratio_subband, sound_pressure_level_subband, tonal_neighbourhood_layer2,
-    tonal_spl_db, unpredictability_measure, zero_tonal_neighbourhood_layer2, Masker, MaskerKind,
+    tonal_neighbourhood_layer2_for_rate, tonal_spl_db, unpredictability_measure,
+    zero_tonal_neighbourhood_layer2, zero_tonal_neighbourhood_layer2_for_rate, Masker, MaskerKind,
     Model2Layer2State, Model2PredictorState, SubbandSplMethod,
     FFT_DELAY_COMPENSATION_SHIFT_SAMPLES, IBLEN_LAYER2, LAYER2_FFT_ADDITIONAL_WINDOW_SHIFT_SAMPLES,
     LAYER2_FFT_BINS, LAYER2_FFT_LEN, MASKING_FUNCTION_DZ_HI, MASKING_FUNCTION_DZ_LO,

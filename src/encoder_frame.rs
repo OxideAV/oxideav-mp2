@@ -404,14 +404,14 @@ enum SmrSource<'a> {
 /// The §D.1 Step 3 overall-bit-rate offset wants the bit rate **per
 /// channel** in kbit/s; that is `header.bit_rate / 1000 / channels`.
 ///
-/// For MPEG-2 LSF sampling rates (16 / 22,05 / 24 kHz) the standard
-/// provides **no** Annex D Layer II masking tables, so
-/// [`annex_d_sampling_rate`] returns `None` and we fall back to an
-/// all-zero SMR table (a flat 0 dB SMR — the allocator then spends
-/// bits purely by the rate budget, the same behaviour as a
-/// caller-supplied constant table). The fallback keeps auto-encode
-/// usable at every rate; a perceptual model for the LSF rates is a
-/// documented spec gap, not an implementation one.
+/// All six Layer II sampling rates are psychoacoustically modelled:
+/// the MPEG-1 rates by the 11172-3 Annex D tables, the MPEG-2 LSF
+/// rates (16 / 22,05 / 24 kHz) by ISO/IEC 13818-3's own Annex D
+/// Layer II tables (see [`crate::tables_lsf`]). A sampling frequency
+/// outside the Layer II ladder makes [`annex_d_sampling_rate`] return
+/// `None` and falls back to an all-zero SMR table (a flat 0 dB SMR —
+/// rate-driven allocation, the same behaviour as a caller-supplied
+/// constant table).
 fn compute_auto_smr_table(
     header: &FrameHeader,
     pcm: &[Vec<f64>],
@@ -421,10 +421,9 @@ fn compute_auto_smr_table(
 ) -> SmrTable {
     let mut smr: SmrTable = [[0.0; NUM_SUBBANDS]; 2];
 
-    // No Annex D Layer II masking tables for the LSF rates: leave the
-    // table flat at 0 dB SMR (rate-driven allocation). The §D.1 window
-    // history is not advanced (it carries no useful alignment at an
-    // unmodelled rate; a later switch back restarts from zeros).
+    // Every Layer II rate is modelled; only a non-Layer-II frequency
+    // leaves the table flat at 0 dB SMR (rate-driven allocation). The
+    // §D.1 window history is not advanced in that degenerate case.
     let Some(fs) = annex_d_sampling_rate(header.sample_rate) else {
         return smr;
     };
@@ -488,13 +487,13 @@ fn delayed_model1_window(history: &[f64], pcm: &[f64]) -> Vec<f64> {
 /// so consecutive frames encoded through the same [`EncodeFrameState`]
 /// see the continuous rolling spectrum the §D.2 model assumes.
 ///
-/// For MPEG-2 LSF sampling rates (16 / 22,05 / 24 kHz) the standard
-/// tabulates no Annex D Model-2 calculation-partition / absolute-
-/// threshold tables, so [`annex_d_sampling_rate`] returns `None` and we
-/// fall back to a flat 0 dB SMR table — identical degenerate behaviour
-/// to the Model-1 path. The fallback keeps Model-2 auto-encode usable
-/// at every rate; a perceptual model for the LSF rates is a documented
-/// spec gap, not an implementation one.
+/// All six Layer II sampling rates are modelled: the MPEG-1 rates by
+/// the 11172-3 D.3/D.4 tables, the MPEG-2 LSF rates by the 13818-3
+/// D.3.a/b/c calculation partitions with D.1-derived step-(l)
+/// thresholds (see [`crate::tables_model2`]'s LSF section). A
+/// non-Layer-II frequency makes [`annex_d_sampling_rate`] return
+/// `None` and falls back to a flat 0 dB SMR table — identical
+/// degenerate behaviour to the Model-1 path.
 fn compute_auto_smr_table_model2(
     header: &FrameHeader,
     pcm: &[Vec<f64>],
@@ -503,11 +502,9 @@ fn compute_auto_smr_table_model2(
 ) -> SmrTable {
     let mut smr: SmrTable = [[0.0; NUM_SUBBANDS]; 2];
 
-    // No Annex D Layer II Model-2 tables for the LSF rates: leave the
-    // table flat at 0 dB SMR (rate-driven allocation). The Model-2
-    // state is not advanced in this case (it carries no useful history
-    // at an unmodelled rate); a later switch back to a modelled rate
-    // simply restarts from the zeroed-startup predictor.
+    // Every Layer II rate is modelled; only a non-Layer-II frequency
+    // leaves the table flat at 0 dB SMR (rate-driven allocation). The
+    // Model-2 state is not advanced in that degenerate case.
     let Some(fs) = annex_d_sampling_rate(header.sample_rate) else {
         return smr;
     };
@@ -579,11 +576,9 @@ pub fn encode_frame_with(
 /// This is the drop-in perceptual counterpart of [`encode_frame`]:
 /// the caller no longer supplies an SMR table; the encoder derives it
 /// per frame from the windowed FFT spectrum + the §D.1 masking model.
-/// For the MPEG-1 Layer II sampling rates (32 / 44,1 / 48 kHz) the
-/// allocation is psychoacoustically driven; for the MPEG-2 LSF rates
-/// (which the standard tabulates no Annex D Layer II masking curves
-/// for) the SMR degenerates to a flat 0 dB table and the allocation
-/// is rate-driven (see [`compute_auto_smr_table`]).
+/// The allocation is psychoacoustically driven at **all six** Layer II
+/// sampling rates — MPEG-1 via the 11172-3 Annex D tables, MPEG-2 LSF
+/// via the 13818-3 Annex D tables (see [`compute_auto_smr_table`]).
 ///
 /// Builds a stateless analysis filterbank for the call; streaming
 /// callers should use [`encode_frame_auto_with`].
@@ -628,11 +623,10 @@ pub fn encode_frame_auto_with(
 /// single-frame Model-2 entry point; use [`encode_frame_auto_model2`]
 /// from a fresh state only for the first frame of a stream.
 ///
-/// For the MPEG-1 Layer II sampling rates (32 / 44,1 / 48 kHz) the
-/// allocation is psychoacoustically driven; for the MPEG-2 LSF rates
-/// the SMR degenerates to a flat 0 dB table and the allocation is
-/// rate-driven (the standard tabulates no Annex D Model-2 tables for
-/// the LSF rates — see [`compute_auto_smr_table_model2`]).
+/// The allocation is psychoacoustically driven at **all six** Layer II
+/// sampling rates — MPEG-1 via the 11172-3 D.3/D.4 tables, MPEG-2 LSF
+/// via the 13818-3 D.3.a/b/c partitions (see
+/// [`compute_auto_smr_table_model2`]).
 pub fn encode_frame_auto_model2(
     header: &FrameHeader,
     pcm: &[Vec<f64>],
@@ -2421,29 +2415,38 @@ mod tests {
     }
 
     #[test]
-    fn auto_smr_lsf_rate_falls_back_and_round_trips() {
-        // MPEG-2 LSF rates have no Annex D Layer II masking tables, so
-        // the §D.1 driver returns a flat 0 dB SMR (rate-driven
-        // allocation). The auto path must still produce a well-formed,
-        // decodable frame — equivalent to a flat-SMR encode.
-        let header = FrameHeader {
-            lsf: true,
-            sample_rate: 24_000,
-            bit_rate: 64_000,
-            ..canonical_stereo_header()
-        };
-        let pcm = tone_pcm(2, 1_000.0, 0.5);
-        let auto = encode_frame_auto(&header, &pcm, 0).expect("LSF auto encode");
-        assert_eq!(auto.len(), header.frame_size_bytes());
-        let decoded = decode_frame(&auto).expect("LSF decode");
-        assert!(decoded.header.lsf);
-        assert_eq!(decoded.header.sample_rate, 24_000);
-        // Flat-SMR encode of the same input must be byte-identical: the
-        // LSF fallback path is exactly an all-zero SMR table.
-        let flat = encode_frame(&header, &pcm, &zero_smr(), 0).expect("LSF flat encode");
-        assert_eq!(
-            auto, flat,
-            "LSF auto-SMR must equal a flat 0 dB SMR encode (no Annex D tables)"
+    fn auto_smr_lsf_rates_are_psychoacoustically_driven() {
+        // The MPEG-2 LSF rates run the 13818-3 Annex D Model-1 chain
+        // (formerly a flat 0 dB fallback). At every LSF rate the auto
+        // path must produce a well-formed, decodable frame, and for a
+        // structured tone at a constrained bitrate the allocation must
+        // *diverge* from the flat-SMR encode — proof the 13818-3
+        // masking tables are actually driving.
+        let mut any_diverged = false;
+        for sample_rate in [16_000u32, 22_050, 24_000] {
+            let header = FrameHeader {
+                lsf: true,
+                sample_rate,
+                bit_rate: 64_000,
+                ..canonical_stereo_header()
+            };
+            let pcm = tone_pcm(2, 1_000.0, 0.5);
+            let auto = encode_frame_auto(&header, &pcm, 0)
+                .unwrap_or_else(|e| panic!("LSF auto encode at {sample_rate} Hz: {e:?}"));
+            assert_eq!(auto.len(), header.frame_size_bytes());
+            let decoded = decode_frame(&auto)
+                .unwrap_or_else(|e| panic!("LSF decode at {sample_rate} Hz: {e:?}"));
+            assert!(decoded.header.lsf);
+            assert_eq!(decoded.header.sample_rate, sample_rate);
+            let flat = encode_frame(&header, &pcm, &zero_smr(), 0).expect("LSF flat encode");
+            if auto != flat {
+                any_diverged = true;
+            }
+        }
+        assert!(
+            any_diverged,
+            "no LSF rate diverged from the flat-SMR encode — the 13818-3 \
+             Model-1 chain is not shaping the allocation"
         );
     }
 

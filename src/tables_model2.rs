@@ -1347,6 +1347,9 @@ pub fn calc_partition_table_for_rate(rate: SamplingRate) -> &'static [CalcPartit
         SamplingRate::Fs32kHz => &TABLE_D_3A_CALC_PARTITION_32KHZ,
         SamplingRate::Fs44k1Hz => &TABLE_D_3B_CALC_PARTITION_44K1HZ,
         SamplingRate::Fs48kHz => &TABLE_D_3C_CALC_PARTITION_48KHZ,
+        SamplingRate::Fs16kHz => &TABLE_LSF_D_3C_CALC_PARTITION_16KHZ,
+        SamplingRate::Fs22k05Hz => &TABLE_LSF_D_3B_CALC_PARTITION_22K05HZ,
+        SamplingRate::Fs24kHz => &TABLE_LSF_D_3A_CALC_PARTITION_24KHZ,
     }
 }
 
@@ -4016,6 +4019,12 @@ pub fn abs_threshold_table_for_rate(rate: SamplingRate) -> &'static [AbsThrEntry
         SamplingRate::Fs32kHz => &TABLE_D_4A_ABSTHR_LAYER2_32,
         SamplingRate::Fs44k1Hz => &TABLE_D_4B_ABSTHR_LAYER2_44K1,
         SamplingRate::Fs48kHz => &TABLE_D_4C_ABSTHR_LAYER2_48,
+        // The LSF rates have no printed D.4 table; the step-(l)
+        // thresholds are the 13818-3 D.1 columns (see the module docs
+        // and `absthr_from_lsf_d1`).
+        SamplingRate::Fs16kHz => lsf_abs_threshold_layer2_16(),
+        SamplingRate::Fs22k05Hz => lsf_abs_threshold_layer2_22k05(),
+        SamplingRate::Fs24kHz => lsf_abs_threshold_layer2_24(),
     }
 }
 
