@@ -18,8 +18,11 @@ channel-mode × sampling-rate matrix** (MPEG-1 mono/stereo at
 floating-point-filterbank conformance bound (max abs ≤ 1 LSB, per-frame).
 The encoder is complete through frame assembly with **both** Annex D
 psychoacoustic models (§D.1 Model 1 and §D.2 Model 2) driving the
-§C.1.5.2.7 bit allocator automatically, and **both decoder and encoder
-are wired into the runtime registry** (frame-in / packet-out
+§C.1.5.2.7 bit allocator automatically at **all six** Layer II
+sampling rates — the 11172-3 tables at the MPEG-1 rates and ISO/IEC
+13818-3's own Annex D ("Psychoacoustic model 1/2 for Lower Sampling
+Frequencies") at the LSF rates — and **both decoder and encoder are
+wired into the runtime registry** (frame-in / packet-out
 `Mp2CoreEncoder`).
 
 ## What works today
@@ -106,7 +109,7 @@ are wired into the runtime registry** (frame-in / packet-out
   against the staged `layer2-stereo-44100-192kbps` fixture's
   `expected.wav` (31 frames → 71 424 interleaved s16 samples) **and**
   against an independent black-box reference decoder over a
-  32-stream corpus (`tests/decode_matrix_conformance.rs`, fixtures +
+  43-stream corpus (`tests/decode_matrix_conformance.rs`, fixtures +
   generation notes with SHA-256 sums under `tests/fixtures/`) spanning
   the complete Layer II matrix: MPEG-1 mono/stereo at 32 / 44,1 /
   48 kHz **plus** every Table 3-B.2 bit-allocation sub-table
@@ -116,8 +119,12 @@ are wired into the runtime registry** (frame-in / packet-out
   LSF-only 144 kbit/s index, padding-heavy fractional-rate streams
   (up to 22 of 23 frames padded), joint-stereo at **every**
   `mode_extension` bound with a live §2.4.1.6 intensity region (plus
-  the B.2c bound-clamp edge), dual-channel, and §2.4.1.4 CRC-protected
-  frames. The r411 cells store the reference decoder's **float** PCM,
+  the B.2c bound-clamp edge), dual-channel, §2.4.1.4 CRC-protected
+  frames, and (r419) psychoacoustically-driven cells: Model-1 /
+  Model-2 stereo and joint-stereo intensity at the LSF rates, the
+  Annex G.1 demand-driven per-frame stereo/joint-stereo policy, and a
+  right-only-above-bound sum-signal content pin (all ≤ 0.0171 LSB vs
+  the float reference, premises pinned bitstream-side). The r411 cells store the reference decoder's **float** PCM,
   so the assertable bound is **≤ 0.05 LSB in the float domain**
   (measured ≤ 0.025 LSB — the reference's own f32 precision floor; our
   chain is f64 end-to-end) with a ≥ 99 % bit-exact s16 projection whose
@@ -206,18 +213,29 @@ extraction (Step 4) → threshold-in-quiet + bit-rate-offset decimation
 (Step 3 + 5a) → 0.5-Bark tonal decimation (Step 5b) → per-line global
 masking threshold `LTg(i)` (Step 6/7) → per-subband minimum masking
 threshold `LT_min(n)` (Step 8) → `SMR_sb(n) = L_sb(n) − LT_min(n)`
-(Step 9). For the MPEG-1 Layer II rates (32 / 44,1 / 48 kHz) the
-allocation is psychoacoustically driven; a multi-frame streaming
-auto-SMR encode round-trips through this crate's own decoder with the
-reconstructed-tone residual energy a fraction of the signal energy, and
-the auto allocation is verified to diverge from a flat-SMR allocation
-on spectrally-uneven input. For the MPEG-2 LSF rates — which the
-standard tabulates no Annex D Layer II masking curves for — the SMR
-degenerates to a flat 0 dB table (rate-driven allocation). The four
-original caller-supplied-SMR entry points (`encode_frame`,
-`encode_frame_with`, and the two `_ancillary` variants) are unchanged;
-a constant table still produces a syntactically valid, rate-driven
-frame.
+(Step 9). The allocation is psychoacoustically driven at **all six**
+Layer II sampling rates: the MPEG-1 rates (32 / 44,1 / 48 kHz) run the
+11172-3 Annex D tables, and the MPEG-2 LSF rates (16 / 22,05 / 24 kHz)
+run ISO/IEC 13818-3's **own** Annex D ("Psychoacoustic model 1 for
+Lower Sampling Frequencies") — its Layer II Tables D.1d/e/f
+(frequencies / critical-band rates / absolute threshold, 132 entries
+each) and D.2d/e/f (critical band boundaries, 21 / 23 / 23 bands) are
+transcribed in `tables_lsf`, with the 13818-3-printed adaptations
+honoured: rate-dependent Step 4(b) tonality neighbourhoods (`j = ±4`
+innermost row, `4 < k < 500` domain) and Step 3 applied **without**
+the 11172-3 −12 dB overall-bit-rate offset (the 13818-3 text omits
+it). A multi-frame streaming auto-SMR encode round-trips through this
+crate's own decoder with the reconstructed-tone residual energy a
+fraction of the signal energy, and the auto allocation is verified to
+diverge from a flat-SMR allocation on spectrally-uneven input at every
+rate. Measured LSF round-trip SNR (64 kbit/s stereo, structured
+two-tone + noise, `tests/lsf_psy_conformance.rs`): the psychoacoustic
+encodes **beat the flat rate-driven baseline by ≈ 3 dB** at every LSF
+rate (16 kHz: 6,07 → 9,43 dB; 22,05 kHz: 8,92 → 11,95 dB; 24 kHz:
+10,17 → 12,97 dB). The four original caller-supplied-SMR entry points
+(`encode_frame`, `encode_frame_with`, and the two `_ancillary`
+variants) are unchanged; a constant table still produces a
+syntactically valid, rate-driven frame.
 
 The §D.2 **Model 2** chain is also wired as a selectable auto-SMR source
 — `encode_frame_auto_model2` / `encode_all_frames_model2` — driving the
@@ -225,11 +243,17 @@ The §D.2 **Model 2** chain is also wired as a selectable auto-SMR source
 generator (`psy::compute_smr_model2_layer2_frame`). Model 2 is stateful
 (a rolling two-block spectral predictor + 448-sample inter-call carry per
 channel) and threads its `Model2Layer2State` through the same
-`EncodeFrameState` as the analysis filterbank. An integration test
-(`tests/psy_model_shapes_allocation.rs`) confirms that for a structured
-signal at a constrained bitrate **both** models produce encodes that
-differ — byte-for-byte and in the first-frame per-subband allocation —
-from the flat-0 dB baseline and from each other.
+`EncodeFrameState` as the analysis filterbank. At the LSF rates it runs
+the 13818-3 D.2 replacement partition tables (D.3.a/b/c "long blocks",
+carried in the Layer I/II form with documented, test-pinned column
+derivations) with step-(l) absolute thresholds served from the 13818-3
+D.1 transcriptions. Integration tests
+(`tests/psy_model_shapes_allocation.rs`,
+`tests/lsf_psy_conformance.rs`) confirm that for a structured signal at
+a constrained bitrate **both** models produce encodes that differ —
+byte-for-byte and in the first-frame per-subband allocation — from the
+flat-0 dB baseline and from each other, at the MPEG-1 **and** the LSF
+rates.
 
 **Registry encoder** — `make_encoder` builds an `oxideav_core::Encoder`
 (`Mp2CoreEncoder`) that adapts the auto-SMR encode path into the
@@ -308,55 +332,58 @@ the decoder and encoder factories) and the direct
 Decoder output is planar little-endian `i16`; the encoder accepts the
 same planar-S16 layout.
 
+## Model 2 (§D.2) internals
+
+**Model 2** is driven **end-to-end to a per-subband signal-to-mask
+ratio** by `psy::compute_smr_model2_frame`. Per frame it runs the
+§D.2.4 step-(a)…(n) chain: the step-(b) raised-cosine analysis window
++ polar `(r_ω, f_ω)` FFT (`model2_hann_window_layer2` /
+`complex_spectrum_polar_layer2`), the step-(c) two-block `r̂/f̂`
+prediction (`Model2PredictorState`, advanced across streamed frames),
+the step-(d) unpredictability `c_ω` (`unpredictability_measure`), the
+step-(e) partition energy + weighted unpredictability
+(`partition_energy_and_unpredictability`), the step-(f) spreading
+convolution + renormalisation, the step-(g)…(k) threshold loop, the
+step-(l) absolute-threshold floor (dB→energy converted against a
++1-lsb-sine FFT reference per the spec's step-(l) note), and the
+step-(n) per-coder-partition `SMR_n` mapped to subbands (Table D.5
+coder partition `n` ↦ subband `n − 1`). Its calc-partition and
+absolute-threshold tables are complete for **all six** Layer II rates
+— 11172-3 D.3a/b/c + D.4a/b/c at the MPEG-1 rates, and the 13818-3
+D.2-clause replacement tables D.3.a/b/c ("long blocks", carried in
+the Layer I/II `CalcPartition` form with documented, test-pinned
+column derivations: ω-ranges from the cumulative `FFT-lines` counts,
+`bval`/`minval` verbatim, `tmn = max(24,5, bval + 14,5)` dB — a
+relation reproducing the printed TMN column of all 164 MPEG-1 Layer
+II partitions) with step-(l) thresholds served from the 13818-3 D.1
+transcriptions at the LSF rates — selected by
+`calc_partition_table_for_rate` / `abs_threshold_table_for_rate`. The
+§D.2.1 Layer II *twice-per-frame* rule is also implemented:
+`psy::compute_smr_model2_layer2_frame` runs the chain twice per
+1152-sample frame (once per `IBLEN_LAYER2` = 576-sample half,
+reconstructing each call's 1024-sample window from the 448-sample
+inter-call carry held in `Model2Layer2State`) and returns the
+per-subband **maximum** of the pair — "the more stringent of each
+pair of ratios is used for bit allocation".
+
 ## Not yet supported
 
-Both Annex D psychoacoustic models now drive the encoder end-to-end at
-the MPEG-1 rates (see **Encode** above), and both the decoder and encoder
-are registry-wired. What remains is refinement and reference-validation
-work, not missing core paths:
+Both Annex D psychoacoustic models drive the encoder end-to-end at all
+six Layer II sampling rates, and both the decoder and encoder are
+registry-wired. What remains:
 
-- Perceptual-model internals and edges:
-  - **Model 2 (§D.2)** is driven **end-to-end to a per-subband
-    signal-to-mask ratio** by `psy::compute_smr_model2_frame`. Per frame
-    it runs the §D.2.4 step-(a)…(n) chain: the step-(b) raised-cosine
-    analysis window + polar `(r_ω, f_ω)` FFT
-    (`model2_hann_window_layer2` / `complex_spectrum_polar_layer2`), the
-    step-(c) two-block `r̂/f̂` prediction (`Model2PredictorState`, advanced
-    across streamed frames), the step-(d) unpredictability `c_ω`
-    (`unpredictability_measure`), the step-(e) partition energy +
-    weighted unpredictability (`partition_energy_and_unpredictability`),
-    the step-(f) spreading convolution + renormalisation, the
-    step-(g)…(k) threshold loop, the step-(l) absolute-threshold floor
-    (dB→energy converted against a +1-lsb-sine FFT reference per the
-    spec's step-(l) note), and the step-(n) per-coder-partition `SMR_n`
-    mapped to subbands (Table D.5 coder partition `n` ↦ subband `n − 1`).
-    Its calc-partition tables (D.3a/b/c) and absolute-threshold tables
-    (D.4a/b/c) are complete for all three Layer II rates, selected by
-    `calc_partition_table_for_rate` / `abs_threshold_table_for_rate`. The
-    §D.2.1 Layer II *twice-per-frame* rule is also implemented:
-    `psy::compute_smr_model2_layer2_frame` runs the chain twice per
-    1152-sample frame (once per `IBLEN_LAYER2` = 576-sample half,
-    reconstructing each call's 1024-sample window from the 448-sample
-    inter-call carry held in `Model2Layer2State`) and returns the
-    per-subband **maximum** of the pair — "the more stringent of each
-    pair of ratios is used for bit allocation". This producer is now
-    selected from the encoder by the `encode_frame_auto_model2` /
-    `encode_all_frames_model2` entry points (the Model-2 counterpart of
-    the `encode_frame_auto` family), threading the per-channel
-    `Model2Layer2State` through `EncodeFrameState`. Both Annex D models
-    now drive the encoder end-to-end.
-  - The MPEG-2 **LSF** rates (16 / 22,05 / 24 kHz) fall back to a flat
-    0 dB SMR — the standard provides no Annex D Layer II masking tables
-    for them (a docs/spec gap, not an implementation one).
 - An ISO/IEC 11172-4 / 13818-4 *compliance-grade* SNR sweep across the
   official layered-test bitstream set (the ISO test bitstreams
-  themselves are not staged; the corpus above is built from black-box
-  encoders instead). The former live-intensity-bound fixture gap is
+  themselves are not staged; the conformance corpus above is built
+  from black-box encoders and this crate's own encoder instead). The
+  former live-intensity-bound and psy-driven-LSF fixture gaps are
   closed: joint-stereo streams at every `mode_extension` bound —
-  including narrow-table B.2d and the B.2c bound-clamp edge — plus
-  dual-channel and CRC-protected streams are now decoded against an
-  independent reference decoder's float PCM to ≤ 0.024 LSB, with both
-  independent decoders accepting every crate-encoded stream (see **PCM
+  including narrow-table B.2d and the B.2c bound-clamp edge —
+  dual-channel, CRC-protected, and (r419) Model-1 / Model-2 /
+  demand-driven / right-only-intensity streams at the LSF rates are
+  decoded against an independent reference decoder's float PCM to
+  ≤ 0.024 LSB (r419 cells ≤ 0.0171 LSB), with both independent
+  decoders accepting every crate-encoded stream (see **PCM
   conformance** above and `tests/fixtures/GENERATION.md`).
 
 ## Robustness
