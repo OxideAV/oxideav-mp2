@@ -351,10 +351,13 @@ pub use tables_lsf::{
 };
 pub use tables_model2::{
     calc_partition_table_for_rate, coder_partition_of_line, coder_partition_span,
-    convolve_partition_spreading, normalize_spread_energy, renormalize_unpredictability,
+    convolve_partition_spreading, lsf_abs_threshold_layer2_16, lsf_abs_threshold_layer2_22k05,
+    lsf_abs_threshold_layer2_24, normalize_spread_energy, renormalize_unpredictability,
     rnorm_coefficient, spreading_function, CalcPartition, CoderPartition, CODER_PARTITION_COUNT,
     TABLE_D_3A_CALC_PARTITION_32KHZ, TABLE_D_3B_CALC_PARTITION_44K1HZ,
     TABLE_D_3C_CALC_PARTITION_48KHZ, TABLE_D_5_CODER_PARTITION,
+    TABLE_LSF_D_3A_CALC_PARTITION_24KHZ, TABLE_LSF_D_3B_CALC_PARTITION_22K05HZ,
+    TABLE_LSF_D_3C_CALC_PARTITION_16KHZ,
 };
 pub use tables_synthesis::{D as SYNTHESIS_WINDOW, D_LEN as SYNTHESIS_WINDOW_LEN};
 

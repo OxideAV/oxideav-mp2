@@ -30,6 +30,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   monotonicity, the 1/2/4/8 subsampling map, and the D.2 → D.1 row
   cross-print (all four checks also run as unit tests).
 
+- **ISO/IEC 13818-3 Annex D LSF Model-2 partition tables
+  (`tables_model2::TABLE_LSF_D_3A/B/C_CALC_PARTITION_*`)**. The
+  13818-3 D.2 clause replaces the Model-2 partition tables for the
+  LSF rates with Tables D.3.a/b/c (24 / 22,05 / 16 kHz "long
+  blocks", printed in the Layer III column layout). Carried in the
+  Layer I/II `CalcPartition` form with documented, test-pinned column
+  derivations: ω-ranges from the cumulative `FFT-lines` counts (60 /
+  60 / 56 partitions covering lines 1–491 / 1–489 / 1–509), printed
+  `bval`/`minval` verbatim, and `tmn` via the relation
+  `max(24,5, bval + 14,5) dB` — which reproduces the printed TMN
+  column of all 164 partitions of the 11172-3 Layer II D.3 tables
+  (new pinning test). Step-(l) per-line absolute thresholds for the
+  LSF rates are served from the 13818-3 D.1d/e/f transcriptions
+  (`lsf_abs_threshold_layer2_16/22k05/24`; 13818-3 prints no
+  D.4-style table, and at the MPEG-1 rates D.4 ≡ the Layer II D.1
+  threshold-in-quiet column entry-for-entry bar documented print
+  errata).
+
 ### Fixed
 
 - **§D.1 Step 4(c) critical-band ranges resolved to the raw FFT-line
