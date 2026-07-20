@@ -28,8 +28,26 @@
 //! subbands (0.19·Fs, 0.36·Fs) to keep the §2.4.1.6 intensity region
 //! genuinely populated above every bound.
 
-use oxideav_mp2::encoder_frame::encode_all_frames;
+use oxideav_mp2::encoder_frame::{
+    encode_all_frames, encode_all_frames_js, encode_all_frames_model2,
+};
 use oxideav_mp2::header::{Emphasis, FrameHeader, Mode, ModeExtension};
+
+/// SMR source for a corpus cell (r419: the LSF rates are now
+/// psychoacoustically driven, so the corpus pins reference-decodes of
+/// *both* Annex D models and the Annex G.1 demand-driven joint-stereo
+/// policy, not just the historical Model-1 path).
+#[derive(Clone, Copy, PartialEq)]
+enum Psy {
+    /// §D.1 Model 1 (`encode_all_frames`).
+    M1,
+    /// §D.2 Model 2 (`encode_all_frames_model2`).
+    M2,
+    /// §D.1 Model 1 + Annex G.1 demand-driven stereo-coding selection
+    /// (`encode_all_frames_js` — the header's mode/mode_extension are
+    /// per-frame overridden).
+    Js,
+}
 
 /// 0.6 s of the corpus multi-tone, rounded down to whole 1152-sample
 /// frames (the batch encoder rejects a partial tail by design).
@@ -91,30 +109,130 @@ fn main() {
     ];
 
     for &(stem, rate, kbps, mode, mode_extension, crc) in cells {
-        let lsf = rate < 32_000;
-        let header = FrameHeader {
-            lsf,
-            bit_rate: kbps * 1000,
-            sample_rate: rate,
-            padding: false, // per-frame scheduled by encode_all_frames
-            private_bit: false,
+        let pcm = tone(rate, if mode == Mode::SingleChannel { 1 } else { 2 });
+        emit(
+            &out,
+            stem,
+            rate,
+            kbps,
             mode,
             mode_extension,
-            copyright: false,
-            original: true,
-            emphasis: Emphasis::None,
-            protection_bit: !crc,
-        };
-        let channels = if mode == Mode::SingleChannel { 1 } else { 2 };
-        let pcm = tone(rate, channels);
-        let bytes =
-            encode_all_frames(&header, &pcm, 0).unwrap_or_else(|e| panic!("{stem}: encode: {e:?}"));
-        let path = format!("{out}/{stem}.mp2");
-        std::fs::write(&path, &bytes).expect("write .mp2");
-        println!(
-            "{stem}: {} bytes, {} frames",
-            bytes.len(),
-            pcm[0].len() / 1152
+            crc,
+            Psy::M1,
+            &pcm,
         );
     }
+
+    // ── r419 cells: the LSF psychoacoustic axis ──────────────────────
+    //
+    // (stem, rate, kbit/s, mode, mode_extension, psy). All CRC-less;
+    // the LSF rates now run the 13818-3 Annex D models, so these cells
+    // pin an *independent* reference decode of psychoacoustically
+    // driven LSF streams — Model 1 and Model 2, plain stereo and
+    // joint-stereo intensity at several bounds, plus the Annex G.1
+    // demand-driven per-frame policy and one MPEG-1 Model-2
+    // joint-stereo cell (previously uncovered combination).
+    #[rustfmt::skip]
+    let r419: &[(&str, u32, u32, Mode, ModeExtension, Psy)] = &[
+        ("psy1_16k_64",       16_000, 64,  Mode::Stereo,      ModeExtension::Bound4,  Psy::M1),
+        ("psy1_22k_56",       22_050, 56,  Mode::Stereo,      ModeExtension::Bound4,  Psy::M1),
+        ("psy1_24k_64",       24_000, 64,  Mode::Stereo,      ModeExtension::Bound4,  Psy::M1),
+        ("psy2_16k_56",       16_000, 56,  Mode::Stereo,      ModeExtension::Bound4,  Psy::M2),
+        ("psy2_24k_64",       24_000, 64,  Mode::Stereo,      ModeExtension::Bound4,  Psy::M2),
+        ("psy1_js_b8_24k_64", 24_000, 64,  Mode::JointStereo, ModeExtension::Bound8,  Psy::M1),
+        ("psy1_js_b12_22k_64",22_050, 64,  Mode::JointStereo, ModeExtension::Bound12, Psy::M1),
+        ("psy1_js_b16_16k_64",16_000, 64,  Mode::JointStereo, ModeExtension::Bound16, Psy::M1),
+        ("psy2_js_b8_44k_128",44_100, 128, Mode::JointStereo, ModeExtension::Bound8,  Psy::M2),
+        ("psy1_jsauto_22k_32",22_050, 32,  Mode::Stereo,      ModeExtension::Bound4,  Psy::Js),
+    ];
+    for &(stem, rate, kbps, mode, mode_extension, psy) in r419 {
+        let pcm = tone(rate, 2);
+        emit(
+            &out,
+            stem,
+            rate,
+            kbps,
+            mode,
+            mode_extension,
+            false,
+            psy,
+            &pcm,
+        );
+    }
+
+    // Annex G.1 sum-signal content pin: channel 1 carries a tone at
+    // 0.19·Fs (subband 12, inside every intensity region) that channel
+    // 0 does not, over a shared low band. An intensity decoder that
+    // mishandled the shared codeword / per-channel scalefactor split
+    // would leak or lose that right-only content — the independent
+    // reference decode pins the correct split.
+    {
+        let rate = 24_000u32;
+        let n = ((rate as f64 * 0.6 / 1152.0).floor() as usize) * 1152;
+        let fs = f64::from(rate);
+        let tau = std::f64::consts::TAU;
+        let mk = |extra: f64| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    let t = i as f64 / fs;
+                    (0.6 + 0.4 * (tau * 3.0 * t).sin())
+                        * (0.35 * (tau * 0.013 * fs * t).sin() + 0.20 * (tau * 0.05 * fs * t).sin())
+                        + extra * (tau * 0.19 * fs * t).sin()
+                })
+                .collect()
+        };
+        let pcm = vec![mk(0.0), mk(0.30)];
+        emit(
+            &out,
+            "psy1_js_b4_24k_48_ronly",
+            rate,
+            48,
+            Mode::JointStereo,
+            ModeExtension::Bound4,
+            false,
+            Psy::M1,
+            &pcm,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit(
+    out: &str,
+    stem: &str,
+    rate: u32,
+    kbps: u32,
+    mode: Mode,
+    mode_extension: ModeExtension,
+    crc: bool,
+    psy: Psy,
+    pcm: &[Vec<f64>],
+) {
+    let lsf = rate < 32_000;
+    let header = FrameHeader {
+        lsf,
+        bit_rate: kbps * 1000,
+        sample_rate: rate,
+        padding: false, // per-frame scheduled by encode_all_frames
+        private_bit: false,
+        mode,
+        mode_extension,
+        copyright: false,
+        original: true,
+        emphasis: Emphasis::None,
+        protection_bit: !crc,
+    };
+    let bytes = match psy {
+        Psy::M1 => encode_all_frames(&header, pcm, 0),
+        Psy::M2 => encode_all_frames_model2(&header, pcm, 0),
+        Psy::Js => encode_all_frames_js(&header, pcm, 0),
+    }
+    .unwrap_or_else(|e| panic!("{stem}: encode: {e:?}"));
+    let path = format!("{out}/{stem}.mp2");
+    std::fs::write(&path, &bytes).expect("write .mp2");
+    println!(
+        "{stem}: {} bytes, {} frames",
+        bytes.len(),
+        pcm[0].len() / 1152
+    );
 }

@@ -169,6 +169,53 @@ in-tree `free_format_rewrite_of_real_48k_fixture_decodes_identically`
 test pins the crate-side equivalence; no extra fixture files are
 needed (the rewrite is derived from the committed `.mp2` at test time).
 
+## r419: psychoacoustically-driven LSF cells
+
+As of r419 the MPEG-2 LSF rates run ISO/IEC 13818-3's own Annex D
+psychoacoustic tables (both models) instead of a flat-SMR fallback, so
+the corpus gains eleven cells that pin an **independent reference
+decode of psychoacoustically-driven streams**: Model 1 and Model 2 at
+16 / 22.05 / 24 kHz (plain stereo and joint-stereo intensity at
+bounds 8 / 12 / 16), one MPEG-1 Model-2 joint-stereo cell (previously
+uncovered combination), the Annex G.1 demand-driven per-frame
+stereo/joint-stereo policy at a starved bitrate (32 kbit/s stereo —
+every frame elects joint stereo), and an Annex G.1 **sum-signal
+content pin**: `psy1_js_b4_24k_48_ronly` gives channel 1 a 0.19·Fs
+tone that channel 0 lacks, so a decoder that mishandles the shared
+above-bound codeword / per-channel scalefactor split would leak or
+lose the right-only content (the premises test asserts the decoded
+right-channel tone energy dominates the left's).
+
+```sh
+# encode (see the example source for the exact cells; the psy1_*/psy2_*
+# stems select Model 1 / Model 2, jsauto the Annex G.1 policy):
+cargo run --example gen_conformance_fixtures -- tests/fixtures
+
+# reference decode, same as all other cells:
+ffmpeg -y -c:a mp2float -i <stem>.mp2 -c:a pcm_f32le <stem>.ref.wav
+```
+
+| stem                    | rate  | bitrate | mode / model             |
+| ----------------------- | ----- | ------- | ------------------------ |
+| psy1_16k_64             | 16000 | 64k     | stereo, Model 1          |
+| psy1_22k_56             | 22050 | 56k     | stereo, Model 1          |
+| psy1_24k_64             | 24000 | 64k     | stereo, Model 1          |
+| psy2_16k_56             | 16000 | 56k     | stereo, Model 2          |
+| psy2_24k_64             | 24000 | 64k     | stereo, Model 2          |
+| psy1_js_b8_24k_64       | 24000 | 64k     | joint bound8, Model 1    |
+| psy1_js_b12_22k_64      | 22050 | 64k     | joint bound12, Model 1   |
+| psy1_js_b16_16k_64      | 16000 | 64k     | joint bound16, Model 1   |
+| psy2_js_b8_44k_128      | 44100 | 128k    | joint bound8, Model 2    |
+| psy1_jsauto_22k_32      | 22050 | 32k     | Annex G.1 demand-driven  |
+| psy1_js_b4_24k_48_ronly | 24000 | 48k     | joint bound4, right-only |
+
+Results (both independent decoders accept every stream; comparison
+against the float reference, same harness as the r411 corpus):
+
+- float domain vs reference: **max ≤ 0.0171 LSB** across all eleven
+  cells (worst cell `psy2_16k_56`; the asserted bound stays 0.05);
+- s16 projection vs reference: 99.66 % … 99.79 % bit-exact, max ±1.
+
 ## SHA-256
 
 ```
@@ -224,4 +271,26 @@ cc020061cccfe38cda302bbf4e921e66d5991e0b2decf871083cde15ec945514  js_b16_44k_256
 c0a6fe24349d1ab04e2d18d0ef95e64c8aff57f7f9b59edf3db56429864751b1  dual_44k_128.ref.wav
 68304ddd85e16f22a0cbaa4ef279dd50250850bc7e3d61e873691ab4a6f0600b  dual_24k_64.ref.wav
 ce40cc9679965b7f85bf8edaf86e32915238a9c5f3bd64722aed4746a07d61f8  crc_48k_192.ref.wav
+f3b43c670b13975a351acd502ca9363e47be529a3b1e8bcbb78eef40bd2ecc6e  psy1_16k_64.mp2
+84b703c1e0341564dc0a38557986f8dd1827a9c51e92226d2a64ca2c047b5608  psy1_22k_56.mp2
+99138541c0fa9da325b1ed73702aa1de8d62aa2d05fdceea1fe4992215d1762d  psy1_24k_64.mp2
+62d31e1df98915ec7d08d1ca0733c2f4c9cece405210c755e76582d967bf7642  psy2_16k_56.mp2
+44c04bc41281349aadfde28c70b19359edc3945895fcb541346b4957ad82fddb  psy2_24k_64.mp2
+2b1dc6f3aa609f6bf7aaca6b7763ff8f99b45250cf99f6ee9ac855308877ffc4  psy1_js_b8_24k_64.mp2
+8d57a523a3ed9e5bb7db44e5e6ab5a372f2dd41b112bfeed17c6650538fb2728  psy1_js_b12_22k_64.mp2
+7fde94125589acff4f239ed47266f1d56c774499c5c41a442c83e33223469bce  psy1_js_b16_16k_64.mp2
+907a4b281932d77bdd7356e8d2ea15e949241db18efdeed6e7b919310feceb3d  psy2_js_b8_44k_128.mp2
+c66e346568660f8f661c48bca95827b63afcec187085c8e3cba4bedaba9a48bc  psy1_jsauto_22k_32.mp2
+af1e18bfdaf44a2a4d01ced068deb25c90d804a844a59ee28bd7f3706a367797  psy1_js_b4_24k_48_ronly.mp2
+1ec45365aea9e23162130f1519d74b559ca6656e1b9ae77c9221c20189b4eb39  psy1_16k_64.ref.wav
+e84e5e825b86298c589aeab42c5313cf8060e66a759fb2a69062cfe776fe32a3  psy1_22k_56.ref.wav
+296688d39b62462e48de08e79d7c9f709dcb5205d7c96996b31efc2f875da0c5  psy1_24k_64.ref.wav
+1bf81b903946266178902916d4a492bc373c30946820e1da40bcdb82fc902a1b  psy2_16k_56.ref.wav
+dfe68a8a6ea56bdbf522cc34ae1aa4c9b0e5e320e5a9732cb1d1c9330007660f  psy2_24k_64.ref.wav
+eec67e70b885a0951c1154f234f044dea99d06e61344b33647f42a2c2d621fe9  psy1_js_b8_24k_64.ref.wav
+07e0f313c907b452e3451fd5a6c0cfaffda871683e477dc64879506f9c3d7b31  psy1_js_b12_22k_64.ref.wav
+d31e20428457e4596cda54cc2f159db7cd7fbedde04e33ca968b45b110cb6bfe  psy1_js_b16_16k_64.ref.wav
+307e6aa39a614fbb6e11fb19496369f4c62f8d5d6581662b2fce638cbbd05df2  psy2_js_b8_44k_128.ref.wav
+bc867d922fc596147225a1d0d65fc5fbf6c2e44488f092608fbe2e6cc1fd2fea  psy1_jsauto_22k_32.ref.wav
+0a55330f49b7053df6c96320a9ae0542d19a4ac3be477a4a0232b5e28bfe92d1  psy1_js_b4_24k_48_ronly.ref.wav
 ```

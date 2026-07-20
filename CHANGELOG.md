@@ -77,6 +77,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   floors sit ~3 dB under the measured values with a 1 dB
   beats-flat margin).
 
+- **r419 fixture corpus: independent validation of
+  psychoacoustically-driven and intensity streams** (11 new cells,
+  `tests/fixtures/`, `examples/gen_conformance_fixtures.rs`,
+  `tests/decode_matrix_conformance.rs`). Model-1 and Model-2 encodes
+  at 16 / 22,05 / 24 kHz (plain stereo and joint-stereo intensity at
+  bounds 8 / 12 / 16), one MPEG-1 Model-2 joint-stereo cell
+  (previously uncovered combination), the Annex G.1 demand-driven
+  per-frame policy at a starved bitrate (every frame elects joint
+  stereo), and an Annex G.1 sum-signal content pin (channel 1 carries
+  a 0,19·Fs tone channel 0 lacks; the decoded right channel must keep
+  it). Both independent black-box decoders accept every stream;
+  against the float reference the decode agreement is **max
+  ≤ 0,0171 LSB** with ≥ 99,66 % bit-exact s16 projection (asserted at
+  the corpus-wide 0,05-LSB bound). Premises (mode, live intensity,
+  demand-driven joint-stereo election, right-only content split) are
+  pinned bitstream-side by `r419_lsf_psy_fixture_premises_hold`.
+
 ### Fixed
 
 - **§D.1 Step 4(c) critical-band ranges resolved to the raw FFT-line

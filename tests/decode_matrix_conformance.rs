@@ -172,6 +172,47 @@ const MATRIX: &[(&str, usize, &str)] = &[
     ("dual_44k_128", 2, "dual-channel 44.1 kHz 128k"),
     ("dual_24k_64", 2, "dual-channel 24 kHz 64k LSF"),
     ("crc_48k_192", 2, "stereo 48 kHz 192k with §2.4.1.4 CRC-16"),
+    // ── r419: psychoacoustically-driven LSF cells ───────────────────────
+    // The LSF rates now run the 13818-3 Annex D models; these cells pin
+    // an independent reference decode of Model-1 / Model-2 / Annex G.1
+    // demand-driven streams at 16 / 22.05 / 24 kHz (plus one MPEG-1
+    // Model-2 joint-stereo cell, a previously uncovered combination).
+    // Premises pinned by `r419_lsf_psy_fixture_premises_hold` below.
+    ("psy1_16k_64", 2, "Model-1 LSF stereo 16 kHz 64k"),
+    ("psy1_22k_56", 2, "Model-1 LSF stereo 22.05 kHz 56k"),
+    ("psy1_24k_64", 2, "Model-1 LSF stereo 24 kHz 64k"),
+    ("psy2_16k_56", 2, "Model-2 LSF stereo 16 kHz 56k"),
+    ("psy2_24k_64", 2, "Model-2 LSF stereo 24 kHz 64k"),
+    (
+        "psy1_js_b8_24k_64",
+        2,
+        "Model-1 LSF joint-stereo bound8 24 kHz 64k (live intensity)",
+    ),
+    (
+        "psy1_js_b12_22k_64",
+        2,
+        "Model-1 LSF joint-stereo bound12 22.05 kHz 64k (live intensity)",
+    ),
+    (
+        "psy1_js_b16_16k_64",
+        2,
+        "Model-1 LSF joint-stereo bound16 16 kHz 64k (live intensity)",
+    ),
+    (
+        "psy2_js_b8_44k_128",
+        2,
+        "Model-2 joint-stereo bound8 44.1 kHz 128k (live intensity)",
+    ),
+    (
+        "psy1_jsauto_22k_32",
+        2,
+        "Annex G.1 demand-driven stereo/joint-stereo 22.05 kHz 32k",
+    ),
+    (
+        "psy1_js_b4_24k_48_ronly",
+        2,
+        "Annex G.1 sum-signal pin: right-only tone above bound, 24 kHz 48k",
+    ),
 ];
 
 /// Symmetric `2^15` full-scale fractional → `i16` map, matching the
@@ -578,6 +619,139 @@ fn r411_js_dual_crc_fixture_premises_hold() {
             n_frames += 1;
         }
         assert!(n_frames > 5, "{stem}: expected a multi-frame stream");
+    }
+}
+
+#[test]
+fn r419_lsf_psy_fixture_premises_hold() {
+    // The r419 cells pin psychoacoustically-driven encodes; their
+    // premises are checked from the bitstream exactly like the r411
+    // cells. (stem, expected mode, mode_extension, live intensity?)
+    let fixed_mode_cells: &[(&str, Mode, ModeExtension, bool)] = &[
+        ("psy1_16k_64", Mode::Stereo, ModeExtension::Bound4, false),
+        ("psy1_22k_56", Mode::Stereo, ModeExtension::Bound4, false),
+        ("psy1_24k_64", Mode::Stereo, ModeExtension::Bound4, false),
+        ("psy2_16k_56", Mode::Stereo, ModeExtension::Bound4, false),
+        ("psy2_24k_64", Mode::Stereo, ModeExtension::Bound4, false),
+        (
+            "psy1_js_b8_24k_64",
+            Mode::JointStereo,
+            ModeExtension::Bound8,
+            true,
+        ),
+        (
+            "psy1_js_b12_22k_64",
+            Mode::JointStereo,
+            ModeExtension::Bound12,
+            true,
+        ),
+        (
+            "psy1_js_b16_16k_64",
+            Mode::JointStereo,
+            ModeExtension::Bound16,
+            true,
+        ),
+        (
+            "psy2_js_b8_44k_128",
+            Mode::JointStereo,
+            ModeExtension::Bound8,
+            true,
+        ),
+        (
+            "psy1_js_b4_24k_48_ronly",
+            Mode::JointStereo,
+            ModeExtension::Bound4,
+            true,
+        ),
+    ];
+    for &(stem, mode, ext, live_intensity) in fixed_mode_cells {
+        let Some((mp2, _ch, _expected)) = load(stem) else {
+            continue;
+        };
+        let mut offset = 0usize;
+        let mut n_frames = 0usize;
+        while offset + 4 <= mp2.len() {
+            let header = FrameHeader::parse(&mp2[offset..]).expect("header");
+            assert!(
+                header.lsf == (header.sample_rate < 32_000),
+                "{stem}: LSF flag consistent"
+            );
+            assert_eq!(header.mode, mode, "{stem}: frame {n_frames} mode");
+            assert_eq!(
+                header.mode_extension, ext,
+                "{stem}: frame {n_frames} mode_extension"
+            );
+            let mut reader = BitReader::with_position(&mp2[offset..], 4);
+            let (audio, _, _) =
+                parse_audio_data_with_section_bits(&header, &mut reader).expect("audio data");
+            if header.mode == Mode::JointStereo && live_intensity {
+                assert!(
+                    audio.bound < audio.sblimit,
+                    "{stem}: intensity region must be non-empty"
+                );
+                assert!(
+                    (audio.bound..audio.sblimit).any(|sb| audio.nb_steps[0][sb] != 0),
+                    "{stem}: frame {n_frames} has no allocated above-bound subband"
+                );
+            }
+            offset += header.frame_size_bytes();
+            n_frames += 1;
+        }
+        assert!(n_frames > 5, "{stem}: expected a multi-frame stream");
+    }
+
+    // The Annex G.1 demand-driven cell may legally mix Stereo and
+    // JointStereo frames — but at 32 kbit/s stereo the demand must
+    // force at least one JointStereo frame, or the cell pins nothing.
+    if let Some((mp2, _ch, _expected)) = load("psy1_jsauto_22k_32") {
+        let mut offset = 0usize;
+        let mut js_frames = 0usize;
+        let mut n_frames = 0usize;
+        while offset + 4 <= mp2.len() {
+            let header = FrameHeader::parse(&mp2[offset..]).expect("header");
+            assert!(
+                matches!(header.mode, Mode::Stereo | Mode::JointStereo),
+                "psy1_jsauto_22k_32: frame {n_frames} unexpected mode {:?}",
+                header.mode
+            );
+            if header.mode == Mode::JointStereo {
+                js_frames += 1;
+            }
+            offset += header.frame_size_bytes();
+            n_frames += 1;
+        }
+        assert!(
+            js_frames > 0,
+            "psy1_jsauto_22k_32: the demand-driven policy never chose joint stereo"
+        );
+    }
+
+    // Annex G.1 sum-signal content pin: channel 1 carries a 0.19·Fs
+    // tone that channel 0 does not; after the intensity split the
+    // decoded right channel's energy at that tone must dominate the
+    // left's (per-channel scalefactors carry the level split even
+    // though the codeword is shared).
+    if let Some((mp2, _ch, _expected)) = load("psy1_js_b4_24k_48_ronly") {
+        let planes = decode_all_frames(&mp2).expect("ronly decode");
+        let goertzel = |signal: &[f64], freq_hz: f64, rate: f64| -> f64 {
+            let w = 2.0 * std::f64::consts::PI * freq_hz / rate;
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0_f64, 0.0_f64);
+            for &x in signal {
+                let s = x + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s;
+            }
+            s1 * s1 + s2 * s2 - coeff * s1 * s2
+        };
+        let tone_hz = 0.19 * 24_000.0;
+        let steady = PCM_SAMPLES_PER_CHANNEL..planes[0].len() - PCM_SAMPLES_PER_CHANNEL;
+        let left = goertzel(&planes[0][steady.clone()], tone_hz, 24_000.0);
+        let right = goertzel(&planes[1][steady], tone_hz, 24_000.0);
+        assert!(
+            right > 4.0 * left.max(f64::MIN_POSITIVE),
+            "ronly cell: right-channel tone energy {right:.3e} must dominate left {left:.3e}"
+        );
     }
 }
 
