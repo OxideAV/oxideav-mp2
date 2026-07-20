@@ -260,6 +260,7 @@ pub mod synthesis;
 pub mod tables;
 pub mod tables_analysis;
 pub mod tables_d2;
+pub mod tables_lsf;
 pub mod tables_model2;
 pub mod tables_synthesis;
 
@@ -342,6 +343,11 @@ pub use tables_analysis::{C as ANALYSIS_WINDOW, C_LEN as ANALYSIS_WINDOW_LEN};
 pub use tables_d2::{
     CriticalBandBoundary, SamplingRate as PsyAnnexDSamplingRate, TABLE_D_2D_LAYER_II_32KHZ,
     TABLE_D_2E_LAYER_II_44K1HZ, TABLE_D_2F_LAYER_II_48KHZ,
+};
+pub use tables_lsf::{
+    TABLE_LSF_D_1D_LTQ_LAYER_II_16, TABLE_LSF_D_1E_LTQ_LAYER_II_22K05,
+    TABLE_LSF_D_1F_LTQ_LAYER_II_24, TABLE_LSF_D_2D_LAYER_II_16KHZ, TABLE_LSF_D_2E_LAYER_II_22K05HZ,
+    TABLE_LSF_D_2F_LAYER_II_24KHZ,
 };
 pub use tables_model2::{
     calc_partition_table_for_rate, coder_partition_of_line, coder_partition_span,

@@ -19,6 +19,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   its D.1 row (the `index F&CB` column is a **D.1 subsampled index**,
   not a raw FFT line — now enforced by test at all rates).
 
+- **ISO/IEC 13818-3 Annex D LSF Model-1 tables (`tables_lsf`)**. The
+  13818-3 standard carries its own Annex D ("Psychoacoustic Model 1
+  for Lower Sampling Frequencies") with Layer II tables for 16 /
+  22,05 / 24 kHz: Tables D.1d/e/f ("Frequencies, critical band rates
+  and absolute threshold", 132 entries each, topping at FFT line 480)
+  and D.2d/e/f ("Critical band boundaries", 21 / 23 / 23 bands —
+  matching the Step 4(c) prose counts exactly). Transcribed with
+  machine validation against the `line·Fs/1024` frequency grid, Bark
+  monotonicity, the 1/2/4/8 subsampling map, and the D.2 → D.1 row
+  cross-print (all four checks also run as unit tests).
+
 ### Fixed
 
 - **§D.1 Step 4(c) critical-band ranges resolved to the raw FFT-line
