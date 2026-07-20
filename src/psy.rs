@@ -1284,49 +1284,47 @@ pub fn non_tonal_band_index(lo: usize, hi: usize) -> Option<usize> {
 ///
 /// `spl_db` is the post-Step-4(b)-zero-out spectrum in dB; the
 /// function reads it without mutating it. For each critical band
-/// `[prev_top + 1, top]` (the first band runs `[0, first_top]`) the
-/// pass produces one [`Masker`] of [`MaskerKind::NonTonal`] kind:
+/// (the resolved `[lo, hi]` FFT-line ranges of
+/// [`critical_band_line_ranges`] — the first band runs from line 0)
+/// the pass produces one [`Masker`] of [`MaskerKind::NonTonal`] kind:
 ///
 /// * `spl_db` = [`non_tonal_spl_db`] across the band's FFT lines,
-/// * `z_bark` = the Annex D Table D.2 `Bark [z]` column of the
-///   band's top line (the spec doesn't tabulate Bark at every line
-///   index, so the boundary's Bark is the convention used here for
-///   the Bark-axis placement consumed by Step 6 `vf`),
-/// * The representative FFT-line index (per
-///   [`non_tonal_band_index`]) is not carried on `Masker` directly —
-///   it lives only inside Step 4(c) and is dropped before Step 6.
-///   For callers that need the line index alongside the masker,
-///   use [`non_tonal_band_index`] separately on the same `(lo, hi)`
-///   pair.
+/// * `z_bark` = the D.1 `Crit.Band Rate [z]` at the band's
+///   **representative line** (the line nearest the band's geometric
+///   mean per [`non_tonal_band_index`], read through
+///   [`bark_for_line_layer2`]) — the spec lists the non-tonal
+///   component at that line's index, so its Bark-axis position for
+///   the Step 6 `vf` lookup is `z` of that same line.
+/// * The representative FFT-line index is not carried on `Masker`
+///   directly — for callers that need the line index alongside the
+///   masker, use [`list_non_tonal_candidates_layer2`].
 ///
 /// Bands that carry only `-inf dB` lines (the whole band was
 /// tonal-zeroed) are silently dropped — `non_tonal_spl_db` returns
 /// `None` and that band contributes no entry. The returned vector
-/// therefore has at most `boundaries.len()` entries (typically all
+/// therefore has at most one entry per critical band (typically all
 /// of them; a clean tonal-zero-out only removes one band when the
 /// entire critical band is occupied by a single tonal neighbourhood,
 /// which is rare in practice).
 ///
 /// The output vector is allocated by the function; no scratch buffer
 /// argument is needed because the per-call allocation is bounded by
-/// the small Layer II band count (25 / 27 / 27).
+/// the small Layer II band count.
 #[must_use]
 pub fn list_non_tonal_layer2(spl_db: &[f64], fs: crate::tables_d2::SamplingRate) -> Vec<Masker> {
-    let boundaries = fs.critical_band_boundaries();
-    let mut out = Vec::with_capacity(boundaries.len());
-    // First band: FFT lines [0, boundaries[0].top_line_index].
-    // Subsequent bands: [prev_top + 1, top].
-    let mut lo = 0_usize;
-    for boundary in boundaries {
-        let hi = boundary.top_line_index as usize;
-        if let Some(x_nm) = non_tonal_spl_db(spl_db, lo, hi) {
+    let ranges = critical_band_line_ranges(fs);
+    let mut out = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges {
+        if let (Some(x_nm), Some(k)) = (
+            non_tonal_spl_db(spl_db, lo, hi),
+            non_tonal_band_index(lo, hi),
+        ) {
             out.push(Masker {
                 kind: MaskerKind::NonTonal,
-                z_bark: boundary.top_bark,
+                z_bark: bark_for_line_layer2(fs, k),
                 spl_db: x_nm,
             });
         }
-        lo = hi + 1;
     }
     out
 }
@@ -1773,9 +1771,9 @@ pub struct NonTonalCandidate {
     /// Representative FFT-line index of the critical band (the line
     /// nearest the band's geometric mean; cf. [`non_tonal_band_index`]).
     pub k: usize,
-    /// Bark position `z(j)` of the band's top line (carried through so
-    /// the survivor can be turned into a [`Masker`] without re-reading
-    /// the boundary table).
+    /// Bark position `z(j)` of the band's representative line (the D.1
+    /// `Crit.Band Rate [z]` at `k`, carried through so the survivor can
+    /// be turned into a [`Masker`] without re-reading the tables).
     pub z_bark: f64,
     /// Non-tonal SPL `X_nm(k)` in dB for the band (cf.
     /// [`non_tonal_spl_db`]).
@@ -1788,11 +1786,12 @@ pub struct NonTonalCandidate {
 /// SPL.
 ///
 /// This is the `k`-carrying companion of [`list_non_tonal_layer2`]:
-/// it sweeps the same Table D.2d / D.2e / D.2f critical-band
-/// boundaries, power-sums each band's surviving (post-tonal-zero-out)
-/// lines via [`non_tonal_spl_db`], and pairs the result with the band's
-/// representative line index from [`non_tonal_band_index`]. Bands whose
-/// lines are all `-inf dB` (entirely tonal-zeroed) or whose
+/// it sweeps the same resolved critical-band FFT-line ranges
+/// ([`critical_band_line_ranges`]), power-sums each band's surviving
+/// (post-tonal-zero-out) lines via [`non_tonal_spl_db`], and pairs the
+/// result with the band's representative line index from
+/// [`non_tonal_band_index`] and that line's D.1 Bark position. Bands
+/// whose lines are all `-inf dB` (entirely tonal-zeroed) or whose
 /// representative line is undefined are dropped, exactly as
 /// [`list_non_tonal_layer2`] drops them.
 #[must_use]
@@ -1800,22 +1799,19 @@ pub fn list_non_tonal_candidates_layer2(
     spl_db: &[f64],
     fs: crate::tables_d2::SamplingRate,
 ) -> Vec<NonTonalCandidate> {
-    let boundaries = fs.critical_band_boundaries();
-    let mut out = Vec::with_capacity(boundaries.len());
-    let mut lo = 0_usize;
-    for boundary in boundaries {
-        let hi = boundary.top_line_index as usize;
+    let ranges = critical_band_line_ranges(fs);
+    let mut out = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges {
         if let (Some(x_nm), Some(k)) = (
             non_tonal_spl_db(spl_db, lo, hi),
             non_tonal_band_index(lo, hi),
         ) {
             out.push(NonTonalCandidate {
                 k,
-                z_bark: boundary.top_bark,
+                z_bark: bark_for_line_layer2(fs, k),
                 spl_db: x_nm,
             });
         }
-        lo = hi + 1;
     }
     out
 }
@@ -1890,25 +1886,62 @@ pub fn decimate_below_threshold_in_quiet(
 }
 
 /// Bark position `z[k]` of a 1024-point-analysis-FFT line `k` for
-/// Layer II, taken as the critical-band rate of the Table D.2d / D.2e
-/// / D.2f boundary band whose top line first reaches `k`.
+/// Layer II, read from the `Crit.Band Rate [z]` column of the Annex D
+/// Table D.1 entry whose line range covers `k`.
 ///
-/// The §D.1 Step 6 input transformation assigns each masker the Bark
-/// position of its FFT line; for the threshold-in-quiet survivors of
-/// Step 5(a) the position is read from the same critical-band-boundary
-/// table that Step 4(c) used. A line above the topmost tabulated
-/// boundary takes that top boundary's Bark value (the band saturates
-/// at the top of the audio band).
+/// The §D.1 Step 6 prose is explicit about the source: "The critical
+/// band rates z(j) and z(i) can be found in tables D.1a, D.1b, D.1c
+/// for Layer I; tables D.1d, D.1e, D.1f for Layer II" — i.e. the
+/// per-index `z(i)` column of the D.1 tables, **not** the coarse
+/// per-band Bark of the Table D.2 boundary rows (an earlier revision
+/// read the boundary column, quantizing every line in a critical band
+/// to the band-top Bark; the D.1 column tracks the line grid at the
+/// table's subsampling resolution). A line above the topmost
+/// tabulated D.1 range saturates at the last entry's Bark (the top of
+/// the audio band).
 #[must_use]
 pub fn bark_for_line_layer2(fs: crate::tables_d2::SamplingRate, k: usize) -> f64 {
-    let boundaries = fs.critical_band_boundaries();
-    for boundary in boundaries {
-        if k <= boundary.top_line_index as usize {
-            return boundary.top_bark;
+    let table = fs.ltq_table_layer2();
+    for entry in table {
+        if k <= entry.top_line_index as usize {
+            return entry.bark;
         }
     }
-    // Above the top boundary: saturate at the highest band's Bark.
-    boundaries.last().map_or(0.0, |b| b.top_bark)
+    // Above the top tabulated line: saturate at the table-top Bark.
+    table.last().map_or(0.0, |e| e.bark)
+}
+
+/// §D.1 Step 4(c) critical-band FFT-line ranges for one Layer II
+/// sampling rate, resolved to the raw 1024-point-analysis-FFT line
+/// domain.
+///
+/// The Annex D Table D.2 boundary tables print an `index F&CB`
+/// column — an index into the same rate's **subsampled** D.1 table,
+/// *not* a raw FFT line (the two coincide only below the first Layer
+/// II subsampling break; the `d2_boundary_rows_match_d1_entries`
+/// cross-check in [`crate::tables_d2`] pins this identity row for
+/// row). Step 4(c) however groups the **full** spectrum `X(k)`: "the
+/// power of the spectral lines … are summed to form the sound
+/// pressure level of the new non-tonal component" within each
+/// critical band. Each band's true top FFT line is therefore the D.1
+/// entry's `top_line_index` at the printed index. This helper
+/// resolves every boundary through the D.1 table and returns the
+/// inclusive per-band `(lo, hi)` FFT-line ranges: the first band
+/// starts at line 0 (DC), each subsequent band at the previous top
+/// plus one, tiling `[0, top-of-band]` with no gaps.
+#[must_use]
+pub fn critical_band_line_ranges(fs: crate::tables_d2::SamplingRate) -> Vec<(usize, usize)> {
+    let boundaries = fs.critical_band_boundaries();
+    let d1 = fs.ltq_table_layer2();
+    let mut out = Vec::with_capacity(boundaries.len());
+    let mut lo = 0_usize;
+    for boundary in boundaries {
+        // The printed `index F&CB` is 1-based into the D.1 table.
+        let hi = d1[(boundary.top_line_index - 1) as usize].top_line_index as usize;
+        out.push((lo, hi));
+        lo = hi + 1;
+    }
+    out
 }
 
 /// Map a Layer II sampling frequency in Hz to the Annex D
@@ -3271,20 +3304,44 @@ mod tests {
     }
 
     #[test]
-    fn list_non_tonal_layer2_bark_matches_d2_table() {
-        // The masker's z_bark must come straight from the Annex D
-        // Table D.2 boundary's top-line Bark column.
+    fn list_non_tonal_layer2_bark_is_d1_bark_at_representative_line() {
+        // The masker's z_bark must be the D.1 `Crit.Band Rate [z]` at
+        // the band's representative (geometric-mean) line — the spec
+        // lists the non-tonal component at that line's index.
         let spectrum = vec![20.0_f64; LAYER2_FFT_BINS];
-        let maskers = list_non_tonal_layer2(&spectrum, SamplingRate::Fs48kHz);
-        let table = SamplingRate::Fs48kHz.critical_band_boundaries();
-        assert_eq!(maskers.len(), table.len());
-        for (m, boundary) in maskers.iter().zip(table.iter()) {
+        let fs = SamplingRate::Fs48kHz;
+        let maskers = list_non_tonal_layer2(&spectrum, fs);
+        let ranges = critical_band_line_ranges(fs);
+        assert_eq!(maskers.len(), ranges.len());
+        for (m, &(lo, hi)) in maskers.iter().zip(ranges.iter()) {
+            let k = non_tonal_band_index(lo, hi).unwrap();
+            let expect = bark_for_line_layer2(fs, k);
             assert!(
-                (m.z_bark - boundary.top_bark).abs() < 1.0e-12,
-                "masker z_bark {} mismatches boundary top_bark {}",
+                (m.z_bark - expect).abs() < 1.0e-12,
+                "masker z_bark {} mismatches D.1 bark {} at line {k}",
                 m.z_bark,
-                boundary.top_bark,
+                expect,
             );
+        }
+    }
+
+    #[test]
+    fn critical_band_ranges_resolve_to_raw_fft_lines() {
+        // The D.2 boundary tables print D.1 *indices*; the resolved
+        // Step 4(c) ranges must be in the raw FFT-line domain. At
+        // 48 kHz the printed top index is 126 but the top FFT line of
+        // the audio band is 432 (20 250 Hz / 46,875 Hz-per-line) —
+        // the D.1f table's top line. The ranges must tile [0, 432]
+        // contiguously.
+        let ranges = critical_band_line_ranges(SamplingRate::Fs48kHz);
+        assert_eq!(ranges.first().unwrap().0, 0);
+        assert_eq!(
+            ranges.last().unwrap().1,
+            432,
+            "top band must reach the D.1f table-top FFT line"
+        );
+        for w in ranges.windows(2) {
+            assert_eq!(w[1].0, w[0].1 + 1, "bands must tile with no gaps");
         }
     }
 
@@ -4440,22 +4497,17 @@ mod tests {
     fn list_non_tonal_candidates_carries_representative_line() {
         // A flat 50 dB spectrum yields one non-tonal masker per
         // critical band, each carrying the band's geometric-mean line
-        // and its boundary Bark. The k values must be inside each
-        // band's [lo, hi] range.
+        // and that line's D.1 Bark. The k values must be inside each
+        // resolved [lo, hi] FFT-line range.
         let fs = crate::tables_d2::SamplingRate::Fs32kHz;
         let spl = vec![50.0_f64; 600];
         let cands = list_non_tonal_candidates_layer2(&spl, fs);
         assert!(!cands.is_empty());
-        let boundaries = fs.critical_band_boundaries();
-        let mut lo = 0usize;
-        for (idx, b) in boundaries.iter().enumerate() {
-            let hi = b.top_line_index as usize;
-            // Each surviving candidate's k is within its band range.
+        for (idx, &(lo, hi)) in critical_band_line_ranges(fs).iter().enumerate() {
             if idx < cands.len() {
                 let k = cands[idx].k;
                 assert!(k >= lo.max(1) && k <= hi, "k {k} not in band [{lo},{hi}]");
             }
-            lo = hi + 1;
         }
     }
 

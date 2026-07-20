@@ -21,6 +21,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **§D.1 Step 4(c) critical-band ranges resolved to the raw FFT-line
+  domain (`psy::critical_band_line_ranges`).** The Table D.2 boundary
+  tables print D.1 *subsampled indices*, which the non-tonal grouping
+  previously consumed as raw FFT lines — truncating the Step 4(c)
+  sweep at (e.g.) line 126 instead of 432 at 48 kHz, so every
+  non-tonal masker above ~5,9 kHz was silently dropped and Bark
+  positions above the printed index saturated early. The boundaries
+  are now resolved through the same rate's D.1 table (`index F&CB` →
+  D.1 row → top FFT line), the non-tonal bands tile the full
+  `[0, top-of-band]` line range, and `bark_for_line_layer2` reads
+  `z(i)` from the D.1 `Crit.Band Rate` column per the Step 6 prose
+  ("the critical band rates z(j) and z(i) can be found in tables
+  D.1…") instead of quantizing to the D.2 band-top Bark. Non-tonal
+  maskers are now positioned at the Bark of their representative
+  (geometric-mean) line, as Step 4(c) lists them.
+
 - **Table D.2e band 17 Bark: 16.116 → 16.110.** The staged extract's
   resolved errata (D.2e prints `16,11`; the D.1e i = 62 cross-print
   reads 16,110 — a dropped trailing zero, not a clipped digit)
