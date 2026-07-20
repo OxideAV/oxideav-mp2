@@ -8,6 +8,25 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Full four-column Annex D Table D.1d/e/f transcription
+  (`tables_d2::LtqEntry`)**. The Layer II "Frequencies, critical band
+  rates and absolute threshold" tables now carry the printed
+  `Frequency [Hz]` and `Crit.Band Rate [z]` columns alongside the FFT
+  line and `LTq` — the §D.1 Step 6 `z(i)` and Step 8 `f(i)` are
+  spec-cited to these very tables. New in-module cross-checks pin the
+  frequency column to the Fs/1024 analysis-FFT grid, the Bark column
+  to strict monotonicity, and every D.2 critical-band-boundary row to
+  its D.1 row (the `index F&CB` column is a **D.1 subsampled index**,
+  not a raw FFT line — now enforced by test at all rates).
+
+### Fixed
+
+- **Table D.2e band 17 Bark: 16.116 → 16.110.** The staged extract's
+  resolved errata (D.2e prints `16,11`; the D.1e i = 62 cross-print
+  reads 16,110 — a dropped trailing zero, not a clipped digit)
+  supersedes the earlier best-fit guess; the new D.2 ≡ D.1
+  row-for-row cross-check test caught the stale in-tree value.
+
 - **r411 whole-stream decode-conformance corpus
   (`tests/fixtures/`, `tests/decode_matrix_conformance.rs`)**. Sixteen
   new black-box-encoded Layer II streams widen the reference-validated
