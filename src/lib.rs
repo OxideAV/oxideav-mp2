@@ -299,7 +299,7 @@ pub use encoder_scfsi::{
 };
 pub use frame::{
     decode_all_frames, decode_frame, decode_frame_with, decode_frame_with_known_header,
-    decode_free_format_stream, layer2_crc, DecodedFrame, FrameDecodeState, FrameError,
+    decode_free_format_stream, layer2_crc, Ancillary, DecodedFrame, FrameDecodeState, FrameError,
     PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME,
 };
 pub use freeformat::{

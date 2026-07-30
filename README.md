@@ -109,6 +109,16 @@ wired into the runtime registry** (frame-in / packet-out
   sit inside the Table B.5 CRC-protected header half. Per-channel
   filter state is threaded across frames (re-zeroed on `reset`);
   `'00'` (none) is delivered unfiltered.
+- **§2.4.1.8 `ancillary_data()`** — the raw frame tail (the §2.4.2.8
+  `no_of_ancillary_bits` = frame budget minus header / error-check /
+  audio-data spend; content user-definable) is surfaced on every
+  `DecodedFrame` as `Ancillary`: the exact tail bit count, the
+  sub-byte residue left by the non-byte-granular §2.4.3.3.4 sample
+  loop, and the whole tail bytes — closing the round trip with the
+  encode-side `encode_frame_with_ancillary` payload path
+  (`tests/ancillary.rs`: byte-for-byte payload recovery, the tail
+  pinned *outside* the Table B.5 CRC-protected region, and the
+  length identity checked across the staged fixture's frames).
 - **Polyphase synthesis filterbank** (§2.4.3.2, Annex A Figure A.2):
   the 64×32 matrixing, the 512-tap Table 3-B.3 window, and the V ring
   buffer carried across frames — 1152 PCM samples per channel per frame.
