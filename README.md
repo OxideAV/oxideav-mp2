@@ -85,15 +85,30 @@ wired into the runtime registry** (frame-in / packet-out
   derived clean-room from its two time constants (`τ1 = 50 µs`,
   `τ2 = 15 µs`) via the bilinear transform (unity DC gain; the HF shelf
   asymptote `τ2/τ1 = 0.3` = −10.458 dB). The `'11'` **CCITT J.17**
-  curve (staged `docs/audio/mp3/mpeg-audio-emphasis-j17-deemphasis.md`:
+  curve is read from the staged **ITU-T Rec. J.17 (11/88)** itself
+  (`docs/audio/mp3/T-REC-J.17-198811-I.pdf` + clean-room note:
   first-order shelf, pre-emphasis zero ≈ 477.5 Hz / pole ≈ 4134 Hz,
-  18.75 dB span, ± 0.25 dB tolerance) is realised as an order-3
-  minimum-phase cascade fitted per sample rate — a plain bilinear
-  first-order section cannot hold the tolerance against the warp — with
-  the fit staying < 0.02 dB from the analytic curve at all six rates
-  and cross-checked against the note's 44.1 kHz reference fit (see
-  `src/j17.rs`). Per-channel filter state is threaded across frames
-  (re-zeroed on `reset`); `'00'` (none) is delivered unfiltered.
+  18.75 dB span, ± 0.25 dB tolerance), whose Table 1/J.17 also settles
+  the once-open **absolute-gain convention** (ask #256): J.17 fixes
+  the shape only — the "6.5 dB @ 800 Hz" figure is ITU-T J.34's
+  equipment-specific flat alignment — and, since ISO/IEC 11172-3 cites
+  J.17 alone and bounds decoder output to −1,0 … +1,0, the **DC-unity**
+  normalisation (0 dB at DC → −18,75 dB at HF, a pure attenuator) is
+  the ruled convention. Realised as an order-3 minimum-phase cascade
+  fitted per sample rate — a plain bilinear first-order section cannot
+  hold the tolerance against the warp — with the fit staying < 0.02 dB
+  from the analytic curve at all six rates, every Table 1/J.17 row
+  pinned by test (analytically, and per fitted cascade via the
+  Recommendation's own ± 0.25 dB / 800 Hz-alignment acceptance
+  procedure), and the 44.1 kHz result cross-checked against both of
+  the note's reference fits (see `src/j17.rs`). Because the note's §5
+  survey shows third-party decoders parse-and-discard the field (no
+  external PCM fixture can exist), `tests/deemphasis.rs` replays the
+  note's header-rewrite probe on the staged 44,1 kHz fixture against
+  this decoder's own honouring chain, and pins that the emphasis bits
+  sit inside the Table B.5 CRC-protected header half. Per-channel
+  filter state is threaded across frames (re-zeroed on `reset`);
+  `'00'` (none) is delivered unfiltered.
 - **Polyphase synthesis filterbank** (§2.4.3.2, Annex A Figure A.2):
   the 64×32 matrixing, the 512-tap Table 3-B.3 window, and the V ring
   buffer carried across frames — 1152 PCM samples per channel per frame.
