@@ -14,7 +14,7 @@
 
 use oxideav_mp2::deemphasis::DeEmphasis;
 use oxideav_mp2::encoder_frame::encode_all_frames;
-use oxideav_mp2::frame::decode_all_frames;
+use oxideav_mp2::frame::{decode_all_frames, decode_frame, FrameError};
 use oxideav_mp2::header::{Emphasis, FrameHeader, Mode, ModeExtension};
 
 fn header(emphasis: Emphasis) -> FrameHeader {
@@ -315,6 +315,108 @@ fn emphasis_switching_mid_stream_rebuilds_the_filter_per_curve() {
             );
         }
     }
+}
+
+/// Rewrite every frame header's 2-bit emphasis field in a Layer II
+/// stream, walking real frame boundaries (the per-frame padding bit
+/// makes 44,1 kHz frame sizes vary, so a fixed stride is wrong).
+fn patch_emphasis(stream: &[u8], bits: u8) -> Vec<u8> {
+    let mut out = stream.to_vec();
+    let mut pos = 0usize;
+    while pos + 4 <= out.len() {
+        let header = FrameHeader::parse(&out[pos..]).expect("frame header while patching");
+        out[pos + 3] = (out[pos + 3] & 0xFC) | bits;
+        pos += header.frame_size_bytes();
+    }
+    out
+}
+
+#[test]
+fn staged_fixture_emphasis_rewrite_decodes_with_the_reference_deemphasis() {
+    // The staged J.17 note (§5) documents the header-rewrite probe:
+    // take the `layer2-stereo-44100-192kbps` fixture (31 frames,
+    // CRC absent) and flip `emphasis` from '00' to a filtered code in
+    // every frame header. The three surveyed third-party decoders all
+    // parse-and-discard the field (byte-identical PCM), so the staged
+    // fixture can pin nothing about de-emphasis. *This* decoder
+    // honours §2.4.2.4: run the same rewrite here and require the
+    // patched decode to equal the plain decode passed through the
+    // reference filter — sample for sample, on real broadcast-chain
+    // content, exercising the 44,1 kHz J.17 fit inside the full
+    // pipeline. Skips cleanly when `docs/` isn't checked out.
+    let fixture_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/audio/mp3/fixtures/layer2-stereo-44100-192kbps/input.mp3"
+    );
+    if !std::path::Path::new(fixture_path).exists() {
+        eprintln!("skip: staged Layer II fixture absent at {fixture_path}");
+        return;
+    }
+    let stream = std::fs::read(fixture_path).expect("read staged fixture");
+    let plain_pcm = decode_all_frames(&stream).expect("decode plain fixture");
+    assert_eq!(plain_pcm.len(), 2, "fixture is stereo");
+
+    for (bits, make_filter) in [
+        (0b01u8, DeEmphasis::fifty_fifteen as fn(u32) -> DeEmphasis),
+        (0b11u8, DeEmphasis::ccitt_j17 as fn(u32) -> DeEmphasis),
+    ] {
+        let patched = patch_emphasis(&stream, bits);
+        let emph_pcm = decode_all_frames(&patched).expect("decode patched fixture");
+        for ch in 0..2 {
+            assert_eq!(plain_pcm[ch].len(), emph_pcm[ch].len());
+            let mut filt = make_filter(44_100);
+            let mut differed = false;
+            for (i, &p) in plain_pcm[ch].iter().enumerate() {
+                let expected = filt.process_sample(p);
+                let got = emph_pcm[ch][i];
+                assert!(
+                    (expected - got).abs() < 1e-9,
+                    "emphasis {bits:#04b} ch{ch}[{i}]: expected {expected}, got {got}"
+                );
+                if (p - got).abs() > 1e-3 {
+                    differed = true;
+                }
+            }
+            assert!(
+                differed,
+                "emphasis {bits:#04b} ch{ch}: de-emphasis produced no change on the fixture"
+            );
+        }
+    }
+}
+
+#[test]
+fn emphasis_bits_are_inside_the_layer2_crc_protected_field() {
+    // §2.4.1.4 / Annex B Table B.5: the Layer II CRC protects the
+    // second half of the header — the wire fields from
+    // `bitrate_index` through `emphasis` inclusive (this crate's
+    // Table B.5 reading is validated bit-exactly against a
+    // reference-encoded CRC stream, `tests/fixtures/crc_48k_192.mp2`).
+    // Flipping the emphasis bits of a CRC-protected frame without
+    // recomputing the CRC must therefore be *detected*:
+    let pcm = source_pcm();
+    let mut h = header(Emphasis::None);
+    h.protection_bit = false; // CRC word present
+    let stream = encode_all_frames(&h, &pcm, 0).expect("encode CRC stream");
+
+    let parsed = FrameHeader::parse(&stream).expect("parse header");
+    let frame_len = parsed.frame_size_bytes();
+    let mut tampered = stream[..frame_len].to_vec();
+    tampered[3] = (tampered[3] & 0xFC) | 0x03; // emphasis '00' → '11'
+    match decode_frame(&tampered) {
+        Err(FrameError::CrcMismatch { .. }) => {}
+        other => panic!("tampered emphasis must fail CRC, got {other:?}"),
+    }
+    // The untampered frame passes its CRC check.
+    decode_frame(&stream[..frame_len]).expect("untampered CRC frame decodes");
+
+    // On a CRC-absent stream (`protection_bit == 1`) the same edit is
+    // legal — that is what the header-rewrite tests above rely on.
+    let free = encode_all_frames(&header(Emphasis::None), &pcm, 0).expect("encode no-CRC");
+    let parsed = FrameHeader::parse(&free).expect("parse no-CRC header");
+    let mut patched = free[..parsed.frame_size_bytes()].to_vec();
+    patched[3] = (patched[3] & 0xFC) | 0x03;
+    decode_frame(&patched).expect("emphasis patch on a CRC-absent frame decodes");
 }
 
 #[test]

@@ -29,6 +29,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   II rates, and a shape cross-check against the staged note's 5-pole
   44.1 kHz reference fit (alongside the existing 3-pole check).
 
+- **Emphasis header-rewrite probe on the real staged fixture + a CRC
+  protection pin.** The staged note's §5 survey shows the surveyed
+  third-party decoders parse-and-discard `emphasis` (byte-identical
+  PCM under a header rewrite), so no external PCM fixture can
+  validate de-emphasis; `tests/deemphasis.rs` now runs that exact
+  rewrite ('00' → '01' and '00' → '11', walking real padded frame
+  boundaries) against the staged `layer2-stereo-44100-192kbps`
+  fixture and requires the patched decode to equal the plain decode
+  passed through the reference filter sample-for-sample — the
+  44,1 kHz J.17 fit exercised inside the full pipeline on real
+  content. A companion test pins that the emphasis bits sit *inside*
+  the §2.4.1.4 / Table B.5 CRC-protected header half (`bitrate_index`
+  through `emphasis`): tampering them on a CRC-protected frame is
+  detected as `CrcMismatch`, while the same edit on a CRC-absent
+  frame decodes (the property the rewrite probes rely on).
+
 - **Full four-column Annex D Table D.1d/e/f transcription
   (`tables_d2::LtqEntry`)**. The Layer II "Frequencies, critical band
   rates and absolute threshold" tables now carry the printed
