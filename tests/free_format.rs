@@ -16,8 +16,9 @@
 
 use oxideav_mp2::encoder_frame::encode_frame;
 use oxideav_mp2::{
-    decode_all_frames, decode_free_format_stream, measure_base_slots, resolve, to_free_format,
-    Emphasis, FrameHeader, FreeFormatError, Mode, ModeExtension, SmrTable, NUM_SUBBANDS,
+    decode_all_frames, decode_frame_with_known_header, decode_free_format_stream,
+    header_with_recovered_bitrate, measure_base_slots, resolve, to_free_format, Emphasis,
+    FrameDecodeState, FrameHeader, FreeFormatError, Mode, ModeExtension, SmrTable, NUM_SUBBANDS,
     PCM_SAMPLES_PER_CHANNEL,
 };
 
@@ -205,6 +206,31 @@ fn off_ladder_free_format_stream_decodes() {
     for ch in 0..std_pcm.len() {
         assert_eq!(ff_pcm[ch], std_pcm[ch], "ch {ch}: ancillary tail ignored");
     }
+
+    // The grown slot is not lost, either: it lands in the §2.4.1.8
+    // tail surfaced by the frame-level decode. Decode the first frame
+    // of both layouts with a recovered known header and pin that the
+    // off-ladder tail is exactly 8 bits (one slot) longer, with the
+    // extra byte visible.
+    let base_header = FrameHeader::parse_allow_free_format(&free).expect("free header");
+    let hdr_626 = header_with_recovered_bitrate(&base_header, 192_000);
+    let anc_626 =
+        decode_frame_with_known_header(&free[..626], hdr_626, &mut FrameDecodeState::new())
+            .expect("626-slot frame")
+            .ancillary;
+    let hdr_627 = header_with_recovered_bitrate(&base_header, layout.bit_rate);
+    let anc_627 =
+        decode_frame_with_known_header(&off_ladder[..627], hdr_627, &mut FrameDecodeState::new())
+            .expect("627-slot frame")
+            .ancillary;
+    assert_eq!(
+        anc_627.bits,
+        anc_626.bits + 8,
+        "off-ladder §2.4.1.8 tail grows by exactly the extra slot"
+    );
+    assert_eq!(anc_627.bytes.len(), anc_626.bytes.len() + 1);
+    assert_eq!(anc_627.bytes.last().copied(), Some(0x00));
+    assert_eq!(anc_627.residue_bits, anc_626.residue_bits);
 }
 
 #[test]

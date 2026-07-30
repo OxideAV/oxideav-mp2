@@ -58,7 +58,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   tail bytes of a CRC-protected frame decodes cleanly with
   bit-identical PCM — the dual of the emphasis-bits pin), and checks
   the §2.4.2.8 length identity on every frame of the staged
-  black-box-encoded fixture.
+  black-box-encoded fixture. The free-format off-ladder test
+  additionally pins that a grown slot lands in the surfaced tail (one
+  extra byte, +8 bits, unchanged residue), and the `decode` fuzz
+  target now asserts the length identity on every successful
+  `decode_frame` — raw and crafted — so the tail extraction sits on
+  the fuzzed surface as an invariant, not just as panic-freedom
+  (bounded local runs: ≈ 2.1 M execs, zero findings).
 
 - **Full four-column Annex D Table D.1d/e/f transcription
   (`tables_d2::LtqEntry`)**. The Layer II "Frequencies, critical band

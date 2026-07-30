@@ -53,7 +53,12 @@
 //!    across the crafted frames.
 //!
 //! Output PCM is discarded — the fuzzer only cares about *return*,
-//! never sample-correctness (that is the integration tests' job).
+//! never sample-correctness (that is the integration tests' job) —
+//! with one structural exception: every successful `decode_frame` is
+//! asserted to satisfy the §2.4.2.8 ancillary-tail length identity
+//! (`bits == residue_bits + 8·bytes.len()`, sub-byte residue), so the
+//! §2.4.1.8 tail extraction sits on the fuzzed surface as an
+//! invariant, not just as panic-freedom.
 //!
 //! Spec basis: ISO/IEC 11172-3 §2.4.1.3 / §2.4.2.3 (frame header /
 //! sync), §2.4.1.6 / §2.4.3.3.1..4 (bit allocation, scfsi,
@@ -64,7 +69,28 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Decoder, Packet, Rational, TimeBase};
 use oxideav_mp2::frame::decode_free_format_stream;
-use oxideav_mp2::{decode_all_frames, decode_frame, FrameHeader};
+use oxideav_mp2::{decode_all_frames, decode_frame, Ancillary, FrameHeader};
+
+/// §2.4.2.8 structural identity of the surfaced `ancillary_data()`
+/// tail — must hold for every successfully decoded frame regardless of
+/// input bytes (the frame end is byte-aligned).
+fn check_ancillary_invariant(anc: &Ancillary) {
+    assert!(anc.residue_bits < 8, "residue must be sub-byte");
+    assert_eq!(
+        anc.bits,
+        usize::from(anc.residue_bits) + 8 * anc.bytes.len(),
+        "ancillary length identity violated"
+    );
+    if anc.residue_bits == 0 {
+        assert_eq!(anc.residue, 0, "empty residue must be zero");
+    } else {
+        assert_eq!(
+            anc.residue >> anc.residue_bits,
+            0,
+            "residue value exceeds its bit count"
+        );
+    }
+}
 
 const MAX_FRAMES_PER_ITER: usize = 12;
 /// Bound the crafted-frame body so a malicious bitrate/sample-rate
@@ -161,8 +187,11 @@ fn build_decoder() -> Option<Box<dyn Decoder>> {
 fuzz_target!(|data: &[u8]| {
     // Always exercise the free-function entry points with the raw
     // attacker buffer — this covers the `< 4 bytes`, `BadSync`, and
-    // `Truncated` rejection paths with zero crafted structure.
-    let _ = decode_frame(data);
+    // `Truncated` rejection paths with zero crafted structure. A
+    // successful decode must uphold the §2.4.2.8 tail identity.
+    if let Ok(decoded) = decode_frame(data) {
+        check_ancillary_invariant(&decoded.ancillary);
+    }
     let _ = decode_all_frames(data);
 
     if data.is_empty() {
@@ -254,6 +283,15 @@ fuzz_target!(|data: &[u8]| {
     }
     let _ = decode_all_frames(&stream);
     let _ = decode_free_format_stream(&stream);
+
+    // Frame-level entry on every crafted frame so the §2.4.2.8 tail
+    // identity is checked on deep-chain successes too (the streaming
+    // walkers above drop the per-frame ancillary).
+    for frame in &crafted {
+        if let Ok(decoded) = decode_frame(frame) {
+            check_ancillary_invariant(&decoded.ancillary);
+        }
+    }
 
     // 2. Trait-object decode session over the crafted frames.
     let Some(mut dec) = build_decoder() else {
