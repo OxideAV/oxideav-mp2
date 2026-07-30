@@ -283,8 +283,9 @@ pub use encoder_bit_allocator::{
 };
 pub use encoder_frame::{
     choose_stereo_coding, encode_all_frames, encode_all_frames_js, encode_all_frames_model2,
-    encode_all_frames_with_smr, encode_frame, encode_frame_auto, encode_frame_auto_js_model2,
-    encode_frame_auto_js_with, encode_frame_auto_model2, encode_frame_auto_with, encode_frame_with,
+    encode_all_frames_with_ancillary, encode_all_frames_with_smr, encode_frame, encode_frame_auto,
+    encode_frame_auto_js_model2, encode_frame_auto_js_with, encode_frame_auto_model2,
+    encode_frame_auto_with, encode_frame_auto_with_ancillary, encode_frame_with,
     encode_frame_with_ancillary, encode_frame_with_state_and_ancillary, EncodeError,
     EncodeFrameState, MODEL1_WINDOW_DELAY_SAMPLES,
 };

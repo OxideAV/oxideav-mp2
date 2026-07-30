@@ -10,10 +10,13 @@
 //! B.5's protected-field boundary (the tail is *not* CRC-covered) is
 //! pinned.
 
-use oxideav_mp2::encoder_frame::{encode_frame, encode_frame_with_ancillary};
+use oxideav_mp2::encoder_frame::{
+    encode_all_frames_with_ancillary, encode_frame, encode_frame_auto_with_ancillary,
+    encode_frame_with_ancillary, EncodeError, EncodeFrameState,
+};
 use oxideav_mp2::frame::{decode_frame, decode_frame_with, FrameDecodeState};
 use oxideav_mp2::header::{Emphasis, FrameHeader, Mode, ModeExtension};
-use oxideav_mp2::{SmrTable, NUM_SUBBANDS, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{PaddingScheduler, SmrTable, NUM_SUBBANDS, PCM_SAMPLES_PER_CHANNEL};
 
 fn header(protection_bit: bool) -> FrameHeader {
     FrameHeader {
@@ -145,6 +148,86 @@ fn ancillary_tail_is_not_crc_protected() {
         "the rewrite is visible in the surfaced tail"
     );
     assert!(!decoded.ancillary.is_all_zero());
+}
+
+#[test]
+fn batch_encode_carries_per_frame_payloads_through_padding() {
+    // The batch §2.4.1.8 path at a fractional rate (44,1 kHz — the
+    // §2.4.2.3 padding schedule interleaves 627-slot frames): each
+    // frame carries its own payload, the output is byte-identical to a
+    // hand-rolled `encode_frame_auto_with_ancillary` loop threading
+    // the same `PaddingScheduler` + `EncodeFrameState`, and every
+    // payload comes back from the frame-level decode.
+    let hdr = FrameHeader {
+        sample_rate: 44_100,
+        ..header(true)
+    };
+    let n_frames = 4usize;
+    let fs = 44_100.0_f64;
+    let mut left = Vec::with_capacity(n_frames * PCM_SAMPLES_PER_CHANNEL);
+    let mut right = Vec::with_capacity(n_frames * PCM_SAMPLES_PER_CHANNEL);
+    for i in 0..n_frames * PCM_SAMPLES_PER_CHANNEL {
+        let t = i as f64 / fs;
+        left.push(0.4 * (2.0 * std::f64::consts::PI * 900.0 * t).sin());
+        right.push(0.4 * (2.0 * std::f64::consts::PI * 2_500.0 * t).sin());
+    }
+    let pcm = vec![left, right];
+
+    let payloads: [&[u8]; 4] = [b"frame-0", b"", b"\x00\xFF\x7E", b"the fourth payload"];
+    let banc = 8 * payloads.iter().map(|p| p.len()).max().unwrap() as u32 + 64;
+
+    let batch =
+        encode_all_frames_with_ancillary(&hdr, &pcm, banc, &payloads).expect("batch encode");
+
+    // Hand-rolled equivalence.
+    let mut sched = PaddingScheduler::new();
+    let mut state = EncodeFrameState::new();
+    let mut rolled = Vec::new();
+    for (f, payload) in payloads.iter().enumerate() {
+        let fh = sched.next_header(&hdr);
+        let frame_pcm: Vec<Vec<f64>> = pcm
+            .iter()
+            .map(|p| p[f * PCM_SAMPLES_PER_CHANNEL..(f + 1) * PCM_SAMPLES_PER_CHANNEL].to_vec())
+            .collect();
+        rolled.extend_from_slice(
+            &encode_frame_auto_with_ancillary(&fh, &frame_pcm, banc, payload, &mut state)
+                .expect("hand-rolled frame"),
+        );
+    }
+    assert_eq!(batch, rolled, "batch != hand-rolled loop");
+
+    // Walk the frames and recover each payload from the surfaced tail.
+    let mut dec_state = FrameDecodeState::new();
+    let mut pos = 0usize;
+    let mut padded_seen = false;
+    for payload in payloads {
+        let fh = FrameHeader::parse(&batch[pos..]).expect("batch frame header");
+        padded_seen |= fh.padding;
+        let size = fh.frame_size_bytes();
+        let decoded = decode_frame_with(&batch[pos..pos + size], &mut dec_state).expect("decode");
+        assert_tail_invariant(&decoded.ancillary);
+        assert_eq!(decoded.ancillary.residue, 0);
+        assert!(
+            decoded.ancillary.bytes.starts_with(payload),
+            "payload not recovered from frame at {pos}"
+        );
+        assert!(decoded.ancillary.bytes[payload.len()..]
+            .iter()
+            .all(|&b| b == 0));
+        pos += size;
+    }
+    assert_eq!(pos, batch.len(), "walked the whole stream");
+    assert!(
+        padded_seen,
+        "44,1 kHz schedule should pad at least one of 4 frames"
+    );
+
+    // A mis-sized payload list is refused, not realigned.
+    let short: [&[u8]; 2] = [b"a", b"b"];
+    match encode_all_frames_with_ancillary(&hdr, &pcm, banc, &short) {
+        Err(EncodeError::AncillaryFrameCountMismatch { have: 2, need: 4 }) => {}
+        other => panic!("expected AncillaryFrameCountMismatch, got {other:?}"),
+    }
 }
 
 #[test]

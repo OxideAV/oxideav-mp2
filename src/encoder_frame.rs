@@ -158,6 +158,18 @@ pub enum EncodeError {
         /// The per-frame block size ([`PCM_SAMPLES_PER_CHANNEL`]).
         frame: usize,
     },
+    /// [`encode_all_frames_with_ancillary`] was handed a per-frame
+    /// ancillary list whose length differs from the stream's frame
+    /// count. The §2.4.1.8 tail is a per-frame region, so the batch
+    /// path requires exactly one payload slice per frame (empty slices
+    /// for frames without a payload) rather than guessing an
+    /// alignment.
+    AncillaryFrameCountMismatch {
+        /// Number of payload slices supplied.
+        have: usize,
+        /// Number of frames the PCM stream encodes.
+        need: usize,
+    },
 }
 
 impl core::fmt::Display for EncodeError {
@@ -194,6 +206,10 @@ impl core::fmt::Display for EncodeError {
             } => write!(
                 f,
                 "encode_all_frames: pcm[{channel}].len() = {have} is not a whole multiple of {frame} samples/frame"
+            ),
+            EncodeError::AncillaryFrameCountMismatch { have, need } => write!(
+                f,
+                "encode_all_frames_with_ancillary: {have} §2.4.1.8 payload slices for {need} frames"
             ),
         }
     }
@@ -609,6 +625,23 @@ pub fn encode_frame_auto_with(
     encode_frame_inner(header, pcm, SmrSource::Auto, banc, &[], state)
 }
 
+/// Like [`encode_frame_auto_with`] (§D.1 Model-1 auto-SMR, threaded
+/// state) but also copying a §2.4.1.8 `ancillary_data()` payload into
+/// the frame tail — the auto-SMR counterpart of
+/// [`encode_frame_with_state_and_ancillary`]. Capacity rules and the
+/// [`EncodeError::AncillaryTooLarge`] rejection are identical to
+/// [`encode_frame_with_ancillary`]; passing `ancillary = &[]` is
+/// equivalent to [`encode_frame_auto_with`].
+pub fn encode_frame_auto_with_ancillary(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    ancillary: &[u8],
+    state: &mut EncodeFrameState,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_frame_inner(header, pcm, SmrSource::Auto, banc, ancillary, state)
+}
+
 /// Encode one Layer II frame, computing the §C.1.5.2.7 allocator's
 /// signal-to-mask-ratio table **automatically** from the frame's PCM
 /// via the §D.2 Model-2 psychoacoustic chain
@@ -850,7 +883,40 @@ pub fn encode_all_frames(
     pcm: &[Vec<f64>],
     banc: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_all_frames_inner(header, pcm, banc, SmrChoice::Auto)
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::Auto, None)
+}
+
+/// Like [`encode_all_frames`] (§D.1 Model-1 auto-SMR batch) but
+/// copying one §2.4.1.8 `ancillary_data()` payload into **each**
+/// frame's tail: `per_frame_ancillary[f]` goes into frame `f` (pass an
+/// empty slice for frames without a payload). The list length must
+/// equal the stream's frame count (`pcm[ch].len() / 1152`), else
+/// [`EncodeError::AncillaryFrameCountMismatch`] — the §2.4.1.8 tail is
+/// a per-frame region, so the batch path refuses to guess an
+/// alignment.
+///
+/// Per-frame capacity rules and the
+/// [`EncodeError::AncillaryTooLarge`] rejection are identical to
+/// [`encode_frame_with_ancillary`]; callers typically pick
+/// `banc >= 8 · max(per_frame_ancillary[f].len())` so the §C.1.5.2.7
+/// allocator reserves the tail in every frame. The output is
+/// byte-identical to a hand-rolled [`encode_frame_auto_with_ancillary`]
+/// loop threading the same [`PaddingScheduler`] and
+/// [`EncodeFrameState`], and each payload comes back on decode via
+/// [`crate::frame::DecodedFrame::ancillary`].
+pub fn encode_all_frames_with_ancillary(
+    header: &FrameHeader,
+    pcm: &[Vec<f64>],
+    banc: u32,
+    per_frame_ancillary: &[&[u8]],
+) -> Result<Vec<u8>, EncodeError> {
+    encode_all_frames_inner(
+        header,
+        pcm,
+        banc,
+        SmrChoice::Auto,
+        Some(per_frame_ancillary),
+    )
 }
 
 /// Like [`encode_all_frames`] but with a caller-supplied per-frame
@@ -868,7 +934,7 @@ pub fn encode_all_frames_with_smr(
     smr_db: &SmrTable,
     banc: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_all_frames_inner(header, pcm, banc, SmrChoice::Provided(smr_db))
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::Provided(smr_db), None)
 }
 
 /// Like [`encode_all_frames`] but deriving the per-frame SMR table via
@@ -886,7 +952,7 @@ pub fn encode_all_frames_model2(
     pcm: &[Vec<f64>],
     banc: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoModel2)
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoModel2, None)
 }
 
 /// Like [`encode_all_frames`] (§D.1 Model-1 auto-SMR batch) but with
@@ -905,7 +971,7 @@ pub fn encode_all_frames_js(
     pcm: &[Vec<f64>],
     banc: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoJs)
+    encode_all_frames_inner(header, pcm, banc, SmrChoice::AutoJs, None)
 }
 
 /// Per-frame SMR policy for the [`encode_all_frames`] family.
@@ -926,6 +992,7 @@ fn encode_all_frames_inner(
     pcm: &[Vec<f64>],
     banc: u32,
     smr: SmrChoice<'_>,
+    per_frame_ancillary: Option<&[&[u8]]>,
 ) -> Result<Vec<u8>, EncodeError> {
     let channels = header.channels();
     if pcm.len() != channels {
@@ -963,6 +1030,14 @@ fn encode_all_frames_inner(
     }
 
     let n_frames = n_frames.unwrap_or(0);
+    if let Some(list) = per_frame_ancillary {
+        if list.len() != n_frames {
+            return Err(EncodeError::AncillaryFrameCountMismatch {
+                have: list.len(),
+                need: n_frames,
+            });
+        }
+    }
     let mut state = EncodeFrameState::new();
     // Pre-size: each frame is `frame_size_bytes()` long, +1 slot on the
     // §2.4.2.3 padded frames.
@@ -984,13 +1059,16 @@ fn encode_all_frames_inner(
             frame_pcm[ch].clear();
             frame_pcm[ch].extend_from_slice(&plane[base..base + PCM_SAMPLES_PER_CHANNEL]);
         }
+        // The §2.4.1.8 payload for THIS frame (empty when the caller
+        // supplied no list — every non-ancillary entry point).
+        let anc: &[u8] = per_frame_ancillary.map_or(&[], |list| list[f]);
         let bytes = match smr {
             SmrChoice::Auto => encode_frame_inner(
                 &frame_header,
                 &frame_pcm,
                 SmrSource::Auto,
                 banc,
-                &[],
+                anc,
                 &mut state,
             )?,
             SmrChoice::AutoModel2 => encode_frame_inner(
@@ -998,7 +1076,7 @@ fn encode_all_frames_inner(
                 &frame_pcm,
                 SmrSource::AutoModel2,
                 banc,
-                &[],
+                anc,
                 &mut state,
             )?,
             SmrChoice::AutoJs => encode_frame_inner_auto_joint(
@@ -1013,7 +1091,7 @@ fn encode_all_frames_inner(
                 &frame_pcm,
                 SmrSource::Provided(table),
                 banc,
-                &[],
+                anc,
                 &mut state,
             )?,
         };

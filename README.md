@@ -302,7 +302,9 @@ always applied.
 
 **Batch stream encode** — `encode_all_frames` /
 `encode_all_frames_with_smr` / `encode_all_frames_model2` /
-`encode_all_frames_js` are the encode-side counterpart of
+`encode_all_frames_js` / `encode_all_frames_with_ancillary` (one
+§2.4.1.8 payload per frame, refused on a frame-count mismatch) are the
+encode-side counterpart of
 `decode_all_frames`: they turn one continuous per-channel PCM buffer
 into the concatenated Layer II byte stream, threading a single
 persistent `EncodeFrameState` (the §C.1.3 analysis-filterbank X ring

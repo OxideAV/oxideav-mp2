@@ -66,6 +66,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   the fuzzed surface as an invariant, not just as panic-freedom
   (bounded local runs: ≈ 2.1 M execs, zero findings).
 
+- **Per-frame ancillary payloads in the batch encoder.**
+  `encode_all_frames_with_ancillary` copies one §2.4.1.8 payload into
+  each frame's tail (`per_frame_ancillary[f]` → frame `f`; the list
+  length must equal the frame count, else the new
+  `EncodeError::AncillaryFrameCountMismatch`), and
+  `encode_frame_auto_with_ancillary` is its per-frame auto-SMR
+  building block (the §D.1 counterpart of
+  `encode_frame_with_state_and_ancillary`). The batch output is
+  test-pinned byte-identical to a hand-rolled loop threading the same
+  `PaddingScheduler` + `EncodeFrameState` at 44,1 kHz (payloads
+  coexist with the §2.4.2.3 padding schedule), with every payload
+  recovered through `DecodedFrame::ancillary`.
+
 - **Full four-column Annex D Table D.1d/e/f transcription
   (`tables_d2::LtqEntry`)**. The Layer II "Frequencies, critical band
   rates and absolute threshold" tables now carry the printed
