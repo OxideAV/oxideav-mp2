@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **J.17 absolute-gain convention resolved from the Recommendation
+  itself (ask #256) and pinned by test.** The staged ITU-T
+  Rec. J.17 (11/88) PDF settles what was previously an
+  implementation-chosen convention: Table 1/J.17 tabulates the
+  pre-emphasis insertion loss absolutely (18.75 dB at DC, 13.10 dB at
+  800 Hz, 0 dB at `f → ∞`), the Recommendation's closing Note
+  delegates absolute programme level to the per-equipment
+  Recommendations (the "6.5 dB at 800 Hz" figure is ITU-T J.34 §2's
+  equipment alignment — a flat 6.60 dB slide that cancels in any
+  matched pre-/de-emphasis pair), and ISO/IEC 11172-3 cites only
+  J.17, so the decoder inherits the shape alone. The DC-unity
+  normalisation this crate already implemented is now the *ruled*
+  convention — the only one consistent with 11172-3's −1.0 … +1.0
+  decoder-output-range clause. New `j17` tests lock the resolution:
+  every Table 1/J.17 row against the analytic curve in the DC-unity
+  frame, every fitted per-rate digital cascade against Table 1 via
+  the Recommendation's own ± 0.25 dB / 800 Hz-alignment acceptance
+  procedure, a pure-attenuator (`|H(f)| ≤ 1`) sweep at all six Layer
+  II rates, and a shape cross-check against the staged note's 5-pole
+  44.1 kHz reference fit (alongside the existing 3-pole check).
+
 - **Full four-column Annex D Table D.1d/e/f transcription
   (`tables_d2::LtqEntry`)**. The Layer II "Frequencies, critical band
   rates and absolute threshold" tables now carry the printed

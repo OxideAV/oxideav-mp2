@@ -2,9 +2,11 @@
 //!
 //! The frame header's `'11'` emphasis value selects the CCITT J.17
 //! pre-/de-emphasis characteristic (ISO/IEC 11172-3 §2.4.2.3 table;
-//! reused by ISO/IEC 13818-3). The curve itself is staged in
-//! `docs/audio/mp3/mpeg-audio-emphasis-j17-deemphasis.md` (the #236
-//! J.17 note): a **first-order shelf** whose *pre-emphasis* has an
+//! reused by ISO/IEC 13818-3). The normative source is **ITU-T
+//! Rec. J.17 (11/88)** — staged as
+//! `docs/audio/mp3/T-REC-J.17-198811-I.pdf` with the clean-room
+//! reading in `docs/audio/mp3/mpeg-audio-emphasis-j17-deemphasis.md` —
+//! which specifies a **first-order shelf** whose *pre-emphasis* has an
 //! s-plane zero at ≈ 477.5 Hz and a pole at ≈ 4134 Hz, with the
 //! insertion-loss magnitude
 //!
@@ -16,23 +18,44 @@
 //!
 //! spanning `10·log10(75) = 18.75 dB` between its DC and
 //! high-frequency asymptotes (corner frequencies `ω0/2π = 477.5 Hz`
-//! and `ω0·√75/2π = 4134 Hz`). Measured curves must stay within
-//! **± 0.25 dB** of the theoretical characteristic once levels are
-//! aligned. The **de-emphasis** a decoder applies is the reciprocal
-//! shelf — a high-frequency roll-off (pole 477.5 Hz, zero 4134 Hz).
+//! and `ω0·√75/2π = 4134 Hz`). Table 1/J.17 tabulates the insertion
+//! loss absolutely — 18.75 dB at DC, **13.10 dB at 800 Hz**, 0 dB at
+//! `f → ∞` — and the Recommendation requires measured pre- and
+//! de-emphasis curves to stay within **± 0.25 dB** of the theoretical
+//! characteristic *"when the measured levels at 800 Hz are made to
+//! coincide with the theoretical levels"*. The **de-emphasis** a
+//! decoder applies is the complementary (reciprocal) shelf — a
+//! high-frequency roll-off (pole 477.5 Hz, zero 4134 Hz).
 //!
-//! ## Gain normalisation
+//! ## Gain normalisation (resolved — ask #256)
 //!
-//! The staged note fixes the curve's *shape* (the formula above, with
-//! the ± 0.25 dB tolerance applied "once the 800 Hz levels are
-//! aligned") but the absolute level convention — the note quotes a
-//! "6.5 dB @ 800 Hz" sound-programme alignment figure whose reference
-//! level is the (TIES-gated) J.17 network's own — is a flat gain
-//! constant that cancels in any matched pre-/de-emphasis pair. This
-//! implementation normalises the **de-emphasis to unity gain at DC**
-//! (and the pre-emphasis to its exact inverse), the same convention
-//! the crate's 50/15 µs filter uses: a constant signal passes
-//! unchanged and high frequencies are shelved down by up to 18.75 dB.
+//! J.17's closing Note states the formula defines *only* the
+//! "insertion-loss/frequency" characteristic; the absolute programme
+//! level is delegated to the per-equipment Recommendations
+//! (J.31 / J.34 / J.41). The often-quoted "6.5 dB at 800 Hz"
+//! alignment is **ITU-T Rec. J.34 §2** (staged
+//! `docs/audio/mp3/T-REC-J.34-198811-W.pdf`) — an equipment-specific
+//! level setting that slides the whole curve down by a flat
+//! `13.10 − 6.5 = 6.60 dB`, a constant that cancels in any matched
+//! pre-/de-emphasis pair and is no part of the J.17 shape.
+//!
+//! ISO/IEC 11172-3 normatively cites only J.17 — never J.31/J.34/J.41
+//! — so an MPEG decoder inherits the *shape* alone and must fix its
+//! own level. The staged note (§3.1.2) rules **DC-unity** the only
+//! normalisation consistent with 11172-3's output-range clause (the
+//! decoder's PCM output lies in −1.0 … +1.0, and de-emphasis is
+//! decoder processing after the filterbank): with 0 dB at DC falling
+//! to −18.75 dB at HF the de-emphasis is a pure attenuator
+//! (`|H(f)| ≤ 1` everywhere), whereas any larger constant — in
+//! particular HF-unity, +18.75 dB at DC — makes it a broadband
+//! amplifier that can push a legal full-scale decode out of range.
+//! This implementation therefore normalises the **de-emphasis to
+//! unity gain at DC** (and the pre-emphasis to its exact inverse),
+//! the same convention the crate's 50/15 µs filter uses: a constant
+//! signal passes unchanged and high frequencies are shelved down by
+//! up to 18.75 dB. The Table 1/J.17 values are pinned by test in this
+//! DC-unity frame, both on the analytic curve and (via the normative
+//! 800 Hz-alignment procedure) on every fitted digital cascade.
 //!
 //! ## Digital realisation
 //!
@@ -40,20 +63,20 @@
 //! within the ± 0.25 dB tolerance across the Layer II rates — the
 //! bilinear transform's frequency warping bends the top octave (at
 //! 16 kHz the 4134 Hz corner sits past half Nyquist and a plain
-//! bilinear shelf is ≈ 1 dB off there). The staged note's own
-//! reference digital fit (§3.3) therefore uses an order-3 cascade of
-//! *real* poles/zeros: the shelf pair plus two near-cancelling
-//! correction sections. This module derives the same structure
-//! independently, **per sample rate**, by a damped Gauss–Newton
-//! (Levenberg–Marquardt) least-squares fit of the order-3 cascade's
-//! log-magnitude to the analytic curve on a log-spaced frequency grid
-//! — plain textbook numerical optimisation, seeded from the bilinear
-//! transform of the analog shelf. The fit residual is asserted to stay
-//! under 0.02 dB at every rate — more than an order of magnitude
-//! inside the ± 0.25 dB tolerance, and tighter against the staged
-//! formula than the note's own 44.1 kHz reference fit (≈ 0.008 dB) —
-//! and at 44.1 kHz the result is cross-checked against that reference
-//! fit.
+//! bilinear shelf is ≈ 1 dB off there). The staged note's reference
+//! digital fits (§3.3, 44.1 kHz only) therefore use a cascade of
+//! *real* poles/zeros — an order-3 fit (the shelf pair plus two
+//! near-cancelling correction sections) and a tighter order-5 one.
+//! This module derives the order-3 structure independently, **per
+//! sample rate**, by a damped Gauss–Newton (Levenberg–Marquardt)
+//! least-squares fit of the cascade's log-magnitude to the analytic
+//! curve on a log-spaced frequency grid — plain textbook numerical
+//! optimisation, seeded from the bilinear transform of the analog
+//! shelf. The fit residual is asserted to stay under 0.02 dB at every
+//! rate — more than an order of magnitude inside the ± 0.25 dB
+//! tolerance, and tighter against the staged formula than the note's
+//! own 44.1 kHz order-3 reference fit (≈ 0.008 dB) — and at 44.1 kHz
+//! the result is cross-checked against **both** reference fits.
 //!
 //! All poles and zeros are constrained inside the unit circle, so the
 //! de-emphasis is stable *and* minimum-phase — its exact inverse (the
@@ -421,6 +444,150 @@ mod tests {
         let f_high =
             J17_OMEGA0_RAD_PER_S * J17_SHELF_POWER_RATIO.sqrt() / (2.0 * std::f64::consts::PI);
         assert!((f_high - 4134.9).abs() < 0.1);
+    }
+
+    /// Table 1/J.17 as printed in the staged ITU-T Rec. J.17 (11/88):
+    /// (frequency in Hz, pre-emphasis insertion loss in dB). The
+    /// `f → ∞` row (0 dB) is checked separately via the asymptote.
+    const TABLE_1_J17: [(f64, f64); 10] = [
+        (0.0, 18.75),
+        (50.0, 18.70),
+        (200.0, 18.06),
+        (400.0, 16.48),
+        (800.0, 13.10),
+        (2_000.0, 6.98),
+        (4_000.0, 3.10),
+        (6_400.0, 1.49),
+        (8_000.0, 1.01),
+        (10_000.0, 0.68),
+    ];
+
+    #[test]
+    fn analytic_curve_reproduces_table_1_j17_in_the_dc_unity_frame() {
+        // The normative Table 1/J.17 lists the pre-emphasis insertion
+        // loss absolutely: 18.75 dB at DC → 0 dB at ∞, 13.10 dB at
+        // 800 Hz. In the resolved DC-unity de-emphasis normalisation
+        // (ask #256) the de-emphasis response is D(f) = L(f) − L(0),
+        // so every tabulated row must satisfy
+        //     deemphasis_gain_db(f) ≈ L_table(f) − 18.75
+        // within the table's print rounding (±0.005 dB) plus the
+        // 18.75-vs-10·log10(75) anchor slop (±0.0007 dB).
+        for (f, loss_db) in TABLE_1_J17 {
+            let expected = loss_db - 18.75;
+            let got = deemphasis_gain_db(f);
+            assert!(
+                (got - expected).abs() < 0.0075,
+                "Table 1/J.17 @ {f} Hz: analytic {got} dB vs tabulated {expected} dB"
+            );
+        }
+        // The f → ∞ row: insertion loss 0 dB ⇒ D(∞) = −18.75 dB.
+        assert!((deemphasis_gain_db(1e12) - (0.0 - 18.750_612)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn digital_cascade_holds_table_1_within_the_normative_tolerance() {
+        // The Recommendation's acceptance procedure verbatim: the
+        // measured curve "should not depart by more than ± 0.25 dB
+        // from the theoretical curves when the measured levels at
+        // 800 Hz are made to coincide with the theoretical levels".
+        // Apply exactly that to every fitted cascade: align the
+        // realised response to the theoretical level at 800 Hz, then
+        // check every Table 1/J.17 row at or below Nyquist.
+        for fs in RATES {
+            let sections = deemphasis_sections(fs);
+            let nyquist = f64::from(fs) / 2.0;
+            let theta_of = |f: f64| std::f64::consts::PI * f / nyquist;
+            let align = cascade_db(&sections, theta_of(800.0)) - deemphasis_gain_db(800.0);
+            for (f, loss_db) in TABLE_1_J17 {
+                if f > nyquist {
+                    continue;
+                }
+                let theoretical = loss_db - 18.75;
+                let realised = cascade_db(&sections, theta_of(f)) - align;
+                assert!(
+                    (realised - theoretical).abs() <= 0.25,
+                    "fs={fs}, {f} Hz: realised {realised} dB departs > 0.25 dB \
+                     from Table 1/J.17 {theoretical} dB"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deemphasis_is_a_pure_attenuator_at_every_rate() {
+        // The DC-unity resolution's rationale (staged note §3.1.2):
+        // the de-emphasis must be a pure attenuator, |H(f)| ≤ 1
+        // everywhere, so it can never push a legal full-scale decode
+        // outside ISO/IEC 11172-3's normative −1.0 … +1.0 output
+        // range. The analytic curve is strictly ≤ 0 dB; allow the
+        // fitted cascade only its (sub-0.02 dB) fit residual above 0.
+        for fs in RATES {
+            let sections = deemphasis_sections(fs);
+            let mut max_db = f64::NEG_INFINITY;
+            for j in 0..=4000 {
+                let theta = std::f64::consts::PI * j as f64 / 4000.0;
+                max_db = max_db.max(cascade_db(&sections, theta));
+            }
+            // The exact DC point (θ = 0) is anchored to 0 dB by
+            // construction.
+            let dc = cascade_db(&sections, 0.0);
+            assert!(dc.abs() < 1e-9, "fs={fs}: DC gain {dc} dB != 0");
+            assert!(
+                max_db < 0.02,
+                "fs={fs}: cascade peaks at {max_db} dB — not an attenuator \
+                 within the fit residual"
+            );
+        }
+    }
+
+    #[test]
+    fn fit_matches_staged_reference_five_pole_fit_at_44100() {
+        // The staged note's §3.3 also publishes a 5-pole 44.1 kHz
+        // minimax reference fit (max error 5·10⁻⁷ dB against the
+        // analytic pre-emphasis curve — effectively exact). Invert it
+        // (zeros ↔ poles) for the de-emphasis, align DC levels and
+        // compare shapes against our order-3 fit, which must agree to
+        // within its own fit residual.
+        let ref_zeros = [
+            -0.797_722_5,
+            -0.569_752_5,
+            -0.310_690_3,
+            -0.087_450_85,
+            0.554_884_4,
+        ]; // = pre-emphasis poles
+        let ref_poles = [
+            -0.797_405_8,
+            -0.568_855_2,
+            -0.309_093_8,
+            -0.086_321_11,
+            0.934_296_9,
+        ]; // = pre-emphasis zeros
+        let ref_db = |c: f64| {
+            let mut db = 0.0;
+            for z in ref_zeros {
+                db += 10.0 * (1.0 - 2.0 * z * c + z * z).log10();
+            }
+            for p in ref_poles {
+                db -= 10.0 * (1.0 - 2.0 * p * c + p * p).log10();
+            }
+            db
+        };
+        let ours = deemphasis_sections(44_100);
+        let nyquist = 22_050.0;
+        let ref_dc = ref_db(1.0);
+        let ours_dc = cascade_db(&ours, 0.0);
+        let mut worst = 0.0_f64;
+        for j in 0..=2000 {
+            let f = 20.0 * (21_000.0_f64 / 20.0).powf(j as f64 / 2000.0);
+            let theta = std::f64::consts::PI * f / nyquist;
+            let r = ref_db(theta.cos()) - ref_dc;
+            let o = cascade_db(&ours, theta) - ours_dc;
+            worst = worst.max((r - o).abs());
+        }
+        assert!(
+            worst < 0.01,
+            "44.1 kHz fit deviates {worst} dB from the staged 5-pole reference"
+        );
     }
 
     #[test]

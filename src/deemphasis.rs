@@ -65,12 +65,17 @@
 //!
 //! The J.17 characteristic — a first-order shelf with the pre-emphasis
 //! zero at ≈ 477.5 Hz and pole at ≈ 4134 Hz, 18.75 dB asymptote span —
-//! is staged in `docs/audio/mp3/mpeg-audio-emphasis-j17-deemphasis.md`
-//! and implemented in [`crate::j17`]: because a single bilinear
-//! first-order section cannot hold the curve's ± 0.25 dB tolerance
-//! across the Layer II rates, the digital realisation is an order-3
-//! cascade of real-pole/zero sections fitted per sample rate (see the
-//! [`crate::j17`] module docs for the derivation and normalisation).
+//! is read from the staged ITU-T Rec. J.17 (11/88) PDF
+//! (`docs/audio/mp3/T-REC-J.17-198811-I.pdf`, clean-room note
+//! `mpeg-audio-emphasis-j17-deemphasis.md`) and implemented in
+//! [`crate::j17`], normalised to **unity gain at DC** — the resolved
+//! ask-#256 convention, the only one consistent with ISO/IEC 11172-3's
+//! −1.0 … +1.0 decoder-output-range clause (see [`crate::j17`]).
+//! Because a single bilinear first-order section cannot hold the
+//! curve's ± 0.25 dB tolerance across the Layer II rates, the digital
+//! realisation is an order-3 cascade of real-pole/zero sections fitted
+//! per sample rate (see the [`crate::j17`] module docs for the
+//! derivation and the Table 1/J.17 pinning tests).
 //! Both [`DeEmphasis::ccitt_j17`] (decode) and
 //! [`PreEmphasis::ccitt_j17`] (its exact inverse, encode) are exposed,
 //! and [`DeEmphasis::for_header`] selects the curve for
