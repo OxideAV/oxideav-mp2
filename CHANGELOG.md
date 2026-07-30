@@ -45,6 +45,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   detected as `CrcMismatch`, while the same edit on a CRC-absent
   frame decodes (the property the rewrite probes rely on).
 
+- **§2.4.1.8 `ancillary_data()` is now surfaced on decode.**
+  `DecodedFrame` gains an `ancillary: Ancillary` field capturing the
+  raw frame tail — the exact §2.4.2.8 `no_of_ancillary_bits` count,
+  the sub-byte residue left by the (non-byte-granular) §2.4.3.3.4
+  sample loop, and the whole tail bytes to the frame end — closing
+  the asymmetry with the long-standing encode-side
+  `encode_frame_with_ancillary` path. `tests/ancillary.rs` round-trips
+  an encoder payload byte-for-byte (zero residue, payload at the
+  first whole tail byte, §2.4.2.1 zero-fill beyond), pins that the
+  tail is **outside** the Table B.5 CRC-protected region (rewriting
+  tail bytes of a CRC-protected frame decodes cleanly with
+  bit-identical PCM — the dual of the emphasis-bits pin), and checks
+  the §2.4.2.8 length identity on every frame of the staged
+  black-box-encoded fixture.
+
 - **Full four-column Annex D Table D.1d/e/f transcription
   (`tables_d2::LtqEntry`)**. The Layer II "Frequencies, critical band
   rates and absolute threshold" tables now carry the printed

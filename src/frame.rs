@@ -189,6 +189,81 @@ pub struct DecodedFrame {
     /// Per-channel reconstructed PCM. Outer dimension is `channels`,
     /// inner dimension is exactly `PCM_SAMPLES_PER_CHANNEL`.
     pub pcm: Vec<Vec<f64>>,
+    /// The §2.4.1.8 `ancillary_data()` tail of the frame.
+    pub ancillary: Ancillary,
+}
+
+/// The §2.4.1.8 `ancillary_data()` tail of a decoded Layer II frame.
+///
+/// The audio_data() syntax closes with the bit-loop
+///
+/// ```text
+///   if ((layer == 1) || (layer == 2))
+///       for (b = 0; b < no_of_ancillary_bits; b++)
+///           ancillary_bit                       1   bslbf
+/// ```
+///
+/// and §2.4.2.8 fixes `no_of_ancillary_bits` as whatever remains of
+/// the frame-byte budget after the header, error check and audio
+/// data — content "user-definable", so the decoder surfaces the raw
+/// tail instead of interpreting it. The §2.4.3.3.4 sample loop is not
+/// byte-granular, so the tail may open with a sub-byte residue before
+/// the frame's next byte boundary; encoders (this crate's included)
+/// conventionally zero those residue bits and place their payload
+/// byte-aligned (see
+/// [`encode_frame_with_ancillary`](crate::encoder_frame::encode_frame_with_ancillary)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ancillary {
+    /// Exact §2.4.2.8 `no_of_ancillary_bits` on the wire — always
+    /// `usize::from(residue_bits) + 8 * bytes.len()` (the frame end is
+    /// byte-aligned).
+    pub bits: usize,
+    /// Number of tail bits (`0..=7`) preceding the first whole frame
+    /// byte of the tail.
+    pub residue_bits: u8,
+    /// Those residue bits, right-aligned in the LSBs (`0` when
+    /// `residue_bits == 0`).
+    pub residue: u8,
+    /// The whole tail bytes, from the first frame byte boundary after
+    /// the sample loop to the end of the frame.
+    pub bytes: Vec<u8>,
+}
+
+impl Ancillary {
+    /// `true` when every ancillary bit on the wire is zero — the
+    /// "no payload" state this crate's encoder emits when given an
+    /// empty ancillary slice (zero-fill per §2.4.2.1's exact
+    /// frame-byte budget).
+    #[must_use]
+    pub fn is_all_zero(&self) -> bool {
+        self.residue == 0 && self.bytes.iter().all(|&b| b == 0)
+    }
+}
+
+/// Capture the §2.4.1.8 tail: everything between the sample loop's
+/// final bit and the frame end.
+fn extract_ancillary(frame: &[u8], reader: &mut BitReader<'_>) -> Ancillary {
+    let start = reader.bit_position();
+    let total_bits = frame.len() as u64 * 8;
+    debug_assert!(start <= total_bits, "sample loop overran the frame");
+    let bits = (total_bits - start) as usize;
+    // The frame end is byte-aligned, so the distance to the next byte
+    // boundary never exceeds the remaining bit count.
+    let residue_bits = (8 - (start % 8) as u8) % 8;
+    let residue = if residue_bits > 0 {
+        reader
+            .read_u32(u32::from(residue_bits))
+            .expect("residue bits inside the frame") as u8
+    } else {
+        0
+    };
+    let bytes = frame[reader.byte_position()..].to_vec();
+    Ancillary {
+        bits,
+        residue_bits,
+        residue,
+        bytes,
+    }
 }
 
 /// Decode one Layer II frame starting at the front of `buf`.
@@ -437,13 +512,19 @@ pub fn decode_frame_with(
     // threading the per-channel IIR state across frames.
     state.apply_deemphasis(&header, &mut pcm);
 
-    // The remainder of the frame (after the sample loop) is §2.4.1.6
-    // `ancillary_data`; we ignore it. Suppress unused-_audio.scfsi
-    // by acknowledging the field (it is captured in `audio` for
+    // The remainder of the frame (after the sample loop) is the
+    // §2.4.1.8 `ancillary_data()` tail — surface it raw (§2.4.2.8:
+    // content is user-definable). Suppress unused-_audio.scfsi by
+    // acknowledging the field (it is captured in `audio` for
     // diagnostics + future fixture audits).
+    let ancillary = extract_ancillary(frame, &mut reader);
     let _ = audio.scfsi;
 
-    Ok(DecodedFrame { header, pcm })
+    Ok(DecodedFrame {
+        header,
+        pcm,
+        ancillary,
+    })
 }
 
 /// Compute the §2.4.3.1 / Annex B Table B.5 CRC-16 over the protected
@@ -714,8 +795,16 @@ pub fn decode_frame_with_known_header(
     }
     // §2.4.2.4 de-emphasis (see `decode_frame_with`).
     state.apply_deemphasis(&header, &mut pcm);
+    // §2.4.1.8 tail (see `decode_frame_with`) — for a free-format
+    // frame this is exactly the region the §2.4.2.3 fixed-rate
+    // padding occupies.
+    let ancillary = extract_ancillary(frame, &mut reader);
     let _ = audio.scfsi;
-    Ok(DecodedFrame { header, pcm })
+    Ok(DecodedFrame {
+        header,
+        pcm,
+        ancillary,
+    })
 }
 
 #[cfg(test)]
