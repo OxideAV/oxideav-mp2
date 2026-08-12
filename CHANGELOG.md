@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Official ISO/IEC 13818-4 audio-conformance sweep — the crate's
+  last "lacks" closed.** `tests/iso13818_4_conformance.rs` sweeps the
+  first-party ISO 13818-4 audio test-bitstream suite (35 archives from
+  ISO's standards-maintenance portal; fetch recipe + SHA-256 manifest
+  staged in the workspace docs at
+  `docs/audio/mp3/iso-13818-4-audio-conformance.md`). The vectors are
+  ISO use-licensed, so they are never committed: the harness is gated
+  on `OXIDEAV_MP2_ISO13818_4_DIR` and skips silently when unset.
+  Results, pinned by the assertions:
+  - The two §2.5.4 *accuracy* bitstreams (`test34` LSF 24 kHz,
+    `test35` MPEG-1 44,1 kHz — −20 dB sine sweeps with 24-bit
+    reference PCM, the exact setup §2.5.4.1 prescribes) pass the
+    normative "ISO/IEC 13818-3 audio decoder" criterion with ~70×
+    headroom: RMS ≤ 1,3·10⁻⁷ against the 1/(2¹⁵·√12) ≈ 8,8·10⁻⁶
+    bound, max abs ≤ 7,6·10⁻⁷ against the 2⁻¹⁴ bound.
+  - All fifteen 16-bit-reference Layer II cells (MPEG-1 44,1/48 kHz
+    stereo up to 384 kbit/s incl. CRC-protected frames; LSF
+    16/22,05/24 kHz from the 16 kbit/s ladder floor to 160 kbit/s,
+    rotating per-frame joint-stereo bounds 4/8/12/16 ↔ stereo,
+    single-channel and dual-channel) agree with the supplied
+    reference PCM to **≤ 1 s16 LSB at every sample** (the §2.5.4.1
+    max-abs bound allows 2), five of them ≥ 99,9 % bit-exactly;
+    per-cell bit-exact floors are pinned. The comparison honours
+    §2.5.4.1's P′-bit rule: 16-bit references are compared in the
+    saturating s16 domain (several suite streams carry deliberate
+    near-full-scale content whose float reconstruction overshoots
+    ±1,0 and clips in any 16-bit rendering — the sweep's one real
+    finding, resolved as measurement-domain, not decode, divergence).
+  - Every remaining Layer II multichannel base stream (whose matrixed
+    per-channel references cannot be compared against a two-channel
+    base decode), including both VBR streams, decodes cleanly to the
+    exact frame-count sample total.
+  - Stream premises (rotating modes really rotate, `test30`/`test31`
+    are single/dual channel, CRC protection present) are pinned from
+    the wire, mirroring the staged-fixture premise pins.
+
 - **J.17 absolute-gain convention resolved from the Recommendation
   itself (ask #256) and pinned by test.** The staged ITU-T
   Rec. J.17 (11/88) PDF settles what was previously an
