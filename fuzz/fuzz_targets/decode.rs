@@ -69,6 +69,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Decoder, Packet, Rational, TimeBase};
 use oxideav_mp2::frame::decode_free_format_stream;
+use oxideav_mp2::mc::{decode_mc_frame_with, decode_mc_stream, has_mc_extension, McDecodeState};
 use oxideav_mp2::{decode_all_frames, decode_frame, Ancillary, FrameHeader};
 
 /// §2.4.2.8 structural identity of the surfaced `ancillary_data()`
@@ -283,6 +284,26 @@ fuzz_target!(|data: &[u8]| {
     }
     let _ = decode_all_frames(&stream);
     let _ = decode_free_format_stream(&stream);
+
+    // ISO/IEC 13818-3 §2.5 multichannel-extension surface: the MC
+    // parser reads the §2.4.1.8 ancillary tail of every frame (header,
+    // CRC, composite status, allocation / scfsi / scalefactors,
+    // prediction data, LFE, multilingual) and — when the crafted bits
+    // claim an extension bit stream — the §2.5.1.5 ext_frame parse
+    // over a fully attacker-controlled buffer. Most iterations fail
+    // the §2.5.2.14 mc_crc_check (the §2.5.3.1 presence detector),
+    // but the whole through-scfsi parse runs *before* the CRC verdict,
+    // so the deep MC side-info surface is exercised on every crafted
+    // frame; the contract is `Result`, never a panic.
+    let ext_tail: &[u8] = &data[data.len() - data.len().min(64)..];
+    {
+        let mut mc_state = McDecodeState::new();
+        for frame in &crafted {
+            let _ = decode_mc_frame_with(frame, Some(ext_tail), &mut mc_state);
+            let _ = has_mc_extension(frame);
+        }
+    }
+    let _ = decode_mc_stream(&stream, Some(ext_tail));
 
     // Frame-level entry on every crafted frame so the §2.4.2.8 tail
     // identity is checked on deep-chain successes too (the streaming

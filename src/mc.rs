@@ -919,7 +919,11 @@ pub fn decode_mc_frame_with(
     // Layer II: part1 = ancillary region minus the trailing n_ad_bytes
     // (§2.5.2.13), then optional ext_data from the extension frame
     // (§2.5.1.12.3).
-    let part1_end_bit = total_bits - u64::from(n_ad_bytes) * 8;
+    // An `n_ad_bytes` claiming more trailing ancillary bytes than the
+    // frame (or its ancillary region) holds is not a valid extension.
+    let part1_end_bit = total_bits
+        .checked_sub(u64::from(n_ad_bytes) * 8)
+        .ok_or(McError::UnexpectedEnd)?;
     if part1_end_bit < base.anc_start_bit {
         return Err(McError::UnexpectedEnd);
     }
@@ -2093,6 +2097,51 @@ mod tests {
             // Any Result is acceptable; a panic is the only failure.
             let _ = decode_mc_frame_with(&buf, None, &mut state);
             let _ = has_mc_extension(&buf);
+        }
+    }
+
+    /// Fuzz-found regression: on a frame *shorter* than the maximal
+    /// `n_ad_bytes` claim (255 bytes — possible only at the small
+    /// frame sizes, e.g. 32 kbit/s single-channel = 144 bytes), an
+    /// `mc_header` asserting `ext_bit_stream_present` with an
+    /// overclaimed `n_ad_bytes` used to underflow the part1-end
+    /// computation. It must be rejected as a malformed extension.
+    #[test]
+    fn overclaimed_n_ad_bytes_on_a_small_frame_is_rejected_not_panicking() {
+        let header = FrameHeader {
+            lsf: false,
+            bit_rate: 32_000,
+            sample_rate: 48_000,
+            padding: false,
+            private_bit: false,
+            mode: Mode::SingleChannel,
+            mode_extension: crate::header::ModeExtension::Bound4,
+            copyright: false,
+            original: false,
+            emphasis: crate::header::Emphasis::None,
+            protection_bit: true,
+        };
+        let silence = vec![vec![0.0f64; PCM_SAMPLES_PER_CHANNEL]; 1];
+        let smr: crate::encoder_bit_allocator::SmrTable = [[0.0; NUM_SUBBANDS]; 2];
+        let mut frame =
+            crate::encoder_frame::encode_frame(&header, &silence, &smr, 0).expect("encode");
+        assert!(
+            frame.len() * 8 < 16 + 255 * 8,
+            "premise: frame smaller than the claim"
+        );
+        let plain = crate::frame::decode_frame(&frame).expect("decode base");
+        let anc_start = frame.len() as u64 * 8 - plain.ancillary.bits as u64;
+        // ext_bit_stream_present = 1, n_ad_bytes = 255.
+        let mut poker = BitPoker {
+            buf: &mut frame,
+            pos: anc_start,
+        };
+        poker.put(1, 1);
+        poker.put(255, 8);
+        let mut state = McDecodeState::new();
+        match decode_mc_frame_with(&frame, Some(&[0u8; 64]), &mut state) {
+            Err(McError::UnexpectedEnd) => {}
+            other => panic!("expected UnexpectedEnd, got {other:?}"),
         }
     }
 

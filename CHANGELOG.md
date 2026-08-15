@@ -52,6 +52,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     `McHeader` / `McConfig` / `McChannel` / `McDecodedFrame` /
     `McDecodedStream` / `McError`.
 
+- **Multichannel surface on the `decode` fuzz target.** The crafted
+  frames (and their concatenated stream, plus an attacker-controlled
+  extension-frame buffer) are now also driven through
+  `decode_mc_frame_with` / `decode_mc_stream` / `has_mc_extension`,
+  so the §2.5 side-info parse — which runs before the §2.5.2.14 CRC
+  verdict — sits on the fuzzed attacker surface. The first bounded
+  session found one real issue within a minute: an `mc_header`
+  claiming `ext_bit_stream_present` with an `n_ad_bytes` larger than
+  the whole frame (reachable only at the small frame sizes)
+  underflowed the part1-end computation. **Fixed** (checked
+  subtraction → `McError::UnexpectedEnd`), pinned by a deterministic
+  regression test (`overclaimed_n_ad_bytes_on_a_small_frame_is_
+  rejected_not_panicking`), and re-fuzzed clean (bounded local
+  session: ≈ 463 k execs, zero findings).
+
 - **Official ISO/IEC 13818-4 multichannel conformance sweep
   (`tests/iso13818_4_mc_conformance.rs`)** — env-gated on
   `OXIDEAV_MP2_ISO13818_4_DIR` like the base sweep, vectors never
