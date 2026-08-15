@@ -247,6 +247,7 @@ pub mod frame;
 pub mod freeformat;
 pub mod header;
 pub mod j17;
+pub mod mc;
 pub mod psy;
 pub mod requant;
 pub mod synthesis;
@@ -312,6 +313,11 @@ pub use header::{
     encode_bitrate, encode_bitrate_lsf, encode_sampling_frequency, encode_sampling_frequency_lsf,
     find_sync, is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, HeaderError, Mode,
     ModeExtension, PaddingScheduler, SYNCWORD,
+};
+pub use mc::{
+    decode_mc_frame_with, decode_mc_stream, has_mc_extension, sbgr_of_subband, Centre, McChannel,
+    McConfig, McDecodeState, McDecodedFrame, McDecodedStream, McError, McHeader, Surround,
+    LFE_SAMPLES_PER_FRAME, SBGR_BOUNDS,
 };
 pub use psy::{
     annex_d_sampling_rate, complex_spectrum_polar_layer2, compute_smr_model1_frame,

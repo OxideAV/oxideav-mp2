@@ -8,6 +8,69 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ISO/IEC 13818-3 §2.5 multichannel-extension decoder (`mc`
+  module) — the crate's last "lacks" closed.** Decodes the
+  `mc_extension()` payload riding the §2.4.1.8 ancillary field of a
+  Layer II base frame, optionally continued in a separate extension
+  bit stream (§2.5.1.5 `ext_frame()` with syncword / CRC / length
+  verification per §2.5.2.10), to the full presentation-channel set:
+  - `mc_header` (§2.5.1.13) with the §2.5.2.14 `mc_crc_check`
+    (header + composite status + allocation + scfsi) doubling as the
+    §2.5.3.1 multichannel-presence detector; all seven §2.5.2.15
+    channel configurations (3/2, 3/1, 3/0, 2/2, 2/1, 2/0, 1/0, each
+    optionally + a second stereo programme), phantom-coded centre
+    (`centre == '11'`, subbands above 11 zeroed per §2.5.2.13);
+  - composite coding modes: per-sbgr / global `tc_allocation`
+    transmission-channel switching, **dynamic crosstalk** (all
+    `dyn_cross_mode` tables incl. combined `Tij`/`Tijk` copies and
+    the `Lo`/`Ro`/`dyn_cross_LR` fallback, `dyn_second_stereo`;
+    copied samples are the requantised-not-rescaled ones, re-scaled
+    by the destination channel's own transmitted scalefactors per
+    §2.5.3.2.1.2), and **multichannel prediction** (§2.5.3.2.1.3:
+    up-to-2nd-order predictors from the scaled compatible pair,
+    per-predictor 0–7-sample delay compensation, `(v − 127)/32`
+    dequantisation, per-`dyn_cross_mode` `npred` tables, cross-frame
+    `T0`/`T1` history);
+  - MC audio data per §2.5.2.17 (Table B.2a at 48 kHz / B.2b at
+    44,1 / 32 kHz regardless of bitrate, `msblimit = sblimit`),
+    **dematrixing** (§2.5.3.2.1.1: every decoding matrix for every
+    `tc_allocation` × configuration × `dematrix_procedure`, incl.
+    the `'10'` phase-mixed-surround equations and `'11'`
+    no-matrixing) + **de-normalisation** (§2.5.3.2.5 inverse
+    weighting and 1 + √2 / 1,5 + 0,5·√2 factors), each matrix
+    unit-tested as the exact inverse of the §2.5.3.3.2 downmix
+    equations;
+  - the **LFE** channel (§2.5.3.2.4: block-companded PCM at
+    `Fs / 96`, Layer I requantisation
+    `s'' = (2^nb/(2^nb − 1))·(s''' + 2^(1−nb))` cross-checked
+    against the in-tree Table 3-B.4 constants) and up to 7
+    **multilingual** Layer II channels at full or half sampling
+    frequency (§2.5.2.18; half-rate allocation via 13818-3 Table
+    B.1, 576 samples/frame; Layer III ml rejected as out of scope);
+  - public surface: `decode_mc_stream` / `decode_mc_frame_with` (+
+    `McDecodeState` for streaming), `has_mc_extension`, typed
+    `McHeader` / `McConfig` / `McChannel` / `McDecodedFrame` /
+    `McDecodedStream` / `McError`.
+
+- **Official ISO/IEC 13818-4 multichannel conformance sweep
+  (`tests/iso13818_4_mc_conformance.rs`)** — env-gated on
+  `OXIDEAV_MP2_ISO13818_4_DIR` like the base sweep, vectors never
+  committed. Measured and pinned: all **twenty** Layer II
+  multichannel streams decode with **max abs ≤ 1 s16 LSB on every
+  channel** (full-bandwidth, LFE, multilingual; §2.5.4.1 allows 2),
+  six streams 100 % bit-exact on every full-bandwidth channel; the
+  24-bit accuracy stream meets the §2.5.4.1 normative criterion on
+  **all five dematrixed channels** with ≈ 80× headroom
+  (rms ≤ 1,2·10⁻⁷ vs 8,8·10⁻⁶). Premise pins prove the suite really
+  exercises all four dematrix procedures, dynamic crosstalk,
+  prediction, phantom centre, mono/stereo surround, second stereo,
+  LFE, 7 multilingual channels at both rates, extension bit streams
+  and VBR; negative controls pin that LSF and Layer III streams are
+  rejected. In-tree (vector-free) coverage: a hand-built 2/0 + LFE
+  extension with correct CRC spliced into a real encoded frame
+  round-trips through the decoder (with a CRC-tamper detection pin),
+  and an adversarial-ancillary-tail suite pins parser panic-freedom.
+
 - **Official ISO/IEC 13818-4 audio-conformance sweep — the crate's
   last "lacks" closed.** `tests/iso13818_4_conformance.rs` sweeps the
   first-party ISO 13818-4 audio test-bitstream suite (35 archives from

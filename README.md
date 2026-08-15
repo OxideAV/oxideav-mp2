@@ -19,6 +19,12 @@ floating-point-filterbank conformance bound (max abs ≤ 1 LSB,
 per-frame) — and passes the **official ISO/IEC 13818-4 audio
 conformance suite**, meeting the §2.5.4 normative accuracy criterion
 with ~70× headroom (see below).
+The ISO/IEC 13818-3 §2.5 **multichannel extension** is decoded
+end-to-end (dematrixing, dynamic crosstalk, multichannel prediction,
+phantom centre, LFE, multilingual channels, extension bit streams) and
+validated against the suite's matrixed per-channel references — all
+twenty Layer II multichannel streams within 1 LSB on every channel
+(see below).
 The encoder is complete through frame assembly with **both** Annex D
 psychoacoustic models (§D.1 Model 1 and §D.2 Model 2) driving the
 §C.1.5.2.7 bit allocator automatically at **all six** Layer II
@@ -426,22 +432,89 @@ gated on `OXIDEAV_MP2_ISO13818_4_DIR` and skips when unset):
   including both VBR streams — the 13818-3 multichannel extension
   rides the §2.4.1.8 ancillary region, so the MPEG-1-compatible base
   decode must (and does) survive all of them to the exact
-  frame-count sample total.
+  frame-count sample total. The extension itself is decoded and
+  validated channel-for-channel by the companion multichannel sweep
+  (next section).
+
+## ISO/IEC 13818-3 §2.5 multichannel extension
+
+The `mc` module decodes the **multichannel extension** — the crate's
+former last "lacks" — end-to-end: the `mc_extension()` payload riding
+the §2.4.1.8 ancillary field of a Layer II base frame (§2.5.1.3),
+optionally continued in a separate **extension bit stream** of
+`ext_frame()`s (§2.5.1.5, syncword / CRC / length verified per
+§2.5.2.10). Implemented per §2.5.2 / §2.5.3.2:
+
+- **`mc_header` + CRC detection** (§2.5.1.13 / §2.5.2.14): centre
+  (incl. `'11'` Phantom coding), surround (mono / stereo / second
+  stereo programme), LFE, `dematrix_procedure`, multilingual count /
+  half-rate flag; the `mc_crc_check` (over header + composite status
+  + allocation + scfsi, §2.5.2.14) doubles as the §2.5.3.1
+  multichannel-presence detector.
+- **Composite status** (§2.5.2.15): per-subband-group or global
+  `tc_allocation` for all seven channel configurations (3/2, 3/1,
+  3/0, 2/2, 2/1, 2/0, 1/0, each optionally + a second stereo
+  programme), **dynamic crosstalk** (all `dyn_cross_mode` tables,
+  combined `Tij`/`Tijk` copies, the `Lo`/`Ro`/`dyn_cross_LR`
+  fallback, `dyn_second_stereo`) with the copied *requantised but not
+  yet re-scaled* samples re-scaled by the destination channel's own
+  scalefactors (§2.5.3.2.1.2), and **multichannel prediction**
+  (§2.5.3.2.1.3): up-to-2nd-order predictors from the scaled
+  compatible pair with per-predictor 0–7-sample delay compensation
+  and `(v − 127)/32` coefficient dequantisation, applied in subband
+  groups 0..7 with cross-frame history.
+- **MC audio data** (§2.5.2.17): Table B.2a (48 kHz) / B.2b
+  (44,1 / 32 kHz) allocation regardless of bitrate with
+  `msblimit = sblimit`, scfsi / scalefactors / §2.4.3.3.4
+  requantisation exactly as the base layer, and the phantom-coded
+  centre's subbands above 11 zeroed (§2.5.2.13).
+- **Dematrixing + de-normalisation** (§2.5.3.2.1.1 / §2.5.3.2.5):
+  every decoding matrix for every `tc_allocation` × configuration ×
+  `dematrix_procedure` (including the `'10'` phase-mixed-surround
+  equations with their `jSw` terms and `'11'` no-matrixing), then
+  inverse weighting (√2 on centre/surround, or 2 on surround for
+  procedure `'01'`) and the overall de-normalisation factor
+  (1 + √2, or 1,5 + 0,5·√2). Unit tests verify each matrix as the
+  exact inverse of the §2.5.3.3.2 downmix equations.
+- **LFE** (§2.5.3.2.4): block-companded PCM at `Fs / 96`
+  (12 samples/frame), Layer I requantisation
+  `s'' = (2^nb/(2^nb − 1))·(s''' + 2^(1−nb))` (verified against the
+  in-tree Table 3-B.4 constants), Table B.1 scalefactor.
+- **Multilingual channels** (§2.5.2.18): up to 7 independent Layer II
+  channels at the full or half sampling frequency (half-rate
+  allocation per 13818-3 Table B.1, 6 granules → 576 samples/frame),
+  each with its own synthesis filterbank. Layer III multilingual
+  (`multi_lingual_layer == '1'`) is rejected — out of scope for a
+  Layer II crate.
+
+**Validated against the official ISO/IEC 13818-4 multichannel
+vectors** (same env-gated, never-committed suite as above;
+`tests/iso13818_4_mc_conformance.rs`): all **twenty** Layer II
+multichannel streams decode to their full presentation-channel sets
+with **max abs ≤ 1 s16 LSB on every channel** — full-bandwidth, LFE
+and multilingual alike (the §2.5.4.1 bound allows 2) — six streams
+100 % bit-exact on every full-bandwidth channel; and the 24-bit
+accuracy stream meets the §2.5.4.1 normative criterion on **all five
+dematrixed channels** with ≈ 80× headroom (rms ≤ 1,2·10⁻⁷ vs the
+8,8·10⁻⁶ bound). The sweep's premise pins confirm the suite genuinely
+exercises all four dematrix procedures, dynamic crosstalk,
+multichannel prediction, phantom centre, second stereo, LFE, 7
+multilingual channels at both rates, extension bit streams, and
+variable bit rate. An in-tree (vector-free) test splices a hand-built
+2/0 + LFE extension with a correct CRC into a real encoded frame and
+round-trips it, and an adversarial-tail suite pins panic-freedom of
+the extension parser.
 
 ## Not yet supported
 
-Both Annex D psychoacoustic models drive the encoder end-to-end at all
-six Layer II sampling rates, both the decoder and encoder are
-registry-wired, and the official ISO/IEC 13818-4 sweep above closed
-the compliance-bitstream gap. What remains:
-
-- The ISO/IEC 13818-3 **multichannel extension** (matrixed 3/2, 3/1,
-  2/1… presentations, LFE, multilingual channels): the suite's
-  multichannel streams decode as MPEG-1-compatible stereo base
-  streams (verified in the sweep), but the extension data in the
-  ancillary region — and the separate `.ext` extension bitstreams —
-  are not interpreted, so the matrixed per-channel outputs are out of
-  reach.
+- **Multichannel encode**: the §2.5 decoder is complete (above), but
+  this crate does not emit `mc_extension()` payloads — matrixing,
+  composite-mode election and MC bit allocation are encoder-side
+  concerns the standard leaves largely informative.
+- The optional §2.5.3.2.1.1 post-dematrix surround processing for
+  procedure `'10'` (−90° phase shift, dynamic expansion) — the spec
+  marks both "may be done ... before output"; the suite's references
+  are decoded without them to ≤ 1 LSB.
 
 ## Robustness
 
