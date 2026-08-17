@@ -56,8 +56,9 @@
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag,
-    Confidence, Decoder, Error, Frame, Packet, ProbeContext, Result, SampleFormat,
+    AudioFrame, ChannelLayout, CodecCapabilities, CodecId, CodecInfo, CodecParameters,
+    CodecRegistry, CodecTag, Confidence, Decoder, Error, Frame, Packet, ProbeContext, Result,
+    SampleFormat,
 };
 
 use crate::frame::{
@@ -65,6 +66,7 @@ use crate::frame::{
     PCM_SAMPLES_PER_CHANNEL,
 };
 use crate::header::FrameHeader;
+use crate::mc::{decode_mc_frame_with, McConfig, McDecodeState, McDecodedFrame, McError};
 
 /// Codec id under which [`register_codecs`] installs this decoder.
 pub const CODEC_ID_STR: &str = "mp2";
@@ -75,6 +77,131 @@ pub const CODEC_ID_STR: &str = "mp2";
 /// streams.
 pub const WAVE_FORMAT_MPEG: u16 = 0x0050;
 
+/// How the decoder treats the ISO/IEC 13818-3 §2.5 multichannel
+/// extension riding the §2.4.1.8 ancillary field. Selected by the
+/// `mc` codec option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McMode {
+    /// Ignore any extension; decode the MPEG-1-compatible base pair
+    /// (the historical behaviour, and the default).
+    Off,
+    /// Every packet must carry a valid §2.5 extension; a frame whose
+    /// §2.5.2.14 `mc_crc_check` fails is an error.
+    On,
+    /// Probe the first packet with the §2.5.3.1 CRC-detection rule and
+    /// latch: extension present → multichannel output for the whole
+    /// stream, absent → plain base decode.
+    Auto,
+}
+
+/// Where one output plane of a multichannel [`AudioFrame`] comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McPlaneSource {
+    /// `McDecodedFrame::channels[i]` (a full-bandwidth presentation
+    /// channel).
+    Presentation(usize),
+    /// The §2.5.3.2.4 LFE channel, zero-order-held ×96 to the full
+    /// sampling rate (`mc_lfe=hold`).
+    LfeHold,
+}
+
+/// The fixed per-stream output shape decided from the first
+/// multichannel frame: the [`ChannelLayout`] announced through
+/// `output_params` and the source of each plane, in canonical core
+/// layout order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McOutputPlan {
+    layout: ChannelLayout,
+    sources: Vec<McPlaneSource>,
+}
+
+/// Map a §2.5.2.15 channel configuration onto oxideav-core's canonical
+/// [`ChannelLayout`] vocabulary, together with the per-plane source
+/// order.
+///
+/// The §2.5 presentation order (L, R, [C], [LS, RS | S]) matches the
+/// core layouts' canonical order except that core places LFE at its
+/// BS.775 slot (e.g. index 3 in 5.1), so only the LFE plane is
+/// re-ordered. Configurations core has no named layout for (2/1's
+/// L, R, S; the +LFE variants of 3/0, 2/2, 2/1 and mono) fall back to
+/// [`ChannelLayout::DiscreteN`] with the LFE plane appended last —
+/// `DiscreteN` is core's documented catch-all for exactly this case.
+/// The main programme only: a second stereo programme and the
+/// multilingual channels are independent programmes with no slot in a
+/// single speaker layout, so the registry surface drops them (the
+/// direct [`crate::mc::decode_mc_stream`] API carries them all).
+fn mc_output_plan(config: &McConfig, lfe_present: bool, lfe_hold: bool) -> McOutputPlan {
+    use McPlaneSource::{LfeHold, Presentation as P};
+    let with_lfe = lfe_present && lfe_hold;
+    let (layout, sources): (ChannelLayout, Vec<McPlaneSource>) =
+        match (config.front, config.surround, with_lfe) {
+            (3, 2, false) => (
+                ChannelLayout::Surround50,
+                vec![P(0), P(1), P(2), P(3), P(4)],
+            ),
+            (3, 2, true) => (
+                ChannelLayout::Surround51,
+                vec![P(0), P(1), P(2), LfeHold, P(3), P(4)],
+            ),
+            (3, 1, false) => (ChannelLayout::Surround40, vec![P(0), P(1), P(2), P(3)]),
+            (3, 1, true) => (
+                ChannelLayout::Surround41,
+                vec![P(0), P(1), P(2), P(3), LfeHold],
+            ),
+            (3, 0, false) => (ChannelLayout::Surround30, vec![P(0), P(1), P(2)]),
+            (3, 0, true) => (ChannelLayout::DiscreteN(4), vec![P(0), P(1), P(2), LfeHold]),
+            (2, 2, false) => (ChannelLayout::Quad, vec![P(0), P(1), P(2), P(3)]),
+            (2, 2, true) => (
+                ChannelLayout::DiscreteN(5),
+                vec![P(0), P(1), P(2), P(3), LfeHold],
+            ),
+            (2, 1, false) => (ChannelLayout::DiscreteN(3), vec![P(0), P(1), P(2)]),
+            (2, 1, true) => (ChannelLayout::DiscreteN(4), vec![P(0), P(1), P(2), LfeHold]),
+            (2, 0, false) => (ChannelLayout::Stereo, vec![P(0), P(1)]),
+            (2, 0, true) => (ChannelLayout::Stereo21, vec![P(0), P(1), LfeHold]),
+            (1, 0, false) => (ChannelLayout::Mono, vec![P(0)]),
+            (1, 0, true) => (ChannelLayout::DiscreteN(2), vec![P(0), LfeHold]),
+            // §2.5.2.15 derives front ∈ {1, 2, 3} and surround ∈
+            // {0, 1, 2}; front == 1 only for a mono base (surround 0).
+            other => unreachable!("§2.5.2.15 rules out configuration {other:?}"),
+        };
+    McOutputPlan { layout, sources }
+}
+
+/// Parse the `mc` codec option.
+fn mc_mode_opt(s: Option<&str>) -> Result<McMode> {
+    match s {
+        None | Some("off") | Some("false") | Some("0") => Ok(McMode::Off),
+        Some("on") | Some("true") | Some("1") => Ok(McMode::On),
+        Some("auto") => Ok(McMode::Auto),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: mc={other:?} not recognised (off / on / auto)"
+        ))),
+    }
+}
+
+/// Parse the `mc_lfe` codec option: what to do with the §2.5.3.2.4
+/// LFE channel, whose native rate is `Fs / 96`.
+///
+/// * `"drop"` (default) — omit the LFE plane; the output layout is the
+///   full-bandwidth set (5.0 instead of 5.1). The native-rate LFE is
+///   available through the direct [`crate::mc::decode_mc_stream`] API.
+/// * `"hold"` — zero-order-hold each LFE sample ×96 up to the frame
+///   rate so the plane fits the single-`sample_rate` [`AudioFrame`]
+///   contract. The standard fixes only the transmitted format
+///   (block-companded PCM at `Fs / 96`); bringing it to the
+///   presentation rate is a decoder-side rendering choice, and the
+///   hold is the interpolation-free one.
+fn mc_lfe_hold_opt(s: Option<&str>) -> Result<bool> {
+    match s {
+        None | Some("drop") => Ok(false),
+        Some("hold") => Ok(true),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: mc_lfe={other:?} not recognised (drop / hold)"
+        ))),
+    }
+}
+
 /// Build a boxed MPEG-1 Audio Layer II [`Decoder`] from `params`.
 ///
 /// `params.sample_rate` (32_000 / 44_100 / 48_000) and `params.channels`
@@ -83,19 +210,41 @@ pub const WAVE_FORMAT_MPEG: u16 = 0x0050;
 /// each Layer II frame header on `send_packet`, so the values supplied
 /// here are a hint used only to seed `output_params()`.
 ///
+/// # Codec options
+///
+/// * `mc` — the ISO/IEC 13818-3 §2.5 multichannel extension: `"off"`
+///   (default — decode the MPEG-1-compatible base pair, the
+///   historical behaviour), `"on"` (require the extension; its
+///   presentation channels become the output planes, ordered per the
+///   matching [`ChannelLayout`]) or `"auto"` (probe the first packet
+///   per the §2.5.3.1 CRC rule and latch). Each packet must carry the
+///   whole extension in its frame — a stream whose extension spills
+///   into a §2.5.1.5 extension bit stream cannot ride the one-frame-
+///   per-packet interface and is reported as an error (`mc=on`) or
+///   decoded as the compatible base pair (`mc=auto`). A second stereo
+///   programme and multilingual channels are dropped (independent
+///   programmes with no slot in one speaker layout); use
+///   [`crate::mc::decode_mc_stream`] to reach them.
+/// * `mc_lfe` — `"drop"` (default) or `"hold"`; see [`mc_lfe_hold_opt`].
+///
 /// # Errors
 ///
 /// Returns [`Error::invalid`] when `channels` is supplied and not 1 or
-/// 2. The §2.4.2.3 mode field encodes at most two channels
-/// (single/dual/stereo/joint), so `channels >= 3` is unrepresentable on
-/// the wire and is rejected at build time. `sample_rate` is optional
-/// (defaults to 44_100 when absent): the real value is re-read from
-/// every frame header anyway.
+/// 2 while `mc=off`. The §2.4.2.3 mode field encodes at most two
+/// channels, so without the §2.5 extension `channels >= 3` is
+/// unrepresentable on the wire and rejected at build time; with
+/// `mc=on` / `mc=auto` the hint may name the expected presentation
+/// count (≤ 8). `sample_rate` is optional (defaults to 44_100 when
+/// absent): the real value is re-read from every frame header anyway.
 pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+    let mc_mode = mc_mode_opt(params.options.get("mc"))?;
+    let mc_lfe_hold = mc_lfe_hold_opt(params.options.get("mc_lfe"))?;
     let channels = params.channels.unwrap_or(1);
-    if channels != 1 && channels != 2 {
+    let channel_cap = if mc_mode == McMode::Off { 2 } else { 8 };
+    if channels == 0 || channels > channel_cap {
         return Err(Error::invalid(format!(
-            "oxideav-mp2: decoder supports 1 or 2 channels (channels={channels})"
+            "oxideav-mp2: decoder supports 1..={channel_cap} channels with mc={mc_mode:?} \
+             (channels={channels})"
         )));
     }
     let sample_rate = params.sample_rate.unwrap_or(44_100);
@@ -106,9 +255,11 @@ pub fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     out_params.sample_format = Some(SampleFormat::S16);
     out_params.tag = Some(CodecTag::wave_format(WAVE_FORMAT_MPEG));
 
-    Ok(Box::new(Mp2CoreDecoder::new(
+    Ok(Box::new(Mp2CoreDecoder::new_with_mc(
         CodecId::new(CODEC_ID_STR),
         out_params,
+        mc_mode,
+        mc_lfe_hold,
     )))
 }
 
@@ -131,6 +282,17 @@ pub struct Mp2CoreDecoder {
     state: FrameDecodeState,
     pending_frames: VecDeque<AudioFrame>,
     eof: bool,
+    /// §2.5 multichannel handling (`mc` codec option).
+    mc_mode: McMode,
+    /// `mc_lfe=hold` — zero-order-hold the LFE plane to full rate.
+    mc_lfe_hold: bool,
+    /// `mc=auto`: the latched probe verdict (None until the first
+    /// packet decides).
+    mc_active: Option<bool>,
+    /// §2.5 cross-frame decode state (filterbanks, predictor history).
+    mc_state: McDecodeState,
+    /// Output shape decided from the first multichannel frame.
+    mc_plan: Option<McOutputPlan>,
 }
 
 impl std::fmt::Debug for Mp2CoreDecoder {
@@ -144,14 +306,33 @@ impl std::fmt::Debug for Mp2CoreDecoder {
 }
 
 impl Mp2CoreDecoder {
-    fn new(codec_id: CodecId, output: CodecParameters) -> Self {
+    fn new_with_mc(
+        codec_id: CodecId,
+        output: CodecParameters,
+        mc_mode: McMode,
+        mc_lfe_hold: bool,
+    ) -> Self {
         Self {
             codec_id,
             output,
             state: FrameDecodeState::new(),
             pending_frames: VecDeque::new(),
             eof: false,
+            mc_mode,
+            mc_lfe_hold,
+            mc_active: None,
+            mc_state: McDecodeState::new(),
+            mc_plan: None,
         }
+    }
+
+    /// Stream parameters describing the decoder's output, refreshed
+    /// from the wire after each decoded packet. For a multichannel
+    /// stream (`mc=on` / a positive `mc=auto` probe) `channels` and
+    /// `channel_layout` carry the presentation layout the planes of
+    /// every emitted [`AudioFrame`] follow.
+    pub fn output_params(&self) -> &CodecParameters {
+        &self.output
     }
 
     /// Decode one packet's worth of Layer II data, transparently handling
@@ -212,6 +393,70 @@ impl Mp2CoreDecoder {
     /// which measurably widens the conformance error against a
     /// reference decoder's output; the `2^15` scale is the standard
     /// fractional-to-integer convention.)
+    /// Decode one packet as a §2.5 multichannel frame and build the
+    /// output planes per the stream's [`McOutputPlan`].
+    fn decode_mc_packet(&mut self, data: &[u8], pts: Option<i64>) -> Result<AudioFrame> {
+        let (frame, _ext) =
+            decode_mc_frame_with(data, None, &mut self.mc_state).map_err(Self::mc_error_to_core)?;
+        let plan = match &self.mc_plan {
+            Some(p) => p,
+            None => {
+                let plan = mc_output_plan(&frame.config, frame.lfe.is_some(), self.mc_lfe_hold);
+                self.mc_plan = Some(plan);
+                self.mc_plan.as_ref().expect("just set")
+            }
+        };
+        let mut data_planes = Vec::with_capacity(plan.sources.len());
+        for src in &plan.sources {
+            let plane = match src {
+                McPlaneSource::Presentation(i) => {
+                    let ch = frame.channels.get(*i).ok_or_else(|| {
+                        Error::other(format!(
+                            "oxideav-mp2: mc frame lost presentation channel {i} mid-stream"
+                        ))
+                    })?;
+                    Self::float_plane_to_s16_le(ch)
+                }
+                McPlaneSource::LfeHold => Self::float_plane_to_s16_le(&Self::lfe_hold(&frame)?),
+            };
+            data_planes.push(plane);
+        }
+        self.output.sample_rate = Some(frame.base_header.sample_rate);
+        self.output.channels = Some(plan.sources.len() as u16);
+        self.output.channel_layout = Some(plan.layout);
+        Ok(AudioFrame {
+            samples: PCM_SAMPLES_PER_CHANNEL as u32,
+            pts,
+            data: data_planes,
+        })
+    }
+
+    /// Zero-order-hold the frame's 12 native-rate LFE samples ×96 up
+    /// to the full sampling rate (`mc_lfe=hold`).
+    fn lfe_hold(frame: &McDecodedFrame) -> Result<Vec<f64>> {
+        let lfe = frame
+            .lfe
+            .as_ref()
+            .ok_or_else(|| Error::other("oxideav-mp2: mc frame lost its LFE channel mid-stream"))?;
+        let factor = PCM_SAMPLES_PER_CHANNEL / lfe.len();
+        let mut out = Vec::with_capacity(PCM_SAMPLES_PER_CHANNEL);
+        for &s in lfe {
+            out.resize(out.len() + factor, s);
+        }
+        Ok(out)
+    }
+
+    fn mc_error_to_core(e: McError) -> Error {
+        match e {
+            McError::MissingExtFrame => Error::other(
+                "oxideav-mp2: this multichannel stream continues in a §2.5.1.5 extension bit \
+                 stream, which the one-frame-per-packet interface cannot carry; use \
+                 mc::decode_mc_stream with the extension stream bytes",
+            ),
+            other => Error::other(format!("oxideav-mp2: mc decode: {other}")),
+        }
+    }
+
     fn float_plane_to_s16_le(plane: &[f64]) -> Vec<u8> {
         const FULL_SCALE: f64 = 32768.0; // 2^15 — MSB == −1.0 (§2.4.3.3.4)
         let mut bytes = Vec::with_capacity(plane.len() * 2);
@@ -236,6 +481,33 @@ impl Decoder for Mp2CoreDecoder {
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
         if self.eof {
             return Err(Error::other("oxideav-mp2: cannot send_packet after flush"));
+        }
+        let mc = match self.mc_mode {
+            McMode::Off => false,
+            McMode::On => true,
+            McMode::Auto => match self.mc_active {
+                Some(v) => v,
+                None => {
+                    // §2.5.3.1: "The MPEG-1 ancillary data field is
+                    // initially assumed to contain the coded
+                    // multichannel extension. If the mandatory
+                    // CRC-check yields a valid result, then
+                    // multichannel decoding will be started." A stream
+                    // whose extension continues in a §2.5.1.5
+                    // extension bit stream cannot ride the packet
+                    // interface, so it latches to the base decode
+                    // (the compatible pair is a valid rendering).
+                    let v =
+                        decode_mc_frame_with(&packet.data, None, &mut McDecodeState::new()).is_ok();
+                    self.mc_active = Some(v);
+                    v
+                }
+            },
+        };
+        if mc {
+            let frame = self.decode_mc_packet(&packet.data, packet.pts)?;
+            self.pending_frames.push_back(frame);
+            return Ok(());
         }
         let decoded = self.decode_one_packet(&packet.data)?;
         self.refresh_output_params(&decoded.header);
@@ -271,6 +543,10 @@ impl Decoder for Mp2CoreDecoder {
 
     fn reset(&mut self) -> Result<()> {
         self.state.reset();
+        // §2.5 filterbanks + predictor history re-zero on seek; the
+        // `mc=auto` verdict and the output plan describe the *stream*
+        // and survive the seek.
+        self.mc_state.reset();
         self.pending_frames.clear();
         self.eof = false;
         Ok(())
@@ -741,6 +1017,285 @@ mod tests {
         let ctx = ProbeContext::new(&tag);
         let resolved = reg.resolve_tag_ref(&ctx).expect("A_MPEG/L2 tag resolves");
         assert_eq!(resolved.as_str(), CODEC_ID_STR);
+    }
+
+    // ───────────────────── §2.5 multichannel surface ─────────────────────
+
+    /// Encode a short 3/2 (+ optional LFE) multichannel stream with the
+    /// crate's own §2.5 encoder and split it into per-frame packets.
+    fn mc_stream_packets(lfe: bool, n_frames: usize) -> (Vec<Packet>, Vec<Vec<f64>>) {
+        use crate::mc_encode::{encode_mc_all_frames, McEncodeConfig};
+
+        let header = FrameHeader {
+            lsf: false,
+            protection_bit: true,
+            bit_rate: 384_000,
+            sample_rate: 48_000,
+            padding: false,
+            private_bit: false,
+            mode: crate::header::Mode::Stereo,
+            mode_extension: crate::header::ModeExtension::Bound4,
+            copyright: false,
+            original: true,
+            emphasis: crate::header::Emphasis::None,
+        };
+        let cfg = McEncodeConfig {
+            lfe,
+            ..McEncodeConfig::default()
+        };
+        let tones = [430.0, 700.0, 1_150.0, 1_800.0, 2_600.0];
+        let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+        let pcm: Vec<Vec<f64>> = tones
+            .iter()
+            .map(|f| {
+                let w = 2.0 * std::f64::consts::PI * f / 48_000.0;
+                (0..total).map(|i| 0.3 * (w * i as f64).sin()).collect()
+            })
+            .collect();
+        let lfe_in: Vec<f64> = (0..n_frames * crate::mc::LFE_SAMPLES_PER_FRAME)
+            .map(|i| 0.5 * (i as f64 * 0.37).sin())
+            .collect();
+        let stream =
+            encode_mc_all_frames(&header, &cfg, &pcm, lfe.then_some(lfe_in.as_slice())).unwrap();
+        (split_into_packets(&stream), pcm)
+    }
+
+    fn mc_decoder_params(mc: &str, mc_lfe: Option<&str>) -> CodecParameters {
+        let mut p = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        p.sample_rate = Some(48_000);
+        p.channels = Some(5);
+        p.sample_format = Some(SampleFormat::S16);
+        p.options.insert("mc", mc);
+        if let Some(v) = mc_lfe {
+            p.options.insert("mc_lfe", v);
+        }
+        p
+    }
+
+    #[test]
+    fn mc_on_decodes_five_presentation_planes() {
+        let (packets, _) = mc_stream_packets(false, 3);
+        let mut dec = make_decoder(&mc_decoder_params("on", None)).expect("mc decoder");
+        for pkt in &packets {
+            dec.send_packet(pkt).expect("send mc packet");
+            let Frame::Audio(a) = dec.receive_frame().expect("mc frame") else {
+                panic!("expected AudioFrame");
+            };
+            assert_eq!(a.samples as usize, PCM_SAMPLES_PER_CHANNEL);
+            assert_eq!(a.data.len(), 5, "Surround50 presentation planes");
+            for plane in &a.data {
+                assert_eq!(plane.len(), PCM_SAMPLES_PER_CHANNEL * 2);
+            }
+        }
+    }
+
+    #[test]
+    fn mc_planes_match_the_direct_mc_decode_bit_for_bit() {
+        // The registry surface must be a re-ordering of
+        // mc::decode_mc_stream's output, nothing more. For 3/2 without
+        // LFE the order is the identity (Surround50 == §2.5
+        // presentation order).
+        let (packets, _) = mc_stream_packets(false, 3);
+        let stream: Vec<u8> = packets.iter().flat_map(|p| p.data.clone()).collect();
+        let direct = crate::mc::decode_mc_stream(&stream, None).expect("direct decode");
+
+        let mut dec = make_decoder(&mc_decoder_params("on", None)).expect("mc decoder");
+        let mut got: Vec<Vec<u8>> = vec![Vec::new(); 5];
+        for pkt in &packets {
+            dec.send_packet(pkt).unwrap();
+            let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+                panic!("expected AudioFrame");
+            };
+            for (ch, plane) in a.data.iter().enumerate() {
+                got[ch].extend_from_slice(plane);
+            }
+        }
+        for (ch, plane) in got.iter().enumerate() {
+            let want = Mp2CoreDecoder::float_plane_to_s16_le(&direct.channels[ch]);
+            assert_eq!(*plane, want, "plane {ch}");
+        }
+    }
+
+    #[test]
+    fn mc_lfe_hold_orders_the_51_layout_and_holds_each_sample_96_times() {
+        let (packets, _) = mc_stream_packets(true, 2);
+        let stream: Vec<u8> = packets.iter().flat_map(|p| p.data.clone()).collect();
+        let direct = crate::mc::decode_mc_stream(&stream, None).expect("direct decode");
+        let lfe_native = direct.lfe.as_ref().expect("LFE present");
+
+        let mut dec = make_decoder(&mc_decoder_params("on", Some("hold"))).expect("mc decoder");
+        let mut planes: Vec<Vec<u8>> = vec![Vec::new(); 6];
+        for pkt in &packets {
+            dec.send_packet(pkt).unwrap();
+            let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+                panic!("expected AudioFrame");
+            };
+            assert_eq!(a.data.len(), 6, "Surround51 planes");
+            for (ch, plane) in a.data.iter().enumerate() {
+                planes[ch].extend_from_slice(plane);
+            }
+        }
+        // Surround51 order: L R C LFE Ls Rs — plane 3 is the held LFE,
+        // planes 4/5 are the §2.5 presentation channels 3/4.
+        for (out_idx, mc_idx) in [(0usize, 0usize), (1, 1), (2, 2), (4, 3), (5, 4)] {
+            let want = Mp2CoreDecoder::float_plane_to_s16_le(&direct.channels[mc_idx]);
+            assert_eq!(planes[out_idx], want, "plane {out_idx}");
+        }
+        // The LFE plane repeats each native-rate sample 96×.
+        let lfe_plane: Vec<i16> = planes[3]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(lfe_plane.len(), lfe_native.len() * 96);
+        for (i, &s) in lfe_native.iter().enumerate() {
+            let want = (s * 32768.0)
+                .round()
+                .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16;
+            for k in 0..96 {
+                assert_eq!(lfe_plane[i * 96 + k], want, "LFE run {i} sample {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn mc_auto_latches_per_stream() {
+        // A multichannel stream latches to 5 planes…
+        let (packets, _) = mc_stream_packets(false, 2);
+        let mut dec = make_decoder(&mc_decoder_params("auto", None)).unwrap();
+        dec.send_packet(&packets[0]).unwrap();
+        let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+            panic!("expected AudioFrame");
+        };
+        assert_eq!(a.data.len(), 5);
+
+        // …and a plain stereo stream latches to the base pair.
+        let Some(buf) = fixture_bytes() else { return };
+        let plain = split_into_packets(&buf);
+        let mut dec = make_decoder(&mc_decoder_params("auto", None)).unwrap();
+        dec.send_packet(&plain[0]).unwrap();
+        let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+            panic!("expected AudioFrame");
+        };
+        assert_eq!(a.data.len(), 2);
+    }
+
+    #[test]
+    fn mc_off_default_keeps_the_historical_base_decode() {
+        // Without the option the same multichannel packets decode as
+        // the MPEG-1-compatible pair — backwards compatible.
+        let (packets, _) = mc_stream_packets(false, 2);
+        let mut dec = make_decoder(&build_decoder_params(48_000, 2)).unwrap();
+        dec.send_packet(&packets[0]).unwrap();
+        let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+            panic!("expected AudioFrame");
+        };
+        assert_eq!(a.data.len(), 2);
+    }
+
+    #[test]
+    fn mc_on_rejects_a_stream_without_the_extension() {
+        let Some(buf) = fixture_bytes() else { return };
+        let packets = split_into_packets(&buf);
+        let mut dec = make_decoder(&mc_decoder_params("on", None)).unwrap();
+        let err = dec.send_packet(&packets[0]).unwrap_err();
+        assert!(format!("{err}").contains("mc decode"));
+    }
+
+    #[test]
+    fn mc_options_are_validated() {
+        let mut p = mc_decoder_params("sideways", None);
+        assert!(make_decoder(&p).is_err());
+        p = mc_decoder_params("on", Some("resample"));
+        assert!(make_decoder(&p).is_err());
+        // channels > 2 requires an mc mode.
+        let mut p = build_decoder_params(48_000, 2);
+        p.channels = Some(5);
+        assert!(make_decoder(&p).is_err());
+    }
+
+    #[test]
+    fn mc_output_plan_covers_every_configuration() {
+        use crate::mc::{McConfig, McHeader};
+        let hdr = |centre, surround| McHeader {
+            ext_bit_stream_present: false,
+            n_ad_bytes: 0,
+            centre,
+            surround,
+            lfe: false,
+            audio_mix: false,
+            dematrix_procedure: 0,
+            no_of_multi_lingual_ch: 0,
+            multi_lingual_fs_half: false,
+            multi_lingual_layer3: false,
+            copyright_identification_bit: false,
+            copyright_identification_start: false,
+        };
+        use crate::mc::{Centre, Surround};
+        let cases: [(Centre, Surround, ChannelLayout, ChannelLayout); 6] = [
+            (
+                Centre::Present,
+                Surround::Stereo,
+                ChannelLayout::Surround50,
+                ChannelLayout::Surround51,
+            ),
+            (
+                Centre::Present,
+                Surround::Mono,
+                ChannelLayout::Surround40,
+                ChannelLayout::Surround41,
+            ),
+            (
+                Centre::Present,
+                Surround::None,
+                ChannelLayout::Surround30,
+                ChannelLayout::DiscreteN(4),
+            ),
+            (
+                Centre::None,
+                Surround::Stereo,
+                ChannelLayout::Quad,
+                ChannelLayout::DiscreteN(5),
+            ),
+            (
+                Centre::None,
+                Surround::Mono,
+                ChannelLayout::DiscreteN(3),
+                ChannelLayout::DiscreteN(4),
+            ),
+            (
+                Centre::None,
+                Surround::None,
+                ChannelLayout::Stereo,
+                ChannelLayout::Stereo21,
+            ),
+        ];
+        for (centre, surround, plain, with_lfe) in cases {
+            let cfg = McConfig::from_header(&hdr(centre, surround), crate::header::Mode::Stereo);
+            let n = cfg.layout().len();
+            let p = mc_output_plan(&cfg, false, false);
+            assert_eq!(p.layout, plain, "{centre:?}/{surround:?}");
+            assert_eq!(p.sources.len(), n);
+            assert_eq!(
+                usize::from(p.layout.channel_count()),
+                n,
+                "{centre:?}/{surround:?}"
+            );
+            // LFE present but dropped: same as plain.
+            let p = mc_output_plan(&cfg, true, false);
+            assert_eq!(p.layout, plain, "{centre:?}/{surround:?} drop");
+            // LFE held: one extra plane, layout with an LFE slot.
+            let p = mc_output_plan(&cfg, true, true);
+            assert_eq!(p.layout, with_lfe, "{centre:?}/{surround:?} hold");
+            assert_eq!(p.sources.len(), n + 1);
+            assert_eq!(usize::from(p.layout.channel_count()), n + 1);
+            assert_eq!(
+                p.sources
+                    .iter()
+                    .filter(|s| **s == McPlaneSource::LfeHold)
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

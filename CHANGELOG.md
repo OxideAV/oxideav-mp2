@@ -118,6 +118,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rejected_not_panicking`), and re-fuzzed clean (bounded local
   session: ≈ 463 k execs, zero findings).
 
+- **Multichannel PCM through the registered `Decoder` — the r444
+  registry-layout design landed (`src/codec_decoder.rs`).**
+  `make_decoder` gains the `mc` codec option (`off` default — the
+  historical base-pair decode; `on` — require the §2.5 extension;
+  `auto` — latch the §2.5.3.1 CRC-detection verdict from the first
+  packet) and `mc_lfe` (`drop` default / `hold`). Multichannel output
+  planes follow **oxideav-core's canonical `ChannelLayout` order**,
+  announced through `output_params().channel_layout`: 3/2 →
+  `Surround50`, 3/2+LFE → `Surround51` (LFE re-slotted to the BS.775
+  index 3), 3/1 → `Surround40` (+LFE `Surround41`), 2/2 → `Quad`,
+  3/0 → `Surround30`, 2/0+LFE → `Stereo21`, and the configurations
+  core has no named layout for (2/1's L,R,S and the remaining +LFE
+  variants) → the documented `DiscreteN` catch-all with LFE appended
+  — **no new oxideav-core surface required**. `mc_lfe=hold`
+  zero-order-holds each native `Fs/96` LFE sample ×96 (the standard
+  fixes only the transmitted format; the hold is the
+  interpolation-free presentation choice — `drop` keeps the 5.0 set
+  and the native-rate LFE stays reachable via `decode_mc_stream`).
+  Second-stereo / multilingual programmes are dropped from the
+  single-layout registry surface (direct API carries them). Tests pin
+  the full config × layout map (channel counts equal
+  `ChannelLayout::channel_count`), bit-exact plane equality against
+  the direct `decode_mc_stream` output, the 5.1 LFE slot ordering and
+  ×96 hold runs, `auto` latching on both stream kinds, `mc=on`
+  rejection of extension-less streams, option validation, and that
+  the default stays byte-identical to the historical behaviour.
+
 - **§2.5 encoder validated on official ISO/IEC 13818-4 programme
   material as oracle input
   (`tests/iso13818_4_mc_encode_oracle.rs`)** — env-gated on
