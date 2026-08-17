@@ -118,6 +118,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rejected_not_panicking`), and re-fuzzed clean (bounded local
   session: ≈ 463 k execs, zero findings).
 
+- **§2.5.3.2.1.3 multichannel prediction on the encode side
+  (`McEncodeConfig::prediction`, registry option `mc_prediction`;
+  default off).** Per subband group 0..7 the encoder fits one
+  first-order, zero-delay predictor per (transmission channel,
+  compatible source T0/T1) by least squares against the encoder-side
+  `Lo`/`Ro` subband signals, quantizes the coefficients to the wire
+  grid `(v − 127)/32`, and — where the *quantized* predictors win
+  ≥ 10 % of the group's residual energy — transmits the prediction
+  error with the matching `mc_prediction` / `predsi` / `delay_comp` /
+  coefficient fields (scalefactors and allocation then describe the
+  error signal). The decoder predicts from its requantised pair, so
+  the encoder-side unquantized fit differs by at most the base pair's
+  quantization noise; the §2.5.2.15 election is the encoder's to
+  make. Pinned: the wire-grid quantizer round-trips all 256 values, a
+  planted grid-exact linear relation is recovered with a zero
+  residual and the exact `extra_bits` cost, an enabled group always
+  carries a measured ≥ 10 % energy win (an off group's samples stay
+  untouched), correlated 3/2 material engages prediction in every
+  frame and still meets the reconstruction envelope through the
+  crate's own decoder, and the official-material oracle sweep runs
+  both elections against the same SNR floors.
+
 - **Multichannel encode through the registered `Encoder`
   (`src/codec_encoder.rs`).** `make_encoder` now accepts
   `channels >= 3`, mapping `params.channel_layout` (falling back to

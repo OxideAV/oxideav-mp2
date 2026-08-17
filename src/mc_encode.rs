@@ -184,6 +184,19 @@ pub struct McEncodeConfig {
     /// their channel counts (`nmch / (2 + nmch)` to the extension,
     /// plus the fixed LFE cost).
     pub mc_bits: Option<u32>,
+    /// §2.5.3.2.1.3 **multichannel prediction**: when enabled the
+    /// encoder fits one first-order, zero-delay predictor per
+    /// (subband group 0..7, transmission channel, compatible source
+    /// `T0`/`T1`) by least squares, quantizes the coefficients to the
+    /// wire grid `(v − 127)/32`, and transmits the prediction *error*
+    /// in the subbands whose group the fit measurably wins
+    /// (≥ 10 % residual-energy reduction). The predictors are fitted
+    /// against the encoder's unquantized `Lo`/`Ro` subband signals;
+    /// the decoder predicts from its requantised pair, so the residual
+    /// mismatch is bounded by the base pair's quantization noise —
+    /// the §2.5.3.2.1.3 decode arithmetic is what is normative, the
+    /// election is the encoder's (§2.5.2.15 leaves it free).
+    pub prediction: bool,
 }
 
 impl Default for McEncodeConfig {
@@ -196,6 +209,7 @@ impl Default for McEncodeConfig {
             dematrix_procedure: 0,
             lfe_allocation: 7,
             mc_bits: None,
+            prediction: false,
         }
     }
 }
@@ -273,6 +287,11 @@ pub struct McEncodeState {
     base: EncodeFrameState,
     tx_fb: Vec<AnalysisFilterbank>,
     tx_hist: Vec<Vec<f64>>,
+    /// Mirror filterbanks producing the encoder-side `T0`/`T1`
+    /// subband signals the §2.5.3.2.1.3 predictors are fitted
+    /// against (fed the same `Lo`/`Ro` PCM as the base encode, so
+    /// their X ring buffers stay in lockstep with it).
+    t01_fb: Vec<AnalysisFilterbank>,
 }
 
 impl McEncodeState {
@@ -284,7 +303,7 @@ impl McEncodeState {
     /// Re-zero everything (seek / discontinuity).
     pub fn reset(&mut self) {
         self.base.reset();
-        for fb in &mut self.tx_fb {
+        for fb in self.tx_fb.iter_mut().chain(self.t01_fb.iter_mut()) {
             fb.reset();
         }
         for h in &mut self.tx_hist {
@@ -300,6 +319,145 @@ impl McEncodeState {
             self.tx_hist.push(vec![0.0; MODEL1_WINDOW_DELAY_SAMPLES]);
         }
     }
+
+    fn ensure_t01_channels(&mut self) {
+        while self.t01_fb.len() < 2 {
+            self.t01_fb.push(AnalysisFilterbank::new());
+        }
+    }
+}
+
+/// One frame's §2.5.3.2.1.3 prediction election: per subband group
+/// 0..7, whether prediction is signalled, and the quantized wire
+/// coefficient `v` of predictor `px = 2·mch + src` (`127` = zero =
+/// `predsi 0`). All predictors are first-order with zero delay
+/// compensation.
+struct PredPlan {
+    on: [bool; 8],
+    coef_v: [[u8; 6]; 8],
+    npred: usize,
+}
+
+impl PredPlan {
+    fn any(&self) -> bool {
+        self.on.iter().any(|&b| b)
+    }
+
+    fn predsi(&self, sbgr: usize, px: usize) -> u8 {
+        u8::from(self.coef_v[sbgr][px] != 127)
+    }
+
+    /// Extra extension bits this election costs: the 8 per-sbgr flags
+    /// plus, per enabled group, `2·npred` predsi bits and
+    /// `3 + 8` bits per transmitted coefficient.
+    fn extra_bits(&self) -> u32 {
+        let mut bits = 8u32;
+        for sbgr in 0..8 {
+            if !self.on[sbgr] {
+                continue;
+            }
+            bits += 2 * self.npred as u32;
+            for px in 0..self.npred {
+                if self.predsi(sbgr, px) != 0 {
+                    bits += 3 + 8;
+                }
+            }
+        }
+        bits
+    }
+}
+
+/// Quantize a predictor coefficient to the §2.5.3.2.1.3 wire grid
+/// `c = (v − 127)/32`, `v ∈ 0..=255`.
+fn quantize_pred_coef(c: f64) -> u8 {
+    (c * 32.0 + 127.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Fit the §2.5.3.2.1.3 predictors for subband groups 0..7 and, where
+/// a group measurably wins (≥ 10 % residual-energy reduction across
+/// its channels), replace the transmission channels' subband samples
+/// with the prediction *error*. Returns the election.
+fn fit_and_apply_prediction(
+    tx_sub: &mut [Box<[[f64; SLOTS]; NUM_SUBBANDS]>],
+    t01: &[Box<[[f64; SLOTS]; NUM_SUBBANDS]>],
+) -> PredPlan {
+    let nmch = tx_sub.len();
+    let mut plan = PredPlan {
+        on: [false; 8],
+        coef_v: [[127u8; 6]; 8],
+        npred: 2 * nmch,
+    };
+    for sbgr in 0..8usize {
+        let sb = sbgr; // groups 0..7 are single subbands (§2.5.2.15)
+        let a = &t01[0][sb];
+        let b = &t01[1][sb];
+        let (aa, bb, ab) = {
+            let (mut aa, mut bb, mut ab) = (0.0f64, 0.0f64, 0.0f64);
+            for t in 0..SLOTS {
+                aa += a[t] * a[t];
+                bb += b[t] * b[t];
+                ab += a[t] * b[t];
+            }
+            (aa, bb, ab)
+        };
+        let det = aa * bb - ab * ab;
+        let mut orig_total = 0.0f64;
+        let mut resid_total = 0.0f64;
+        let mut coefs = [[0.0f64; 2]; 5];
+        for (mch, tx_ch) in tx_sub.iter().enumerate() {
+            let x = &tx_ch[sb];
+            let (mut ax, mut bx, mut xx) = (0.0f64, 0.0f64, 0.0f64);
+            for t in 0..SLOTS {
+                ax += a[t] * x[t];
+                bx += b[t] * x[t];
+                xx += x[t] * x[t];
+            }
+            // Solve the 2×2 normal equations; a near-singular system
+            // (silent or mono-collapsed base pair) keeps zero
+            // coefficients.
+            let (mut c0, mut c1) = if det.abs() > 1e-18 {
+                ((bb * ax - ab * bx) / det, (aa * bx - ab * ax) / det)
+            } else {
+                (0.0, 0.0)
+            };
+            // Quantize to the wire grid, then measure the *quantized*
+            // predictor's residual — that is what the decoder adds.
+            c0 = f64::from(i32::from(quantize_pred_coef(c0)) - 127) / 32.0;
+            c1 = f64::from(i32::from(quantize_pred_coef(c1)) - 127) / 32.0;
+            let mut resid = 0.0f64;
+            for t in 0..SLOTS {
+                let e = x[t] - c0 * a[t] - c1 * b[t];
+                resid += e * e;
+            }
+            // Per-channel guard: keep the predictor only when it
+            // helps this channel.
+            if resid <= xx {
+                coefs[mch] = [c0, c1];
+                orig_total += xx;
+                resid_total += resid;
+            } else {
+                coefs[mch] = [0.0, 0.0];
+                orig_total += xx;
+                resid_total += xx;
+            }
+        }
+        // Group election: ≥ 10 % energy win across the channels.
+        if orig_total > 0.0 && resid_total <= 0.9 * orig_total {
+            plan.on[sbgr] = true;
+            for (mch, tx_ch) in tx_sub.iter_mut().enumerate() {
+                let [c0, c1] = coefs[mch];
+                plan.coef_v[sbgr][2 * mch] = quantize_pred_coef(c0);
+                plan.coef_v[sbgr][2 * mch + 1] = quantize_pred_coef(c1);
+                if c0 == 0.0 && c1 == 0.0 {
+                    continue;
+                }
+                for t in 0..SLOTS {
+                    tx_ch[sb][t] -= c0 * a[t] + c1 * b[t];
+                }
+            }
+        }
+    }
+    plan
 }
 
 /// §2.5.3.3 matrixing constants `(α, β, γ)` for a dematrix procedure.
@@ -588,6 +746,7 @@ pub fn encode_mc_frame_with(
     let msblimit = mc_table.sblimit();
 
     state.ensure_tx_channels(nmch);
+    #[allow(unused_mut)]
     let mut tx_sub: Vec<Box<[[f64; SLOTS]; NUM_SUBBANDS]>> = Vec::with_capacity(nmch);
     for (m, ch) in tx_pcm.iter().enumerate() {
         let fb = &mut state.tx_fb[m];
@@ -603,6 +762,35 @@ pub fn encode_mc_frame_with(
         }
         tx_sub.push(sub);
     }
+
+    // ---- §2.5.3.2.1.3 multichannel prediction election ------------------
+    // Fit first-order zero-delay predictors of the weighted
+    // transmission channels from the encoder-side T0/T1 subband
+    // signals, and transmit the prediction error where a subband
+    // group measurably wins. Runs before scalefactor extraction so
+    // the wire scalefactors describe the transmitted (error) signal.
+    let pred_plan = if cfg.prediction && nmch > 0 {
+        state.ensure_t01_channels();
+        let mut t01_sub: Vec<Box<[[f64; SLOTS]; NUM_SUBBANDS]>> = Vec::with_capacity(2);
+        for (bch, ch) in base_pcm.iter().enumerate() {
+            let fb = &mut state.t01_fb[bch];
+            let mut sub = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+            let mut block = [0.0f64; NUM_SUBBANDS];
+            let mut out_block = [0.0f64; NUM_SUBBANDS];
+            for t in 0..SLOTS {
+                block.copy_from_slice(&ch[t * NUM_SUBBANDS..(t + 1) * NUM_SUBBANDS]);
+                fb.push_audio(&block, &mut out_block);
+                for sb in 0..NUM_SUBBANDS {
+                    sub[sb][t] = out_block[sb];
+                }
+            }
+            t01_sub.push(sub);
+        }
+        let plan = fit_and_apply_prediction(&mut tx_sub, &t01_sub);
+        plan.any().then_some(plan)
+    } else {
+        None
+    };
 
     // Per-channel scalefactors (also feeding the §D.1 Step-2 scf_max)
     // and scfsi selections.
@@ -648,6 +836,9 @@ pub fn encode_mc_frame_with(
     // status (tc_sbgr_select + dyn_cross_on + mc_prediction_on + the
     // single global tc_allocation) + allocation fields + the LFE block.
     let mut fixed: u32 = 16 + 16 + 3 + mc_cfg.tc_allocation_bits;
+    if let Some(plan) = &pred_plan {
+        fixed += plan.extra_bits();
+    }
     if cfg.lfe {
         fixed += 4 + 6 + 12 * lfe_nb;
     }
@@ -733,9 +924,20 @@ pub fn encode_mc_frame_with(
     // dynamic crosstalk, no prediction.
     w.write_u32(1, 1); // tc_sbgr_select
     w.write_u32(0, 1); // dyn_cross_on
-    w.write_u32(0, 1); // mc_prediction_on
+    w.write_u32(u32::from(pred_plan.is_some()), 1); // mc_prediction_on
     if mc_cfg.tc_allocation_bits > 0 {
         w.write_u32(0, mc_cfg.tc_allocation_bits);
+    }
+    if let Some(plan) = &pred_plan {
+        // §2.5.1.15: per-sbgr mc_prediction flag + predsi fields.
+        for sbgr in 0..8 {
+            w.write_u32(u32::from(plan.on[sbgr]), 1);
+            if plan.on[sbgr] {
+                for px in 0..plan.npred {
+                    w.write_u32(u32::from(plan.predsi(sbgr, px)), 2);
+                }
+            }
+        }
     }
     // mc_audio_data (§2.5.1.17).
     if cfg.lfe {
@@ -754,7 +956,21 @@ pub fn encode_mc_frame_with(
         }
     }
     let scfsi_end = w.bit_position();
-    // (no prediction coefficients — mc_prediction_on == '0')
+    if let Some(plan) = &pred_plan {
+        // §2.5.1.17: delay compensation + coefficients for every
+        // transmitted predictor (first-order, zero delay).
+        for sbgr in 0..8 {
+            if !plan.on[sbgr] {
+                continue;
+            }
+            for px in 0..plan.npred {
+                if plan.predsi(sbgr, px) != 0 {
+                    w.write_u32(0, 3); // delay_comp
+                    w.write_u32(u32::from(plan.coef_v[sbgr][px]), 8);
+                }
+            }
+        }
+    }
     if cfg.lfe {
         w.write_u32(u32::from(lf_scf), 6);
     }
@@ -999,6 +1215,107 @@ mod tests {
         assert_eq!(frame[0], 0b1111_1101);
         assert_eq!(frame[1], 0b0101_0111);
         assert_eq!(frame[2], 0xFF);
+    }
+
+    #[test]
+    fn pred_coef_quantizer_matches_the_wire_grid() {
+        // c = (v − 127)/32 round-trips for every representable value,
+        // clamps outside the grid, and 0 ↦ 127 (the predsi-0 sentinel).
+        assert_eq!(quantize_pred_coef(0.0), 127);
+        assert_eq!(quantize_pred_coef(1.0), 127 + 32);
+        assert_eq!(quantize_pred_coef(-1.0), 127 - 32);
+        assert_eq!(quantize_pred_coef(100.0), 255);
+        assert_eq!(quantize_pred_coef(-100.0), 0);
+        for v in 0u8..=255 {
+            let c = f64::from(i32::from(v) - 127) / 32.0;
+            assert_eq!(quantize_pred_coef(c), v, "v={v}");
+        }
+    }
+
+    #[test]
+    fn prediction_fit_recovers_a_planted_linear_relation() {
+        // Plant x = 0,5·a + 0,25·b (grid-exact coefficients) in every
+        // predictable subband: the fit must enable all eight groups,
+        // recover the coefficients, and leave a near-zero residual.
+        let mut a = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+        let mut b = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+        let mut x = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for sb in 0..8 {
+            for t in 0..SLOTS {
+                a[sb][t] = rand();
+                b[sb][t] = rand();
+                x[sb][t] = 0.5 * a[sb][t] + 0.25 * b[sb][t];
+            }
+        }
+        let mut tx = vec![x];
+        let t01 = vec![a, b];
+        let plan = fit_and_apply_prediction(&mut tx, &t01);
+        assert!(plan.any());
+        for sbgr in 0..8 {
+            assert!(plan.on[sbgr], "sbgr {sbgr}");
+            assert_eq!(plan.coef_v[sbgr][0], 127 + 16, "c0 = 0,5");
+            assert_eq!(plan.coef_v[sbgr][1], 127 + 8, "c1 = 0,25");
+            assert_eq!(plan.predsi(sbgr, 0), 1);
+            assert_eq!(plan.predsi(sbgr, 1), 1);
+            // The transmitted signal is the (here: zero) error.
+            for t in 0..SLOTS {
+                assert!(tx[0][sbgr][t].abs() < 1e-12, "sbgr {sbgr} slot {t}");
+            }
+        }
+        // predsi 1 per transmitted coefficient → 3 + 8 bits each.
+        assert_eq!(plan.extra_bits(), 8 + 8 * (2 * 2 + 2 * 11));
+    }
+
+    #[test]
+    fn prediction_election_only_fires_on_a_measured_energy_win() {
+        // Independent x/a/b: over 36 samples a least-squares fit can
+        // still cross the 10 % bar by chance — and when it does, the
+        // win is *real* for those very samples (the decoder adds back
+        // exactly what was subtracted; only the coefficient bits are
+        // spent). The invariant to pin is therefore not "off on random
+        // data" but: an OFF group leaves its samples untouched, and an
+        // ON group's transmitted residual genuinely carries ≤ 90 % of
+        // the original energy.
+        let mut a = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+        let mut b = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+        let mut x = Box::new([[0.0f64; SLOTS]; NUM_SUBBANDS]);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        for sb in 0..8 {
+            for t in 0..SLOTS {
+                a[sb][t] = rand();
+                b[sb][t] = rand();
+                x[sb][t] = rand();
+            }
+        }
+        let before = x.clone();
+        let mut tx = vec![x];
+        let t01 = vec![a, b];
+        let plan = fit_and_apply_prediction(&mut tx, &t01);
+        let energy = |v: &[f64; SLOTS]| v.iter().map(|s| s * s).sum::<f64>();
+        for sb in 0..8 {
+            if plan.on[sb] {
+                assert!(
+                    energy(&tx[0][sb]) <= 0.9 * energy(&before[sb]) + 1e-12,
+                    "sb {sb}: enabled without the 10 % win"
+                );
+            } else {
+                assert_eq!(tx[0][sb], before[sb], "sb {sb} untouched");
+                assert_eq!(plan.coef_v[sb], [127u8; 6], "sb {sb} zero coefs");
+            }
+        }
     }
 
     #[test]

@@ -172,63 +172,70 @@ fn mc_encoder_round_trips_official_programme_material() {
             ch.truncate(len);
         }
 
-        let cfg = McEncodeConfig {
-            front: case.front,
-            surround: case.surround,
-            ..McEncodeConfig::default()
-        };
-        let header = base_header(case.sample_rate, case.bit_rate);
-        let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
-            .unwrap_or_else(|e| panic!("{}: encode: {e}", case.name));
+        // Both predictor elections must clear the same floors — the
+        // §2.5.3.2.1.3 encode is exercised on real material too.
+        for prediction in [false, true] {
+            let cfg = McEncodeConfig {
+                front: case.front,
+                surround: case.surround,
+                prediction,
+                ..McEncodeConfig::default()
+            };
+            let header = base_header(case.sample_rate, case.bit_rate);
+            let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
+                .unwrap_or_else(|e| panic!("{}: encode: {e}", case.name));
 
-        // §2.5.3.1 detection fires on the emitted stream.
-        assert!(has_mc_extension(&stream), "{}", case.name);
+            // §2.5.3.1 detection fires on the emitted stream.
+            assert!(has_mc_extension(&stream), "{}", case.name);
 
-        let decoded = decode_mc_stream(&stream, None)
-            .unwrap_or_else(|e| panic!("{}: decode: {e}", case.name));
-        assert_eq!(decoded.frames, frames, "{}", case.name);
-        assert_eq!(decoded.channels.len(), pcm.len(), "{}", case.name);
-        assert_eq!(decoded.dyn_cross_frames, 0);
-        assert_eq!(decoded.prediction_frames, 0);
+            let decoded = decode_mc_stream(&stream, None)
+                .unwrap_or_else(|e| panic!("{}: decode: {e}", case.name));
+            assert_eq!(decoded.frames, frames, "{}", case.name);
+            assert_eq!(decoded.channels.len(), pcm.len(), "{}", case.name);
+            assert_eq!(decoded.dyn_cross_frames, 0);
+            if !prediction {
+                assert_eq!(decoded.prediction_frames, 0);
+            }
 
-        for (ch, out) in decoded.channels.iter().enumerate() {
-            let snr = snr_db(&pcm[ch], out);
-            eprintln!(
-                "{} ch {ch} ({}): round-trip SNR {snr:.2} dB",
-                case.name, case.suffixes[ch]
-            );
-            assert!(
-                snr > case.snr_floor_db,
-                "{} ch {ch}: SNR {snr:.2} dB under the {:.1} dB floor",
-                case.name,
-                case.snr_floor_db
-            );
-        }
+            for (ch, out) in decoded.channels.iter().enumerate() {
+                let snr = snr_db(&pcm[ch], out);
+                eprintln!(
+                    "{} (pred={prediction}) ch {ch} ({}): round-trip SNR {snr:.2} dB",
+                    case.name, case.suffixes[ch]
+                );
+                assert!(
+                    snr > case.snr_floor_db,
+                    "{} ch {ch}: SNR {snr:.2} dB under the {:.1} dB floor",
+                    case.name,
+                    case.snr_floor_db
+                );
+            }
 
-        // §2.5.1.3 backward compatibility on real material: the plain
-        // Layer II decode approximates the §2.5.3.3 downmix.
-        let plain = decode_all_frames(&stream).expect("plain base decode");
-        let (alpha, beta, gamma) = (1.0 / (1.0 + SQRT2), 1.0 / SQRT2, 1.0 / SQRT2);
-        let (c_of, ls_of, rs_of) = match (case.front, case.surround) {
-            (3, 2) => (Some(2usize), Some(3usize), Some(4usize)),
-            (2, 1) => (None, Some(2), Some(2)),
-            other => unreachable!("case table only carries 3/2 and 2/1: {other:?}"),
-        };
-        let get = |idx: Option<usize>, i: usize| idx.map_or(0.0, |k| pcm[k][i]);
-        let mut want_lo = vec![0.0f64; len];
-        let mut want_ro = vec![0.0f64; len];
-        for i in 0..len {
-            want_lo[i] = alpha * (pcm[0][i] + beta * get(c_of, i) + gamma * get(ls_of, i));
-            want_ro[i] = alpha * (pcm[1][i] + beta * get(c_of, i) + gamma * get(rs_of, i));
-        }
-        for (tag, want, got) in [("Lo", &want_lo, &plain[0]), ("Ro", &want_ro, &plain[1])] {
-            let snr = snr_db(want, got);
-            eprintln!("{} {tag}: compatible-downmix SNR {snr:.2} dB", case.name);
-            assert!(
-                snr > case.snr_floor_db,
-                "{} {tag}: downmix SNR {snr:.2} dB under the floor",
-                case.name
-            );
+            // §2.5.1.3 backward compatibility on real material: the plain
+            // Layer II decode approximates the §2.5.3.3 downmix.
+            let plain = decode_all_frames(&stream).expect("plain base decode");
+            let (alpha, beta, gamma) = (1.0 / (1.0 + SQRT2), 1.0 / SQRT2, 1.0 / SQRT2);
+            let (c_of, ls_of, rs_of) = match (case.front, case.surround) {
+                (3, 2) => (Some(2usize), Some(3usize), Some(4usize)),
+                (2, 1) => (None, Some(2), Some(2)),
+                other => unreachable!("case table only carries 3/2 and 2/1: {other:?}"),
+            };
+            let get = |idx: Option<usize>, i: usize| idx.map_or(0.0, |k| pcm[k][i]);
+            let mut want_lo = vec![0.0f64; len];
+            let mut want_ro = vec![0.0f64; len];
+            for i in 0..len {
+                want_lo[i] = alpha * (pcm[0][i] + beta * get(c_of, i) + gamma * get(ls_of, i));
+                want_ro[i] = alpha * (pcm[1][i] + beta * get(c_of, i) + gamma * get(rs_of, i));
+            }
+            for (tag, want, got) in [("Lo", &want_lo, &plain[0]), ("Ro", &want_ro, &plain[1])] {
+                let snr = snr_db(want, got);
+                eprintln!("{} {tag}: compatible-downmix SNR {snr:.2} dB", case.name);
+                assert!(
+                    snr > case.snr_floor_db,
+                    "{} {tag}: downmix SNR {snr:.2} dB under the floor",
+                    case.name
+                );
+            }
         }
     }
 }

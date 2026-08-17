@@ -540,8 +540,10 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 /// feed. The base pair is always a `Stereo`-mode MPEG-1 frame, so the
 /// two-channel-only options (`mode` / `bound` / `psymodel` /
 /// `freeformat` / `emphasis`) are refused rather than silently
-/// ignored; `dematrix` selects the §2.5.2.13 procedure; `crc` and the
-/// header metadata flags apply as for the two-channel encoder.
+/// ignored; `dematrix` selects the §2.5.2.13 procedure,
+/// `mc_prediction` (`"true"` / `"false"`, default off) enables the
+/// §2.5.3.2.1.3 predictor election; `crc` and the header metadata
+/// flags apply as for the two-channel encoder.
 fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn Encoder>> {
     for key in ["mode", "bound", "psymodel", "freeformat", "emphasis"] {
         if params.options.get(key).is_some() {
@@ -552,6 +554,7 @@ fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn En
         }
     }
     let dematrix = dematrix_opt(params.options.get("dematrix"))?;
+    let prediction = bool_opt(params.options.get("mc_prediction"), "mc_prediction", false)?;
     let crc = crc_opt(params.options.get("crc"))?;
     let copyright = bool_opt(params.options.get("copyright"), "copyright", false)?;
     let original = bool_opt(params.options.get("original"), "original", true)?;
@@ -569,6 +572,7 @@ fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn En
     }
     let (mut cfg, chan_map, lfe_plane) = mc_plan_for_layout(layout)?;
     cfg.dematrix_procedure = dematrix;
+    cfg.prediction = prediction;
 
     let Some(sample_rate) = params.sample_rate else {
         return Err(Error::invalid(

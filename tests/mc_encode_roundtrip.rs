@@ -331,6 +331,52 @@ fn fractional_rate_padding_interoperates_with_the_extension() {
 }
 
 #[test]
+fn prediction_engages_on_correlated_material_and_still_round_trips() {
+    // Centre/surrounds strongly correlated with the front pair — the
+    // §2.5.3.2.1.3 predictors have something to predict, so the
+    // election must fire, the wire must signal it, and the decode
+    // (which predicts from its own requantised T0/T1) must still meet
+    // the reconstruction envelope.
+    let n_frames = 6;
+    let sample_rate = 48_000;
+    let header = base_header(sample_rate, 384_000);
+    let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
+    let w1 = 2.0 * std::f64::consts::PI * 430.0 / f64::from(sample_rate);
+    let w2 = 2.0 * std::f64::consts::PI * 700.0 / f64::from(sample_rate);
+    let l: Vec<f64> = (0..total).map(|i| 0.30 * (w1 * i as f64).sin()).collect();
+    let r: Vec<f64> = (0..total).map(|i| 0.30 * (w2 * i as f64).sin()).collect();
+    let c: Vec<f64> = (0..total).map(|i| 0.5 * l[i] + 0.5 * r[i]).collect();
+    let ls: Vec<f64> = l.iter().map(|s| 0.6 * s).collect();
+    let rs: Vec<f64> = r.iter().map(|s| 0.6 * s).collect();
+    let pcm = vec![l, r, c, ls, rs];
+
+    for prediction in [false, true] {
+        let cfg = McEncodeConfig {
+            prediction,
+            ..McEncodeConfig::default()
+        };
+        let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
+        let decoded = decode_mc_stream(&stream, None).expect("decode");
+        assert_eq!(decoded.frames, n_frames);
+        if prediction {
+            assert_eq!(
+                decoded.prediction_frames, n_frames,
+                "correlated material must engage the predictors in every frame"
+            );
+        } else {
+            assert_eq!(decoded.prediction_frames, 0);
+        }
+        for (ch, out) in decoded.channels.iter().enumerate() {
+            let ratio = residual_ratio(&pcm[ch], out);
+            assert!(
+                ratio < 0.5,
+                "prediction={prediction} ch {ch}: residual ratio {ratio:.4}"
+            );
+        }
+    }
+}
+
+#[test]
 fn shape_errors_are_reported() {
     let header = base_header(48_000, 384_000);
     let cfg = McEncodeConfig::default();
