@@ -8,6 +8,57 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ISO/IEC 13818-3 §2.5 multichannel-extension ENCODER (`mc_encode`
+  module)** — the encode-side dual of the r444 `mc` decoder. Emits a
+  standard Layer II base frame whose §2.4.1.8 ancillary field carries
+  the `mc_extension()` (§2.5.1.3), so a §2.5-unaware decoder plays the
+  compatible stereo downmix and this crate's own §2.5 decoder recovers
+  the presentation channels:
+  - **Matrixing** (§2.5.3.3): `Lo = α(L + βC + γLS)`,
+    `Ro = α(R + βC + γRS)` with the procedure-`'00'`
+    (`α = 1/(1+√2)`, `β = γ = 1/√2`), `'01'`
+    (`α = 1/(1,5+0,5√2)`, `γ = 0,5`) and `'11'` (no matrixing)
+    constants; the transmitted channels carry the weighted signals
+    (`Cw = αβ·C`, …) whose inverse the §2.5.3.2.5 de-normalisation is
+    (unit-pinned: `α·denorm = 1`, `w_enc·w_dec·denorm = 1`). All five
+    emittable configurations: 3/2, 3/1, 3/0, 2/2, 2/1 (+ 2/0 with
+    LFE). The `'10'` phase-mixed-surround *encode* is not offered.
+  - **MC audio data** (§2.5.1.17 / §2.5.2.17): Table B.2a (48 kHz) /
+    B.2b (44,1 / 32 kHz) allocation with `msblimit = sblimit`, a
+    §C.1.5.2.7 minimum-MNR greedy allocator driven by a §D.1 Model-1
+    SMR per transmission channel (192-sample delayed window, history
+    threaded through `McEncodeState`) against an explicit extension
+    bit budget (default: the frame's data bits split
+    `nmch / (2 + nmch)` to the extension; `mc_bits` overrides), exact
+    activation pricing from the §C.1.5.2.5 Table C.4 scfsi selection,
+    and §2.4.3.3.4 quantization via the existing sample writer.
+  - **Composite status** (§2.5.1.15): `tc_sbgr_select = '1'` with the
+    global `tc_allocation = 0`, `dyn_cross_on = '0'`,
+    `mc_prediction_on = '0'` — the syntax's encoder-side options
+    declined explicitly (their decode side is complete in `mc`).
+  - **LFE** (§2.5.3.2.4): 12 samples/frame at `Fs/96`,
+    block-companded with one Table B.1 scalefactor and an ungrouped
+    `2^nb − 1`-level quantizer (`lfe_allocation` 2..=15, default 7 →
+    8 bits/sample).
+  - **`mc_crc_check`** (§2.5.2.14) computed over mc_header +
+    composite status + allocation + scfsi and patched in place, so
+    the §2.5.3.1 CRC presence-detection rule fires on every emitted
+    frame; the extension is spliced at the exact first ancillary bit
+    of the base frame (bit-precise splice, `banc` reservation through
+    the base allocator).
+  - Public surface: `encode_mc_frame_with` / `encode_mc_all_frames`
+    (batch with the §2.4.2.3 `PaddingScheduler` threaded across
+    frames), `McEncodeConfig`, `McEncodeState`, `McEncodeError`.
+  - `tests/mc_encode_roundtrip.rs`: every configuration × procedure
+    round-trips through `decode_mc_stream` with per-channel
+    distinct-tone **channel-separation** pins (a dematrix leak fails
+    the Goertzel cross-probes, not just the energy envelope);
+    §2.5.1.3 backward compatibility (the plain Layer II decode equals
+    the §2.5.3.3 downmix equations); LFE within its companding step;
+    wire premise pins (`has_mc_extension`, decoded `mc_header`
+    fields, CRC tamper detection); exact-zero silence; 44,1 kHz
+    padding interop; budget/shape rejection paths.
+
 - **ISO/IEC 13818-3 §2.5 multichannel-extension decoder (`mc`
   module) — the crate's last "lacks" closed.** Decodes the
   `mc_extension()` payload riding the §2.4.1.8 ancillary field of a

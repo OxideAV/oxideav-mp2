@@ -702,6 +702,15 @@ fn decode_base_subbands(buf: &[u8]) -> Result<BaseSubbands, McError> {
     })
 }
 
+/// Absolute bit position at which the §2.4.1.8 ancillary field of one
+/// encoded base frame starts — i.e. where an `mc_extension()` payload
+/// must be spliced (§2.5.1.3: the extension rides the ancillary field
+/// directly after the base frame's sample loop). Used by the
+/// encode-side [`crate::mc_encode`] module.
+pub(crate) fn base_ancillary_start_bit(frame: &[u8]) -> Result<u64, McError> {
+    decode_base_subbands(frame).map(|b| b.anc_start_bit)
+}
+
 // ---------------------------------------------------------------------------
 // Bit packing (part1 ‖ ext_data concatenation)
 // ---------------------------------------------------------------------------

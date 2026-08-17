@@ -248,6 +248,7 @@ pub mod freeformat;
 pub mod header;
 pub mod j17;
 pub mod mc;
+pub mod mc_encode;
 pub mod psy;
 pub mod requant;
 pub mod synthesis;
@@ -318,6 +319,9 @@ pub use mc::{
     decode_mc_frame_with, decode_mc_stream, has_mc_extension, sbgr_of_subband, Centre, McChannel,
     McConfig, McDecodeState, McDecodedFrame, McDecodedStream, McError, McHeader, Surround,
     LFE_SAMPLES_PER_FRAME, SBGR_BOUNDS,
+};
+pub use mc_encode::{
+    encode_mc_all_frames, encode_mc_frame_with, McEncodeConfig, McEncodeError, McEncodeState,
 };
 pub use psy::{
     annex_d_sampling_rate, complex_spectrum_polar_layer2, compute_smr_model1_frame,
