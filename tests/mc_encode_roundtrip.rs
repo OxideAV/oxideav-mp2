@@ -331,6 +331,93 @@ fn fractional_rate_padding_interoperates_with_the_extension() {
 }
 
 #[test]
+fn every_tc_allocation_round_trips_through_its_dematrix_arm() {
+    // The §2.5.2.15 global tc_allocation decides which audio channels
+    // ride T2..T4; each value drives a different §2.5.3.2.1.1 decoding
+    // matrix arm. Sweeping every legal value per configuration, with a
+    // distinct tone per presentation channel, exercises every decode
+    // arm against our own encoder — a matrixing-placement error shows
+    // up as a cross-channel leak.
+    let n_frames = 4;
+    let sample_rate = 48_000;
+    let header = base_header(sample_rate, 384_000);
+    for (front, surround, tc_max) in [(3u8, 2u8, 7u8), (3, 1, 4), (3, 0, 2), (2, 2, 3), (2, 1, 2)] {
+        for proc_ in [0u8, 1] {
+            for tc in 0..=tc_max {
+                let cfg = McEncodeConfig {
+                    front,
+                    surround,
+                    dematrix_procedure: proc_,
+                    tc_allocation: tc,
+                    ..McEncodeConfig::default()
+                };
+                let channels = cfg.presentation_channels();
+                let pcm = tone_streams(channels, sample_rate, n_frames, 0.30);
+                let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
+                    .unwrap_or_else(|e| panic!("{front}/{surround} proc {proc_} tc {tc}: {e}"));
+                let decoded = decode_mc_stream(&stream, None)
+                    .unwrap_or_else(|e| panic!("{front}/{surround} proc {proc_} tc {tc}: {e}"));
+                assert_eq!(decoded.channels.len(), channels);
+                for (ch, out) in decoded.channels.iter().enumerate() {
+                    let ratio = residual_ratio(&pcm[ch], out);
+                    assert!(
+                        ratio < 0.5,
+                        "{front}/{surround} proc {proc_} tc {tc} ch {ch}: ratio {ratio:.4}"
+                    );
+                    let lo = FILTERBANK_DELAY + PCM_SAMPLES_PER_CHANNEL;
+                    let hi = out.len() - PCM_SAMPLES_PER_CHANNEL;
+                    let steady = &out[lo..hi];
+                    let own = goertzel_power(steady, CHANNEL_TONES_HZ[ch], sample_rate);
+                    for (other, &f) in CHANNEL_TONES_HZ[..channels].iter().enumerate() {
+                        if other == ch {
+                            continue;
+                        }
+                        let leak = goertzel_power(steady, f, sample_rate);
+                        assert!(
+                            own > 20.0 * leak.max(f64::MIN_POSITIVE),
+                            "{front}/{surround} proc {proc_} tc {tc} ch {ch}: leak from {other}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn out_of_range_tc_allocation_is_rejected() {
+    let header = base_header(48_000, 384_000);
+    let mut state = McEncodeState::new();
+    for (front, surround, bad_tc) in [(3u8, 2u8, 8u8), (3, 1, 5), (3, 0, 3), (2, 2, 4), (2, 1, 3)] {
+        let cfg = McEncodeConfig {
+            front,
+            surround,
+            tc_allocation: bad_tc,
+            ..McEncodeConfig::default()
+        };
+        let pcm = tone_streams(cfg.presentation_channels(), 48_000, 1, 0.3);
+        assert!(
+            matches!(
+                encode_mc_frame_with(&header, &cfg, &pcm, None, &mut state),
+                Err(McEncodeError::BadConfig(_))
+            ),
+            "{front}/{surround} tc {bad_tc} accepted"
+        );
+    }
+    // Procedure '11' forces tc_allocation 0 (§2.5.2.15).
+    let cfg = McEncodeConfig {
+        dematrix_procedure: 3,
+        tc_allocation: 1,
+        ..McEncodeConfig::default()
+    };
+    let pcm = tone_streams(5, 48_000, 1, 0.3);
+    assert!(matches!(
+        encode_mc_frame_with(&header, &cfg, &pcm, None, &mut state),
+        Err(McEncodeError::BadConfig(_))
+    ));
+}
+
+#[test]
 fn prediction_engages_on_correlated_material_and_still_round_trips() {
     // Centre/surrounds strongly correlated with the front pair — the
     // §2.5.3.2.1.3 predictors have something to predict, so the

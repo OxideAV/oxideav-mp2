@@ -184,6 +184,15 @@ pub struct McEncodeConfig {
     /// their channel counts (`nmch / (2 + nmch)` to the extension,
     /// plus the fixed LFE cost).
     pub mc_bits: Option<u32>,
+    /// §2.5.2.15 global `tc_allocation`: which audio channels ride the
+    /// transmission channels `T2..T4` (the rest are recovered by the
+    /// decoding matrix from the compatible pair). Transmitted with
+    /// `tc_sbgr_select = '1'` (one value for all subband groups).
+    /// Legal ranges: 3/2 → `0..=7`, 3/1 → `0..=4` (value 5 is defined
+    /// only for the `'10'` procedure this encoder does not emit),
+    /// 3/0 / 2/1 → `0..=2`, 2/2 → `0..=3`; procedure `'11'` requires
+    /// `0` (§2.5.2.15). Default `0` (centre / surround transmitted).
+    pub tc_allocation: u8,
     /// §2.5.3.2.1.3 **multichannel prediction**: when enabled the
     /// encoder fits one first-order, zero-delay predictor per
     /// (subband group 0..7, transmission channel, compatible source
@@ -209,6 +218,7 @@ impl Default for McEncodeConfig {
             dematrix_procedure: 0,
             lfe_allocation: 7,
             mc_bits: None,
+            tc_allocation: 0,
             prediction: false,
         }
     }
@@ -240,6 +250,24 @@ impl McEncodeConfig {
                 "lfe_allocation={} (2..=15)",
                 self.lfe_allocation
             )));
+        }
+        let tc_max: u8 = match (self.front, self.surround) {
+            (3, 2) => 7,
+            (3, 1) => 4, // 5 is dematrix-'10'-only (§2.5.2.15 B)
+            (2, 2) => 3,
+            (3, 0) | (2, 1) => 2,
+            _ => 0,
+        };
+        if self.tc_allocation > tc_max {
+            return Err(McEncodeError::BadConfig(format!(
+                "tc_allocation={} exceeds {} for the {}/{} configuration",
+                self.tc_allocation, tc_max, self.front, self.surround
+            )));
+        }
+        if self.dematrix_procedure == 3 && self.tc_allocation != 0 {
+            return Err(McEncodeError::BadConfig(
+                "dematrix_procedure '11' implies tc_allocation 0 (§2.5.2.15)".into(),
+            ));
         }
         Ok(())
     }
@@ -472,25 +500,32 @@ fn matrix_coeffs(proc_: u8) -> (f64, f64, f64) {
 
 /// One frame's matrixing: presentation channels (in
 /// [`McConfig::layout`] order) → the compatible pair `[Lo, Ro]` and
-/// the weighted transmission channels `T2..` (in the `tc_allocation
-/// = 0` role order: centre first, then surround).
-fn matrix_downmix(cfg: &McEncodeConfig, pcm: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+/// the weighted transmission channels `T2..`, placed per the
+/// §2.5.2.15 role table of the configured global `tc_allocation`
+/// (default 0: centre first, then surround; other values transmit
+/// front channels and let the decoding matrix recover the rest from
+/// the compatible pair).
+fn matrix_downmix(
+    cfg: &McEncodeConfig,
+    mc_cfg: &McConfig,
+    pcm: &[Vec<f64>],
+) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    use crate::mc::McChannel;
+
     let n = pcm[0].len();
     let front = usize::from(cfg.front);
     let (alpha, beta, gamma) = matrix_coeffs(cfg.dematrix_procedure);
     let no_matrix = cfg.dematrix_procedure == 3;
-    // Weight of the centre / surround signals on the wire.
+    // Per-role wire weights: front channels ride at α, centre at αβ,
+    // surround at αγ (§2.5.3.2.5's inverses). Procedure '11' carries
+    // everything unweighted (and forces tc_allocation 0).
+    let w_f = if no_matrix { 1.0 } else { alpha };
     let w_c = if no_matrix { 1.0 } else { alpha * beta };
     let w_s = if no_matrix { 1.0 } else { alpha * gamma };
 
-    let nmch = match (cfg.front, cfg.surround) {
-        (3, 2) => 3,
-        (3, 1) | (2, 2) => 2,
-        (3, 0) | (2, 1) => 1,
-        _ => 0,
-    };
+    let roles = crate::mc::tc_roles(mc_cfg, cfg.tc_allocation);
     let mut base = vec![vec![0.0f64; n]; 2];
-    let mut tx = vec![vec![0.0f64; n]; nmch];
+    let mut tx = vec![vec![0.0f64; n]; roles.len()];
     for i in 0..n {
         let l = pcm[0][i];
         let r = pcm[1][i];
@@ -507,20 +542,16 @@ fn matrix_downmix(cfg: &McEncodeConfig, pcm: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec
             base[0][i] = alpha * (l + beta * c + gamma * lsur);
             base[1][i] = alpha * (r + beta * c + gamma * rsur);
         }
-        let mut t = 0usize;
-        if cfg.front == 3 {
-            tx[t][i] = w_c * c;
-            t += 1;
-        }
-        match cfg.surround {
-            2 => {
-                tx[t][i] = w_s * lsur;
-                tx[t + 1][i] = w_s * rsur;
-            }
-            1 => {
-                tx[t][i] = w_s * lsur;
-            }
-            _ => {}
+        for (t, role) in roles.iter().enumerate() {
+            tx[t][i] = match role {
+                McChannel::Left => w_f * l,
+                McChannel::Right => w_f * r,
+                McChannel::Centre => w_c * c,
+                McChannel::LeftSurround | McChannel::MonoSurround => w_s * lsur,
+                McChannel::RightSurround => w_s * rsur,
+                // Second stereo programmes are not emitted.
+                McChannel::SecondLeft | McChannel::SecondRight => 0.0,
+            };
         }
     }
     (base, tx)
@@ -733,7 +764,7 @@ pub fn encode_mc_frame_with(
     let nmch = mc_cfg.nmch;
 
     // ---- matrixing (§2.5.3.3) -----------------------------------------
-    let (base_pcm, tx_pcm) = matrix_downmix(cfg, pcm);
+    let (base_pcm, tx_pcm) = matrix_downmix(cfg, &mc_cfg, pcm);
     debug_assert_eq!(tx_pcm.len(), nmch);
 
     // ---- transmission-channel analysis + scalefactors ------------------
@@ -926,7 +957,7 @@ pub fn encode_mc_frame_with(
     w.write_u32(0, 1); // dyn_cross_on
     w.write_u32(u32::from(pred_plan.is_some()), 1); // mc_prediction_on
     if mc_cfg.tc_allocation_bits > 0 {
-        w.write_u32(0, mc_cfg.tc_allocation_bits);
+        w.write_u32(u32::from(cfg.tc_allocation), mc_cfg.tc_allocation_bits);
     }
     if let Some(plan) = &pred_plan {
         // §2.5.1.15: per-sbgr mc_prediction flag + predsi fields.
@@ -1142,7 +1173,8 @@ mod tests {
                 ..McEncodeConfig::default()
             };
             let pcm: Vec<Vec<f64>> = vec![vec![1.0; 4]; 5];
-            let (base, tx) = matrix_downmix(&cfg, &pcm);
+            let mc_cfg = McConfig::from_header(&cfg.mc_header(), crate::header::Mode::Stereo);
+            let (base, tx) = matrix_downmix(&cfg, &mc_cfg, &pcm);
             assert_eq!(tx.len(), 3);
             for ch in &base {
                 for &s in ch {

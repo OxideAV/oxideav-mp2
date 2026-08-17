@@ -118,6 +118,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rejected_not_panicking`), and re-fuzzed clean (bounded local
   session: ≈ 463 k execs, zero findings).
 
+- **Global `tc_allocation` on the encode side
+  (`McEncodeConfig::tc_allocation`, default 0).** The §2.5.2.15
+  transmission-channel allocation is now selectable: the matrixing
+  places the weighted signals on `T2..T4` per the configuration's
+  role table (front channels at `α`, centre at `αβ`, surround at
+  `αγ`), so any legal value round-trips through the matching
+  §2.5.3.2.1.1 decoding-matrix arm. Ranges validated per
+  configuration (3/2 `0..=7`, 3/1 `0..=4` — value 5 is
+  `'10'`-procedure-only, 2/2 `0..=3`, 3/0 / 2/1 `0..=2`; procedure
+  `'11'` forces 0 per §2.5.2.15). A distinct-tone sweep over **every
+  legal (configuration, procedure `'00'`/`'01'`, tc_allocation)
+  triple** cross-exercises all dematrix arms against this encoder
+  with channel-separation pins; out-of-range values are rejected.
+
 - **§2.5.3.2.1.3 multichannel prediction on the encode side
   (`McEncodeConfig::prediction`, registry option `mc_prediction`;
   default off).** Per subband group 0..7 the encoder fits one

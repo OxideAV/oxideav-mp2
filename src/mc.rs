@@ -535,8 +535,9 @@ fn predictable_channels(config: &McConfig, dyn_mode: u8) -> Vec<usize> {
 /// The audio channels carried by the main extension transmission
 /// channels for a given `tc_allocation` value (§2.5.2.15 tables).
 /// Used for the §2.5.3.2.1.2 fallback-copy rule (which base channel a
-/// missing tc borrows from).
-fn tc_roles(config: &McConfig, tc_allocation: u8) -> Vec<McChannel> {
+/// missing tc borrows from), and by the encode side
+/// ([`crate::mc_encode`]) to place the weighted signals on `T2..T4`.
+pub(crate) fn tc_roles(config: &McConfig, tc_allocation: u8) -> Vec<McChannel> {
     use McChannel::{Centre, Left, LeftSurround, MonoSurround, Right, RightSurround};
     match (config.front, config.surround) {
         (3, 2) => match tc_allocation {
