@@ -546,9 +546,12 @@ recovers the presentation channels.
   quantized to the `(v − 127)/32` wire grid, enabled per group only
   on a measured ≥ 10 % residual-energy win; the transmitted signal
   is then the prediction error.
-- Composite-status options the encoder declines are signalled
-  explicitly (`tc_allocation = 0` global, `dyn_cross_on = '0'`); the
-  decode side of all of them is complete.
+- **`tc_allocation`** (§2.5.2.15) is selectable (global,
+  `tc_sbgr_select = '1'`): every legal value per configuration
+  places its role set on `T2..T4` and round-trips through the
+  matching §2.5.3.2.1.1 decoding-matrix arm (swept with
+  channel-separation pins). Dynamic crosstalk is declined explicitly
+  (`dyn_cross_on = '0'`); its decode side is complete.
 
 Validated by `tests/mc_encode_roundtrip.rs` (every configuration ×
 procedure with per-channel distinct-tone **channel-separation** pins,
@@ -585,8 +588,10 @@ sides:
 
 ## Not yet supported
 
-- Encoder-side **dynamic crosstalk** and adaptive `tc_allocation`
-  election (§2.5.2.15), the `'10'` phase-mixed-surround *encode*,
+- Encoder-side **dynamic crosstalk** and per-subband-group /
+  signal-adaptive `tc_allocation` election (§2.5.2.15 — a global
+  value is caller-selectable), the `'10'` phase-mixed-surround
+  *encode*,
   phantom-centre coding, second stereo programme and multilingual
   channels on the encode side, and emitting a §2.5.1.5 extension bit
   stream (an extension that does not fit the base frame's ancillary
