@@ -51,8 +51,8 @@
 use std::collections::VecDeque;
 
 use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, CodecTag, Encoder, Error, Frame, Packet, Result,
-    SampleFormat, TimeBase,
+    AudioFrame, ChannelLayout, CodecId, CodecParameters, CodecTag, Encoder, Error, Frame, Packet,
+    Result, SampleFormat, TimeBase,
 };
 
 use crate::bitalloc::select_table;
@@ -65,6 +65,7 @@ use crate::frame::PCM_SAMPLES_PER_CHANNEL;
 use crate::header::{
     is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, Mode, ModeExtension, PaddingScheduler,
 };
+use crate::mc_encode::{encode_mc_frame_with, McEncodeConfig, McEncodeState};
 
 /// Which Annex D psychoacoustic model drives the auto-SMR allocation.
 ///
@@ -306,6 +307,86 @@ fn build_header(
     Ok(header)
 }
 
+/// The §2.5 multichannel encode adapter: the configuration, the map
+/// from core-canonical input planes to the §2.5 presentation order,
+/// and the cross-frame [`McEncodeState`].
+struct McAdapter {
+    cfg: McEncodeConfig,
+    /// `chan_map[i]` = input plane index of §2.5 presentation channel
+    /// `i` (L, R, [C], [LS, RS | S]).
+    chan_map: Vec<usize>,
+    /// Input plane index of the full-rate LFE feed, when the layout
+    /// carries one.
+    lfe_plane: Option<usize>,
+    state: McEncodeState,
+}
+
+/// Map a core [`ChannelLayout`] to a §2.5 multichannel encode plan:
+/// the §2.5.2.15 configuration, the input-plane order of the
+/// presentation channels, and the LFE plane slot.
+///
+/// The core canonical orders line up with the §2.5 presentation order
+/// (L, R, [C], [LS, RS | S]) except for the BS.775 LFE slot, which is
+/// extracted to the §2.5.3.2.4 LFE feed:
+///
+/// | layout       | §2.5 config | presentation planes | LFE plane |
+/// |--------------|-------------|---------------------|-----------|
+/// | `Surround30` | 3/0         | 0 1 2               | —         |
+/// | `Surround40` | 3/1         | 0 1 2 3 (Cs → S)    | —         |
+/// | `Surround41` | 3/1 + LFE   | 0 1 2 3             | 4         |
+/// | `Quad`       | 2/2         | 0 1 2 3             | —         |
+/// | `Surround50` | 3/2         | 0 1 2 3 4           | —         |
+/// | `Surround51` | 3/2 + LFE   | 0 1 2 4 5           | 3         |
+/// | `Stereo21`   | 2/0 + LFE   | 0 1                 | 2         |
+///
+/// Any other layout has no §2.5.2.15 configuration and is rejected.
+fn mc_plan_for_layout(
+    layout: ChannelLayout,
+) -> Result<(McEncodeConfig, Vec<usize>, Option<usize>)> {
+    let base = McEncodeConfig::default();
+    let (front, surround, lfe, chan_map, lfe_plane): (u8, u8, bool, Vec<usize>, Option<usize>) =
+        match layout {
+            ChannelLayout::Surround30 => (3, 0, false, vec![0, 1, 2], None),
+            ChannelLayout::Surround40 => (3, 1, false, vec![0, 1, 2, 3], None),
+            ChannelLayout::Surround41 => (3, 1, true, vec![0, 1, 2, 3], Some(4)),
+            ChannelLayout::Quad => (2, 2, false, vec![0, 1, 2, 3], None),
+            ChannelLayout::Surround50 => (3, 2, false, vec![0, 1, 2, 3, 4], None),
+            ChannelLayout::Surround51 => (3, 2, true, vec![0, 1, 2, 4, 5], Some(3)),
+            ChannelLayout::Stereo21 => (2, 0, true, vec![0, 1], Some(2)),
+            other => {
+                return Err(Error::invalid(format!(
+                    "oxideav-mp2: channel layout {other} has no ISO/IEC 13818-3 §2.5.2.15 \
+                     configuration (supported: 3.0 / 4.0 / 4.1 / quad / 5.0 / 5.1 / 2.1)"
+                )))
+            }
+        };
+    Ok((
+        McEncodeConfig {
+            front,
+            surround,
+            lfe,
+            ..base
+        },
+        chan_map,
+        lfe_plane,
+    ))
+}
+
+/// Parse the `dematrix` codec option (§2.5.2.13 `dematrix_procedure`
+/// for a multichannel encode): `"0"` / `"00"` (default), `"1"` /
+/// `"01"`, or `"3"` / `"11"` (no matrixing). The `'10'`
+/// phase-mixed-surround encode is not offered.
+fn dematrix_opt(s: Option<&str>) -> Result<u8> {
+    match s {
+        None | Some("0") | Some("00") => Ok(0),
+        Some("1") | Some("01") => Ok(1),
+        Some("3") | Some("11") => Ok(3),
+        Some(other) => Err(Error::invalid(format!(
+            "oxideav-mp2: dematrix={other:?} not recognised (00 / 01 / 11)"
+        ))),
+    }
+}
+
 /// Build a boxed MPEG-1 / MPEG-2 LSF Audio Layer II [`Encoder`] from
 /// `params`.
 ///
@@ -357,6 +438,9 @@ fn build_header(
 /// * an unrecognised `mode` / `bound` / `psymodel` option.
 pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     let channels = params.channels.unwrap_or(2);
+    if channels >= 3 {
+        return make_mc_encoder(params, channels);
+    }
     let mode = mode_for_channels(channels, params.options.get("mode"))?;
     let bound_choice = mode_extension_opt(params.options.get("bound"))?;
     let psymodel = psymodel_opt(params.options.get("psymodel"))?;
@@ -441,6 +525,106 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         psymodel,
         freeformat,
         auto_bound,
+        None,
+    )))
+}
+
+/// Build a §2.5 **multichannel** Layer II [`Encoder`]: `channels >= 3`
+/// routes here. The presentation layout comes from
+/// `params.channel_layout` (falling back to
+/// [`ChannelLayout::from_count`]), mapped onto a §2.5.2.15
+/// configuration by [`mc_plan_for_layout`]; the input planes arrive in
+/// core-canonical order and the BS.775 LFE plane (if any) is decimated
+/// ×96 (per-block mean — an encoder-side lowpass choice; the standard
+/// fixes only the transmitted `Fs/96` format) into the §2.5.3.2.4
+/// feed. The base pair is always a `Stereo`-mode MPEG-1 frame, so the
+/// two-channel-only options (`mode` / `bound` / `psymodel` /
+/// `freeformat` / `emphasis`) are refused rather than silently
+/// ignored; `dematrix` selects the §2.5.2.13 procedure; `crc` and the
+/// header metadata flags apply as for the two-channel encoder.
+fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn Encoder>> {
+    for key in ["mode", "bound", "psymodel", "freeformat", "emphasis"] {
+        if params.options.get(key).is_some() {
+            return Err(Error::invalid(format!(
+                "oxideav-mp2: option {key:?} shapes the two-channel path and does not apply \
+                 to a §2.5 multichannel encode"
+            )));
+        }
+    }
+    let dematrix = dematrix_opt(params.options.get("dematrix"))?;
+    let crc = crc_opt(params.options.get("crc"))?;
+    let copyright = bool_opt(params.options.get("copyright"), "copyright", false)?;
+    let original = bool_opt(params.options.get("original"), "original", true)?;
+    let private_bit = bool_opt(params.options.get("private"), "private", false)?;
+
+    let layout = params
+        .channel_layout
+        .unwrap_or_else(|| ChannelLayout::from_count(channels));
+    if layout.channel_count() != channels {
+        return Err(Error::invalid(format!(
+            "oxideav-mp2: channel_layout {layout} carries {} channels but params.channels = \
+             {channels}",
+            layout.channel_count()
+        )));
+    }
+    let (mut cfg, chan_map, lfe_plane) = mc_plan_for_layout(layout)?;
+    cfg.dematrix_procedure = dematrix;
+
+    let Some(sample_rate) = params.sample_rate else {
+        return Err(Error::invalid(
+            "oxideav-mp2: encoder requires params.sample_rate (a Layer II rate)",
+        ));
+    };
+    if !matches!(sample_rate, 32_000 | 44_100 | 48_000) {
+        return Err(Error::invalid(format!(
+            "oxideav-mp2: the §2.5 multichannel extension is defined on an MPEG-1-compatible \
+             base (32000/44100/48000 Hz), not {sample_rate} Hz"
+        )));
+    }
+    let bit_rate = match params.bit_rate {
+        Some(b) => u32::try_from(b).map_err(|_| {
+            Error::invalid(format!(
+                "oxideav-mp2: bit_rate {b} too large for a Layer II header"
+            ))
+        })?,
+        // The base frame carries 2 + nmch (+ LFE) channels' worth of
+        // data, so default to the top of the Layer II ladder.
+        None => 384_000,
+    };
+
+    let mut header = build_header(
+        sample_rate,
+        Mode::Stereo,
+        ModeExtension::Bound4,
+        bit_rate,
+        crc,
+        Emphasis::None,
+    )?;
+    header.copyright = copyright;
+    header.original = original;
+    header.private_bit = private_bit;
+
+    let mut out_params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+    out_params.sample_rate = Some(sample_rate);
+    out_params.channels = Some(channels);
+    out_params.channel_layout = Some(layout);
+    out_params.sample_format = Some(SampleFormat::S16);
+    out_params.bit_rate = Some(u64::from(bit_rate));
+    out_params.tag = Some(CodecTag::wave_format(WAVE_FORMAT_MPEG));
+
+    Ok(Box::new(Mp2CoreEncoder::new(
+        CodecId::new(CODEC_ID_STR),
+        out_params,
+        header,
+        PsyModel::Model1,
+        false,
+        false,
+        Some(McAdapter {
+            cfg,
+            chan_map,
+            lfe_plane,
+            state: McEncodeState::new(),
+        }),
     )))
 }
 
@@ -478,6 +662,10 @@ pub struct Mp2CoreEncoder {
     /// required bits fit the budget, else as `JointStereo` with the
     /// widest intensity bound that fits.
     auto_bound: bool,
+    /// §2.5 multichannel encode adapter (`channels >= 3`): the input
+    /// planes arrive in core-canonical [`ChannelLayout`] order and are
+    /// mapped / decimated into the `mc_encode` presentation feed.
+    mc: Option<McAdapter>,
     enc_state: EncodeFrameState,
     pending_pcm: Vec<Vec<f64>>,
     pending_packets: VecDeque<Packet>,
@@ -501,6 +689,7 @@ impl std::fmt::Debug for Mp2CoreEncoder {
 }
 
 impl Mp2CoreEncoder {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         codec_id: CodecId,
         output: CodecParameters,
@@ -508,8 +697,14 @@ impl Mp2CoreEncoder {
         psymodel: PsyModel,
         freeformat: bool,
         auto_bound: bool,
+        mc: Option<McAdapter>,
     ) -> Self {
-        let channels = header.channels();
+        // A multichannel encoder buffers one plane per *input* channel
+        // (presentation channels + the full-rate LFE feed); the header
+        // still describes the two-channel compatible base pair.
+        let channels = mc.as_ref().map_or(header.channels(), |m| {
+            m.chan_map.len() + usize::from(m.lfe_plane.is_some())
+        });
         Self {
             codec_id,
             output,
@@ -518,6 +713,7 @@ impl Mp2CoreEncoder {
             psymodel,
             freeformat,
             auto_bound,
+            mc,
             padding: PaddingScheduler::new(),
             enc_state: EncodeFrameState::new(),
             pending_pcm: vec![Vec::new(); channels],
@@ -525,6 +721,16 @@ impl Mp2CoreEncoder {
             samples_emitted: 0,
             flushed: false,
         }
+    }
+
+    /// Decimate a full-rate LFE plane ×96 into the §2.5.3.2.4 `Fs/96`
+    /// feed by per-block mean — an encoder-side lowpass choice (the
+    /// standard fixes only the transmitted format).
+    fn decimate_lfe(plane: &[f64]) -> Vec<f64> {
+        plane
+            .chunks_exact(96)
+            .map(|block| block.iter().sum::<f64>() / block.len() as f64)
+            .collect()
     }
 
     /// Decode one planar-S16 plane into f64 `[-1, +1]` samples.
@@ -558,6 +764,28 @@ impl Mp2CoreEncoder {
         // `N+1`-slot frames so the mean bitrate matches the signalled
         // value; everywhere else it never fires.
         let frame_header = self.padding.next_header(&self.header);
+        if let Some(mc) = &mut self.mc {
+            // §2.5 multichannel: map the core-canonical planes into the
+            // presentation order, decimate the LFE feed, and emit one
+            // extension-carrying base frame.
+            let pcm: Vec<Vec<f64>> = mc.chan_map.iter().map(|&i| frame_pcm[i].clone()).collect();
+            let lfe = mc.lfe_plane.map(|i| Self::decimate_lfe(&frame_pcm[i]));
+            let bytes =
+                encode_mc_frame_with(&frame_header, &mc.cfg, &pcm, lfe.as_deref(), &mut mc.state)
+                    .map_err(|e| Error::other(format!("oxideav-mp2: mc encode: {e}")))?;
+            let mut packet = Packet::new(
+                0,
+                TimeBase::new(1, i64::from(self.header.sample_rate)),
+                bytes,
+            );
+            packet.pts = Some(self.samples_emitted);
+            packet.dts = Some(self.samples_emitted);
+            packet.duration = Some(PCM_SAMPLES_PER_CHANNEL as i64);
+            packet.flags.keyframe = true;
+            self.pending_packets.push_back(packet);
+            self.samples_emitted += PCM_SAMPLES_PER_CHANNEL as i64;
+            return Ok(());
+        }
         let mut bytes = match (self.psymodel, self.auto_bound) {
             (PsyModel::Model1, false) => {
                 encode_frame_auto_with(&frame_header, &frame_pcm, 0, &mut self.enc_state)
@@ -695,6 +923,191 @@ mod tests {
         p
     }
 
+    // ───────────────────── §2.5 multichannel surface ─────────────────────
+
+    /// Drain every pending packet of `enc` into one contiguous stream.
+    fn drain_stream(enc: &mut Box<dyn Encoder>) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            match enc.receive_packet() {
+                Ok(pkt) => out.extend_from_slice(&pkt.data),
+                Err(Error::NeedMore) | Err(Error::Eof) => return out,
+                Err(e) => panic!("receive_packet: {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn five_channel_surround50_encodes_a_decodable_mc_stream() {
+        // channels = 5 without an explicit layout infers Surround50 →
+        // the §2.5 3/2 configuration.
+        let p = params(48_000, 5, None);
+        let mut enc = make_encoder(&p).expect("mc encoder");
+        assert_eq!(enc.output_params().channels, Some(5));
+
+        let n = 3 * PCM_SAMPLES_PER_CHANNEL;
+        let tones = [430.0, 700.0, 1_150.0, 1_800.0, 2_600.0];
+        let data: Vec<Vec<u8>> = tones
+            .iter()
+            .map(|&f| tone_plane(n, f, 48_000, 0.3))
+            .collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .expect("send_frame");
+        enc.flush().expect("flush");
+        let stream = drain_stream(&mut enc);
+        assert!(!stream.is_empty());
+
+        let decoded = crate::mc::decode_mc_stream(&stream, None).expect("mc decode");
+        assert_eq!(decoded.frames, 3);
+        assert_eq!(decoded.channels.len(), 5);
+        assert_eq!(decoded.config.front, 3);
+        assert_eq!(decoded.config.surround, 2);
+        assert!(decoded.lfe.is_none());
+    }
+
+    #[test]
+    fn surround51_layout_extracts_and_decimates_the_lfe_plane() {
+        let mut p = params(48_000, 6, None);
+        p.channel_layout = Some(oxideav_core::ChannelLayout::Surround51);
+        let mut enc = make_encoder(&p).expect("5.1 encoder");
+        assert_eq!(
+            enc.output_params().channel_layout,
+            Some(oxideav_core::ChannelLayout::Surround51)
+        );
+
+        let n = 2 * PCM_SAMPLES_PER_CHANNEL;
+        // Plane 3 (the BS.775 LFE slot) carries a constant level whose
+        // ×96 block means are trivially that level.
+        let mut data: Vec<Vec<u8>> = (0..6).map(|_| tone_plane(n, 500.0, 48_000, 0.2)).collect();
+        let lfe_level = 0.25f64;
+        let lfe_word = ((lfe_level * FULL_SCALE) as i16).to_le_bytes();
+        data[3] = lfe_word.iter().copied().cycle().take(n * 2).collect();
+        let mut frame = AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        };
+        frame.samples = n as u32;
+        enc.send_frame(&Frame::Audio(frame)).expect("send_frame");
+        enc.flush().expect("flush");
+        let stream = drain_stream(&mut enc);
+
+        let decoded = crate::mc::decode_mc_stream(&stream, None).expect("mc decode");
+        assert_eq!(decoded.channels.len(), 5, "presentation channels");
+        let lfe = decoded.lfe.expect("LFE present");
+        assert_eq!(lfe.len(), 2 * crate::mc::LFE_SAMPLES_PER_FRAME);
+        for (i, &s) in lfe.iter().enumerate() {
+            assert!(
+                (s - lfe_level).abs() < 0.02,
+                "LFE sample {i}: {s} vs {lfe_level}"
+            );
+        }
+    }
+
+    #[test]
+    fn stereo21_layout_encodes_a_two_channel_base_with_lfe_only_extension() {
+        let mut p = params(44_100, 3, None);
+        p.channel_layout = Some(oxideav_core::ChannelLayout::Stereo21);
+        let mut enc = make_encoder(&p).expect("2.1 encoder");
+        let n = 2 * PCM_SAMPLES_PER_CHANNEL;
+        let data = vec![
+            tone_plane(n, 500.0, 44_100, 0.3),
+            tone_plane(n, 800.0, 44_100, 0.3),
+            tone_plane(n, 60.0, 44_100, 0.4),
+        ];
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .expect("send_frame");
+        enc.flush().expect("flush");
+        let stream = drain_stream(&mut enc);
+        let decoded = crate::mc::decode_mc_stream(&stream, None).expect("mc decode");
+        assert_eq!(decoded.channels.len(), 2);
+        assert_eq!(decoded.config.nmch, 0, "LFE-only extension");
+        assert!(decoded.lfe.is_some());
+    }
+
+    #[test]
+    fn mc_registry_round_trip_through_the_mc_decoder() {
+        // Encoder → packets → registry decoder with mc=on: the planes
+        // come back in the same core-canonical order and count.
+        let p = params(48_000, 5, None);
+        let mut enc = make_encoder(&p).expect("mc encoder");
+        let n = 2 * PCM_SAMPLES_PER_CHANNEL;
+        let tones = [430.0, 700.0, 1_150.0, 1_800.0, 2_600.0];
+        let data: Vec<Vec<u8>> = tones
+            .iter()
+            .map(|&f| tone_plane(n, f, 48_000, 0.3))
+            .collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data,
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+
+        let mut dp = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+        dp.sample_rate = Some(48_000);
+        dp.channels = Some(5);
+        dp.options.insert("mc", "on");
+        let mut dec = crate::codec_decoder::make_decoder(&dp).expect("mc decoder");
+        let mut frames = 0usize;
+        loop {
+            match enc.receive_packet() {
+                Ok(pkt) => {
+                    dec.send_packet(&pkt).expect("send mc packet");
+                    let Frame::Audio(a) = dec.receive_frame().expect("mc frame") else {
+                        panic!("expected AudioFrame");
+                    };
+                    assert_eq!(a.data.len(), 5);
+                    frames += 1;
+                }
+                Err(Error::NeedMore) | Err(Error::Eof) => break,
+                Err(e) => panic!("receive_packet: {e}"),
+            }
+        }
+        assert_eq!(frames, 2);
+    }
+
+    #[test]
+    fn mc_encoder_rejects_unsupported_shapes_and_options() {
+        // 7 channels: no §2.5.2.15 configuration (Surround61 layout).
+        assert!(make_encoder(&params(48_000, 7, None)).is_err());
+        // LSF rate: the §2.5 extension needs an MPEG-1 base.
+        assert!(make_encoder(&params(24_000, 5, None)).is_err());
+        // Layout / channel-count mismatch.
+        let mut p = params(48_000, 5, None);
+        p.channel_layout = Some(oxideav_core::ChannelLayout::Quad);
+        assert!(make_encoder(&p).is_err());
+        // Two-channel-only options are refused, not ignored.
+        for (k, v) in [
+            ("mode", "stereo"),
+            ("bound", "8"),
+            ("psymodel", "model2"),
+            ("freeformat", "true"),
+            ("emphasis", "j17"),
+        ] {
+            let mut p = params(48_000, 5, None);
+            p.options.insert(k, v);
+            assert!(make_encoder(&p).is_err(), "{k}={v} accepted");
+        }
+        // Bad dematrix value.
+        let mut p = params(48_000, 5, None);
+        p.options.insert("dematrix", "10");
+        assert!(make_encoder(&p).is_err());
+        // dematrix '11' (no matrixing) is accepted.
+        let mut p = params(48_000, 5, None);
+        p.options.insert("dematrix", "11");
+        assert!(make_encoder(&p).is_ok());
+    }
+
     /// One S16 plane of `n` samples of a sine at `freq_hz`.
     fn tone_plane(n: usize, freq_hz: f64, sample_rate: u32, amp: f64) -> Vec<u8> {
         let omega = 2.0 * std::f64::consts::PI * freq_hz / f64::from(sample_rate);
@@ -710,8 +1123,13 @@ mod tests {
 
     #[test]
     fn make_encoder_rejects_bad_channel_count() {
-        assert!(make_encoder(&params(44_100, 3, None)).is_err());
+        // 0 channels is meaningless; ≥ 3 channels route to the §2.5
+        // multichannel path, whose DiscreteN fallback (9 channels has
+        // no named core layout) carries no §2.5.2.15 configuration.
         assert!(make_encoder(&params(44_100, 0, None)).is_err());
+        assert!(make_encoder(&params(44_100, 9, None)).is_err());
+        // 3 channels now infers Surround30 → a valid 3/0 encode.
+        assert!(make_encoder(&params(44_100, 3, None)).is_ok());
     }
 
     #[test]

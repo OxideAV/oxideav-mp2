@@ -118,6 +118,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rejected_not_panicking`), and re-fuzzed clean (bounded local
   session: ≈ 463 k execs, zero findings).
 
+- **Multichannel encode through the registered `Encoder`
+  (`src/codec_encoder.rs`).** `make_encoder` now accepts
+  `channels >= 3`, mapping `params.channel_layout` (falling back to
+  `ChannelLayout::from_count`) onto a §2.5.2.15 configuration:
+  `Surround30` → 3/0, `Surround40`/`Surround41` → 3/1 (+LFE),
+  `Quad` → 2/2, `Surround50`/`Surround51` → 3/2 (+LFE), `Stereo21` →
+  2/0 + LFE-only extension; layouts core names but the §2.5 syntax
+  cannot carry are rejected with the supported list. Input planes
+  arrive in core-canonical order; the BS.775 LFE plane is decimated
+  ×96 (per-block mean — an encoder-side lowpass choice, the standard
+  fixes only the transmitted `Fs/96` format). New `dematrix` option
+  (`00`/`01`/`11`); the two-channel-only options (`mode` / `bound` /
+  `psymodel` / `freeformat` / `emphasis`) are refused for a
+  multichannel encode rather than silently ignored; default bitrate
+  384 kbit/s. Tests cover the 5-channel inferred-Surround50 encode
+  decoding as 3/2 through `decode_mc_stream`, 5.1 LFE extraction /
+  decimation accuracy, the 2.1 LFE-only extension, a full registry
+  encoder → registry `mc=on` decoder round trip, and the
+  shape/option rejection matrix.
+
 - **Multichannel PCM through the registered `Decoder` — the r444
   registry-layout design landed (`src/codec_decoder.rs`).**
   `make_decoder` gains the `mc` codec option (`off` default — the
