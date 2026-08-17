@@ -24,7 +24,13 @@ end-to-end (dematrixing, dynamic crosstalk, multichannel prediction,
 phantom centre, LFE, multilingual channels, extension bit streams) and
 validated against the suite's matrixed per-channel references — all
 twenty Layer II multichannel streams within 1 LSB on every channel
-(see below).
+(see below) — **and encoded**: `mc_encode` emits `mc_extension()`
+payloads (§2.5.3.3 matrixing for all five main configurations,
+MC allocation, scalefactors, LFE, optional §2.5.3.2.1.3 prediction)
+that round-trip through this crate's own §2.5 decoder and clear
+measured SNR floors on the official suite's programme material; both
+directions surface through the registry via oxideav-core's
+`ChannelLayout` vocabulary (5.1 / 5.0 / quad / 4.x / 3.0 / 2.1).
 The encoder is complete through frame assembly with **both** Annex D
 psychoacoustic models (§D.1 Model 1 and §D.2 Model 2) driving the
 §C.1.5.2.7 bit allocator automatically at **all six** Layer II
@@ -505,12 +511,87 @@ variable bit rate. An in-tree (vector-free) test splices a hand-built
 round-trips it, and an adversarial-tail suite pins panic-freedom of
 the extension parser.
 
+## §2.5 multichannel encode
+
+The `mc_encode` module is the encode-side dual of `mc`: it emits a
+standard Layer II base frame whose §2.4.1.8 ancillary field carries
+the `mc_extension()` (§2.5.1.3), so a §2.5-unaware decoder plays the
+MPEG-1-compatible stereo downmix while this crate's own §2.5 decoder
+recovers the presentation channels.
+
+- **Matrixing** (§2.5.3.3): `Lo = α(L + βC + γLS)`,
+  `Ro = α(R + βC + γRS)` with the procedure-`'00'`
+  (`α = 1/(1+√2)`, `β = γ = 1/√2`), `'01'` (`α = 1/(1,5+0,5√2)`,
+  `γ = 0,5`) and `'11'` (no matrixing) constants — the α attenuation
+  is exactly what §2.5.3.2.5's de-normalisation undoes, and bounds
+  the compatible pair inside the nominal range. All five main
+  configurations are emittable (3/2, 3/1, 3/0, 2/2, 2/1, plus 2/0
+  with an LFE-only extension); the transmitted channels carry the
+  weighted signals whose inverse the decoding matrix is (unit-pinned
+  `α·denorm = 1`, `w_enc·w_dec·denorm = 1`).
+- **MC audio data** (§2.5.1.17 / §2.5.2.17): Table B.2a / B.2b
+  allocation with `msblimit = sblimit` under a §C.1.5.2.7
+  minimum-MNR greedy allocator driven by a §D.1 Model-1 SMR per
+  transmission channel, against an explicit extension bit budget
+  (default: the frame's data bits split `nmch / (2 + nmch)` to the
+  extension) with exact Table C.4 scfsi/scalefactor activation
+  pricing; the §2.5.2.14 `mc_crc_check` is computed over
+  mc_header + composite status + allocation + scfsi so the §2.5.3.1
+  detection rule fires on every emitted frame.
+- **LFE** (§2.5.3.2.4): 12 block-companded samples per frame at
+  `Fs/96` with one Table B.1 scalefactor (`lfe_allocation` 2..=15).
+- **Multichannel prediction** (§2.5.3.2.1.3, opt-in): first-order
+  zero-delay predictors per subband group fitted by least squares
+  from the encoder-side `T0`/`T1` subband signals, coefficients
+  quantized to the `(v − 127)/32` wire grid, enabled per group only
+  on a measured ≥ 10 % residual-energy win; the transmitted signal
+  is then the prediction error.
+- Composite-status options the encoder declines are signalled
+  explicitly (`tc_allocation = 0` global, `dyn_cross_on = '0'`); the
+  decode side of all of them is complete.
+
+Validated by `tests/mc_encode_roundtrip.rs` (every configuration ×
+procedure with per-channel distinct-tone **channel-separation** pins,
+§2.5.1.3 backward compatibility against the downmix equations, LFE
+companding accuracy, CRC tamper detection, exact-zero silence,
+44,1 kHz padding interop) and by the env-gated
+`tests/iso13818_4_mc_encode_oracle.rs`, which feeds the official
+suite's multichannel programme material *into* the encoder and
+decodes it back with this crate's own decoder: per-channel
+delay-compensated SNR 17,9–29,1 dB / 13,1–26,4 dB (the two 3/2
+44,1 kHz programmes) and 30,4–32,2 dB (2/1 48 kHz) at 384 kbit/s,
+with the compatible base decode tracking the §2.5.3.3 downmix at
+18,4–32,8 dB — floors pinned ~3 dB under the measured values, both
+predictor elections.
+
+**Registry surface.** Multichannel PCM flows through the registered
+codec in oxideav-core's canonical `ChannelLayout` order on both
+sides:
+
+- **Decoder** — `mc` option (`off` default / `on` / `auto` per the
+  §2.5.3.1 CRC-detection latch) and `mc_lfe` (`drop` default /
+  `hold` = zero-order-hold ×96 into the BS.775 LFE slot): 3/2 →
+  `Surround50` (+LFE `Surround51`), 3/1 → `Surround40` (+LFE
+  `Surround41`), 2/2 → `Quad`, 3/0 → `Surround30`, 2/0+LFE →
+  `Stereo21`, and the configurations core names no layout for →
+  the documented `DiscreteN` catch-all. The layout is announced via
+  `output_params().channel_layout`; second-stereo / multilingual
+  programmes stay on the direct `decode_mc_stream` API.
+- **Encoder** — `channels >= 3` maps `params.channel_layout`
+  (`from_count` fallback) onto the §2.5.2.15 configuration
+  (`Surround30/40/41`, `Quad`, `Surround50/51`, `Stereo21`),
+  extracting and ×96-decimating the BS.775 LFE plane; options
+  `dematrix` (`00`/`01`/`11`) and `mc_prediction`.
+
 ## Not yet supported
 
-- **Multichannel encode**: the §2.5 decoder is complete (above), but
-  this crate does not emit `mc_extension()` payloads — matrixing,
-  composite-mode election and MC bit allocation are encoder-side
-  concerns the standard leaves largely informative.
+- Encoder-side **dynamic crosstalk** and adaptive `tc_allocation`
+  election (§2.5.2.15), the `'10'` phase-mixed-surround *encode*,
+  phantom-centre coding, second stereo programme and multilingual
+  channels on the encode side, and emitting a §2.5.1.5 extension bit
+  stream (an extension that does not fit the base frame's ancillary
+  capacity is refused, not spilled) — the decode side of all of
+  these is complete and conformance-validated.
 - The optional §2.5.3.2.1.1 post-dematrix surround processing for
   procedure `'10'` (−90° phase shift, dynamic expansion) — the spec
   marks both "may be done ... before output"; the suite's references
