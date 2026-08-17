@@ -118,6 +118,25 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   rejected_not_panicking`), and re-fuzzed clean (bounded local
   session: ≈ 463 k execs, zero findings).
 
+- **§2.5 encoder validated on official ISO/IEC 13818-4 programme
+  material as oracle input
+  (`tests/iso13818_4_mc_encode_oracle.rs`)** — env-gated on
+  `OXIDEAV_MP2_ISO13818_4_DIR` like the decode sweeps, vectors never
+  committed. The suite's multichannel reference PCM (real programme
+  material, far denser than the in-tree tone matrix) is fed *into*
+  `mc_encode` and decoded back with this crate's own §2.5 decoder —
+  no third-party bitstream comparison anywhere. Measured and pinned:
+  the 3/2 encodes of both five-channel 44,1 kHz programmes reach
+  per-channel delay-compensated SNR 17,9–29,1 dB (floor 15) and
+  13,1–26,4 dB (floor 10) at 384 kbit/s, the 2/1 48 kHz programme
+  30,4–32,2 dB (floor 27); the §2.5.1.3 MPEG-1-compatible base decode
+  of the same bytes tracks the §2.5.3.3 downmix equations at
+  18,4–32,8 dB; every emitted stream fires the §2.5.3.1 CRC
+  detection. The lag sweep run while building the harness pinned the
+  exact analysis+synthesis chain delay at **481 samples** on
+  broadband material (the tone-based in-tree envelope constant 480 is
+  insensitive to the last sample).
+
 - **Official ISO/IEC 13818-4 multichannel conformance sweep
   (`tests/iso13818_4_mc_conformance.rs`)** — env-gated on
   `OXIDEAV_MP2_ISO13818_4_DIR` like the base sweep, vectors never
