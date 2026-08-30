@@ -315,9 +315,7 @@ impl FrameDecodeState {
         for fb in &mut self.filterbank {
             fb.reset();
         }
-        for de in &mut self.deemphasis {
-            *de = None;
-        }
+        self.deemphasis.fill(None);
     }
 
     fn ensure_channels(&mut self, channels: usize) {

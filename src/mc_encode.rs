@@ -493,7 +493,7 @@ impl McEncodeState {
             fb.reset();
         }
         for h in self.role_hist.iter_mut().chain(self.ml_hist.iter_mut()) {
-            h.iter_mut().for_each(|s| *s = 0.0);
+            h.fill(0.0);
         }
     }
 

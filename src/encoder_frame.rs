@@ -323,9 +323,7 @@ impl EncodeFrameState {
         for h in &mut self.psy1_history {
             h.iter_mut().for_each(|s| *s = 0.0);
         }
-        for p in &mut self.preemphasis {
-            *p = None;
-        }
+        self.preemphasis.fill(None);
     }
 
     /// Apply the §2.4.2.4 pre-emphasis `header` calls for to each
