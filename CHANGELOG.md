@@ -8,6 +8,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Opt-in §2.5.3.2.1.1 post-dematrix surround processing** for
+  dematrixing procedure `'10'` (`surround` module): the −90° phase
+  shift (item 3a) as a 193-tap linear-phase FIR Hilbert transformer
+  applied to the surround presentation channels, with every other
+  output (fronts, LFE at `Fs/96`, full-/half-rate multilingual)
+  delayed to stay sample-aligned — via `apply_surround_processing`
+  (whole stream) or the streaming `SurroundProcessor` (per frame,
+  histories carried). Item 3b ("Dynamic expansion") is named but not
+  parameterised anywhere in ISO/IEC 13818-3, so it is not offered;
+  both stages are strictly optional ("may be done … before output")
+  and the suite's references decode to ≤ 1 LSB without them.
+
 - **§2.5 multichannel encoder remainders** — every encode-side option
   the syntax offers is now emittable, each decoded by this crate's own
   §2.5 decoder and the base layer accepted by the black-box reference

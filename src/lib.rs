@@ -251,6 +251,7 @@ pub mod mc;
 pub mod mc_encode;
 pub mod psy;
 pub mod requant;
+pub mod surround;
 pub mod synthesis;
 pub mod tables;
 pub mod tables_analysis;
@@ -343,6 +344,7 @@ pub use psy::{
     TONALITY_THRESHOLD_DB, TONAL_DECIMATION_WINDOW_BARK,
 };
 pub use requant::{degroup, read_triplet, requantize_code, requantize_scaled, RequantError};
+pub use surround::{apply_surround_processing, PhaseShift90, SurroundProcessor, PHASE_SHIFT_DELAY};
 pub use synthesis::{SynthesisFilterbank, NUM_SUBBANDS as SYNTH_NUM_SUBBANDS, V_BUF_LEN};
 pub use tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
 pub use tables_analysis::{C as ANALYSIS_WINDOW, C_LEN as ANALYSIS_WINDOW_LEN};

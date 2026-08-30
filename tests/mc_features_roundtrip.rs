@@ -852,3 +852,114 @@ fn black_box_reference_decoder_accepts_the_emitted_base_frames() {
         let _ = std::fs::remove_file(&wav);
     }
 }
+
+// -------------------------------------------------------------------
+// 8. §2.5.3.2.1.1 post-dematrix surround processing ('10', opt-in)
+// -------------------------------------------------------------------
+
+#[test]
+fn surround_processing_shifts_surrounds_and_delays_the_rest() {
+    use oxideav_mp2::surround::{apply_surround_processing, PhaseShift90, PHASE_SHIFT_DELAY};
+    let sample_rate = 48_000;
+    let n_frames = 4;
+    let header = base_header(sample_rate, 384_000);
+    let cfg = McEncodeConfig {
+        dematrix_procedure: 2,
+        ..McEncodeConfig::default()
+    };
+    let pcm = tone_streams(5, sample_rate, n_frames, 0.25);
+    let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
+    let plain = decode_mc_stream(&stream, None).expect("decode");
+    let mut processed = plain.clone();
+    assert!(apply_surround_processing(&mut processed), "did not apply");
+    // Front channels: exact PHASE_SHIFT_DELAY delay of the plain decode.
+    for ch in [0usize, 1, 2] {
+        for i in PHASE_SHIFT_DELAY..plain.channels[ch].len() {
+            assert!(
+                (processed.channels[ch][i] - plain.channels[ch][i - PHASE_SHIFT_DELAY]).abs()
+                    < 1e-12,
+                "front ch {ch} not a pure delay at {i}"
+            );
+        }
+    }
+    // Surround channels: the module's own −90° shift of the plain
+    // decode (identical filter and alignment).
+    for ch in [3usize, 4] {
+        let mut want = plain.channels[ch].clone();
+        PhaseShift90::new().process(&mut want);
+        for i in 0..want.len() {
+            assert!(
+                (processed.channels[ch][i] - want[i]).abs() < 1e-12,
+                "surround ch {ch} mismatch at {i}"
+            );
+        }
+        // …and it genuinely is a quarter-cycle shift: the surround
+        // tone's power survives while its correlation with the
+        // (delay-compensated) unshifted signal collapses.
+        let lo = FILTERBANK_DELAY + PCM_SAMPLES_PER_CHANNEL;
+        let hi = plain.channels[ch].len() - PCM_SAMPLES_PER_CHANNEL;
+        let (mut dot, mut e1, mut e2) = (0.0f64, 0.0f64, 0.0f64);
+        for i in lo..hi {
+            let a = processed.channels[ch][i];
+            let b = plain.channels[ch][i - PHASE_SHIFT_DELAY];
+            dot += a * b;
+            e1 += a * a;
+            e2 += b * b;
+        }
+        assert!(e1 > 0.25 * e2, "surround ch {ch}: power lost in the shift");
+        let rho = dot / (e1 * e2).sqrt().max(f64::MIN_POSITIVE);
+        assert!(
+            rho.abs() < 0.05,
+            "surround ch {ch}: correlation {rho:.3} after a quarter-cycle shift"
+        );
+    }
+    // A non-'10' stream is left untouched.
+    let cfg0 = McEncodeConfig::default();
+    let stream0 = encode_mc_all_frames(&header, &cfg0, &pcm, None).expect("encode '00'");
+    let mut decoded0 = decode_mc_stream(&stream0, None).expect("decode '00'");
+    let before = decoded0.channels.clone();
+    assert!(!apply_surround_processing(&mut decoded0));
+    assert_eq!(decoded0.channels, before);
+}
+
+#[test]
+fn streaming_surround_processor_matches_the_whole_stream_pass() {
+    use oxideav_mp2::mc::{decode_mc_frame_with, McDecodeState};
+    use oxideav_mp2::surround::{apply_surround_processing, SurroundProcessor};
+    let sample_rate = 48_000;
+    let n_frames = 3;
+    let header = base_header(sample_rate, 384_000);
+    let cfg = McEncodeConfig {
+        front: 3,
+        surround: 1,
+        dematrix_procedure: 2,
+        ..McEncodeConfig::default()
+    };
+    let pcm = tone_streams(4, sample_rate, n_frames, 0.25);
+    let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
+    let mut whole = decode_mc_stream(&stream, None).expect("decode");
+    assert!(apply_surround_processing(&mut whole));
+
+    let mut state = McDecodeState::new();
+    let mut proc = SurroundProcessor::new();
+    let mut offset = 0usize;
+    let mut streamed: Vec<Vec<f64>> = vec![Vec::new(); 4];
+    while offset < stream.len() {
+        let (mut frame, _) =
+            decode_mc_frame_with(&stream[offset..], None, &mut state).expect("frame");
+        offset += frame.base_header.frame_size_bytes();
+        assert!(proc.process_frame(&mut frame));
+        for (acc, ch) in streamed.iter_mut().zip(frame.channels) {
+            acc.extend(ch);
+        }
+    }
+    for ch in 0..4 {
+        assert_eq!(streamed[ch].len(), whole.channels[ch].len());
+        for i in 0..streamed[ch].len() {
+            assert!(
+                (streamed[ch][i] - whole.channels[ch][i]).abs() < 1e-12,
+                "ch {ch} diverges at {i}"
+            );
+        }
+    }
+}
