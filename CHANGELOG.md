@@ -8,6 +8,60 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **§2.5 multichannel encoder remainders** — every encode-side option
+  the syntax offers is now emittable, each decoded by this crate's own
+  §2.5 decoder and the base layer accepted by the black-box reference
+  decoder:
+  - **Phase-mixed surround** (`dematrix_procedure = '10'`, §C.2.1.5):
+    `Lo = α(L + βC − γ·jS)`, `Ro = α(R + βC + γ·jS)` with the
+    monophonic surround `jS = (LS + RS)/2` (3/2) / `S` (3/1); all
+    §2.5.3.2.1.1 `'10'` dematrix arms round-trip (the 3/1 row 5
+    `tc_allocation` is accepted exactly there).
+  - **Signal-adaptive per-subband-group `tc_allocation`**
+    (`adaptive_tc`, §C.2.1.6): per group the row whose transmitted
+    signals have the lowest maximum scalefactors wins;
+    `tc_sbgr_select = '0'` with twelve values is emitted when the
+    election varies. The transmission channels are now assembled in
+    the subband domain from per-signal analyses, so switching per
+    group is exact.
+  - **Dynamic crosstalk** (`dyn_cross`, §C.2.1.7): per subband group
+    every legal `dyn_cross_mode` (and `dyn_second_stereo`, and both
+    `dyn_cross_LR` polarities) is scored against the decoder's actual
+    substitute — copied raw samples (from the re-read encoded base or
+    a `Txy` carrier) re-scaled by the channel's own scalefactors —
+    and the admissible mode dropping the most channels is signalled.
+    `Txy` carriers follow the Annex-G intensity convention: the sum
+    is quantised against its own envelope while each channel keeps
+    its own wire scalefactors.
+  - **Phantom-centre coding** (`phantom_centre`, `centre = '11'`,
+    §C.2.1.9): the centre's subbands ≥ 12 are folded at −3 dB into
+    `Lw` / `Rw` in the subband domain (`centre_limited` ⇒ zero
+    allocation on the wire), with the §2.5.2.15 `tc_allocation`
+    restriction to centre-carrying rows enforced and honoured by the
+    adaptive election.
+  - **Second stereo programme** (`second_stereo`, `surround = '11'`):
+    `L2` / `R2` transmitted unmatrixed on the last two transmission
+    channels (3/0 + 2/0 and 2/0 + 2/0), including the
+    `dyn_second_stereo` crosstalk election.
+  - **Multilingual channels** (`multilingual`,
+    `multilingual_fs_half`, §2.5.2.18): up to seven Layer II ml
+    channels in `ml_audio_data()` at the full or half sampling
+    frequency (Table B.2a/b vs Table B.1, 12 vs 6 granules), with
+    their own Model-1-driven greedy allocation inside the extension
+    budget.
+  - **Extension bit stream** (`ext_bit_stream`, §2.5.1.5): the
+    extension part that exceeds the base frame's ancillary capacity
+    spills into a per-frame `ext_frame()` (§2.5.1.10 `ext_header`
+    with the §2.5.2.10 128-bit CRC; header-only frames when
+    everything fits), via the new `encode_mc_frame_ext_with` /
+    `encode_mc_all_frames_ext` entry points returning
+    `McEncodedFrame` / `McEncodedStream`.
+  - **Prediction fit against the decoded base**: the §2.5.3.2.1.3
+    predictors are now fitted on the re-read encoded `T0`/`T1`
+    (exactly the samples the decoder predicts from) instead of
+    mirror filterbanks, and follow the per-group `npred` /
+    predictable-channel adaptation under dynamic crosstalk.
+
 - **ISO/IEC 13818-3 §2.5 multichannel-extension ENCODER (`mc_encode`
   module)** — the encode-side dual of the r444 `mc` decoder. Emits a
   standard Layer II base frame whose §2.4.1.8 ancillary field carries
@@ -22,7 +76,7 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     (`Cw = αβ·C`, …) whose inverse the §2.5.3.2.5 de-normalisation is
     (unit-pinned: `α·denorm = 1`, `w_enc·w_dec·denorm = 1`). All five
     emittable configurations: 3/2, 3/1, 3/0, 2/2, 2/1 (+ 2/0 with
-    LFE). The `'10'` phase-mixed-surround *encode* is not offered.
+    LFE).
   - **MC audio data** (§2.5.1.17 / §2.5.2.17): Table B.2a (48 kHz) /
     B.2b (44,1 / 32 kHz) allocation with `msblimit = sblimit`, a
     §C.1.5.2.7 minimum-MNR greedy allocator driven by a §D.1 Model-1
@@ -32,10 +86,9 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     `nmch / (2 + nmch)` to the extension; `mc_bits` overrides), exact
     activation pricing from the §C.1.5.2.5 Table C.4 scfsi selection,
     and §2.4.3.3.4 quantization via the existing sample writer.
-  - **Composite status** (§2.5.1.15): `tc_sbgr_select = '1'` with the
-    global `tc_allocation = 0`, `dyn_cross_on = '0'`,
-    `mc_prediction_on = '0'` — the syntax's encoder-side options
-    declined explicitly (their decode side is complete in `mc`).
+  - **Composite status** (§2.5.1.15): `tc_sbgr_select`,
+    `tc_allocation`, `dyn_cross_on`, `mc_prediction_on` — see the
+    §2.5 encoder-remainder entry below for the elections.
   - **LFE** (§2.5.3.2.4): 12 samples/frame at `Fs/96`,
     block-companded with one Table B.1 scalefactor and an ungrouped
     `2^nb − 1`-level quantizer (`lfe_allocation` 2..=15, default 7 →

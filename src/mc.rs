@@ -89,7 +89,7 @@ const SLOTS_PER_PART: usize = 12;
 pub const LFE_SAMPLES_PER_FRAME: usize = 12;
 /// Deepest reach of the §2.5.3.2.1.3 predictor into the past:
 /// `delay_comp` ≤ 7 plus predictor order `pci` ≤ 2.
-const PRED_HISTORY: usize = 9;
+pub(crate) const PRED_HISTORY: usize = 9;
 
 /// √2, spelled once.
 const SQRT2: f64 = std::f64::consts::SQRT_2;
@@ -408,7 +408,7 @@ pub fn sbgr_of_subband(sb: usize) -> usize {
 /// How one transmission channel's (allocation, samples) are obtained
 /// in a subband group under dynamic crosstalk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TcSource {
+pub(crate) enum TcSource {
     /// Transmitted normally.
     Transmitted,
     /// Copied from another extension transmission channel (0-based
@@ -425,7 +425,7 @@ enum TcSource {
 /// copied from the base pair. Returns `None` for forbidden codes.
 ///
 /// Transcribed from the §2.5.2.15 `dyn_cross_mode` tables A)…E).
-fn dyn_cross_sources(config: &McConfig, mode: u8) -> Option<Vec<TcSource>> {
+pub(crate) fn dyn_cross_sources(config: &McConfig, mode: u8) -> Option<Vec<TcSource>> {
     use TcSource::{FromBase, FromTc, Transmitted};
     let main = config.main_nmch();
     let table: Option<Vec<TcSource>> = match (config.front, config.surround) {
@@ -477,7 +477,7 @@ fn dyn_cross_sources(config: &McConfig, mode: u8) -> Option<Vec<TcSource>> {
 /// §2.5.2.15 `npred` table: number of predictors as a function of the
 /// configuration and the active `dyn_cross_mode` (mode 0 when dynamic
 /// crosstalk is off).
-fn npred_for(config: &McConfig, dyn_mode: u8) -> usize {
+pub(crate) fn npred_for(config: &McConfig, dyn_mode: u8) -> usize {
     match (config.front, config.surround) {
         (3, 2) => [6, 4, 4, 4, 2, 2, 2, 0, 2, 2, 2, 0, 0, 0, 0]
             .get(dyn_mode as usize)
@@ -499,7 +499,7 @@ fn npred_for(config: &McConfig, dyn_mode: u8) -> usize {
 /// dynamic crosstalk modes, the correspondence … has to be adapted").
 /// Channels carrying combined (`Txy`) signals or copied channels get
 /// none ("no prediction").
-fn predictable_channels(config: &McConfig, dyn_mode: u8) -> Vec<usize> {
+pub(crate) fn predictable_channels(config: &McConfig, dyn_mode: u8) -> Vec<usize> {
     match (config.front, config.surround) {
         (3, 2) => match dyn_mode {
             0 => vec![0, 1, 2],
@@ -583,7 +583,7 @@ pub(crate) fn tc_roles(config: &McConfig, tc_allocation: u8) -> Vec<McChannel> {
 /// `role`: "Lw and LSw shall be copied from Lo, Rw and RSw shall be
 /// copied from Ro, Cw and Sw shall be copied from Lo if
 /// dyn_cross_LR == '0', or from Ro if dyn_cross_LR == '1'."
-fn fallback_base_channel(role: McChannel, dyn_cross_lr: bool) -> usize {
+pub(crate) fn fallback_base_channel(role: McChannel, dyn_cross_lr: bool) -> usize {
     match role {
         McChannel::Left | McChannel::LeftSurround | McChannel::SecondLeft => 0,
         McChannel::Right | McChannel::RightSurround | McChannel::SecondRight => 1,
@@ -599,25 +599,25 @@ fn fallback_base_channel(role: McChannel, dyn_cross_lr: bool) -> usize {
 /// synthesis filterbank, with the §2.4.3.3.3 scalefactor scaling kept
 /// separable (dynamic crosstalk copies the *requantised but not yet
 /// re-scaled* samples, §2.5.2.15).
-struct BaseSubbands {
-    header: FrameHeader,
+pub(crate) struct BaseSubbands {
+    pub(crate) header: FrameHeader,
     /// Requantised (unscaled) samples `s''`, `[ch][slot][sb]`.
-    raw: Vec<Vec<[f64; NUM_SUBBANDS]>>,
+    pub(crate) raw: Vec<Vec<[f64; NUM_SUBBANDS]>>,
     /// Scaled samples `s' = factor · s''`, `[ch][slot][sb]`.
-    scaled: Vec<Vec<[f64; NUM_SUBBANDS]>>,
+    pub(crate) scaled: Vec<Vec<[f64; NUM_SUBBANDS]>>,
     /// Base `nb_steps` per `[ch][sb]` (0 = no allocation).
-    nb_steps: [[u32; NUM_SUBBANDS]; 2],
+    pub(crate) nb_steps: [[u32; NUM_SUBBANDS]; 2],
     /// Absolute bit position of the §2.4.1.8 ancillary field start.
-    anc_start_bit: u64,
+    pub(crate) anc_start_bit: u64,
     /// Frame size in bytes.
-    frame_size: usize,
+    pub(crate) frame_size: usize,
 }
 
 /// Decode one base Layer II frame to requantised + scaled subband
 /// samples (mirrors `frame::decode_frame_with`'s sample loop, but
 /// keeps the scalefactor application separable and stops before the
 /// synthesis filterbank).
-fn decode_base_subbands(buf: &[u8]) -> Result<BaseSubbands, McError> {
+pub(crate) fn decode_base_subbands(buf: &[u8]) -> Result<BaseSubbands, McError> {
     let header = FrameHeader::parse(buf)?;
     if header.lsf {
         return Err(McError::LsfBase);
@@ -701,15 +701,6 @@ fn decode_base_subbands(buf: &[u8]) -> Result<BaseSubbands, McError> {
         anc_start_bit: reader.bit_position(),
         frame_size,
     })
-}
-
-/// Absolute bit position at which the §2.4.1.8 ancillary field of one
-/// encoded base frame starts — i.e. where an `mc_extension()` payload
-/// must be spliced (§2.5.1.3: the extension rides the ancillary field
-/// directly after the base frame's sample loop). Used by the
-/// encode-side [`crate::mc_encode`] module.
-pub(crate) fn base_ancillary_start_bit(frame: &[u8]) -> Result<u64, McError> {
-    decode_base_subbands(frame).map(|b| b.anc_start_bit)
 }
 
 // ---------------------------------------------------------------------------
