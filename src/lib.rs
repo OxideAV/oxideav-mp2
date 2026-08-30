@@ -284,13 +284,14 @@ pub use encoder_bit_allocator::{
     BitAllocError, FixedBitBudget, SmrTable, CRC_BITS, HEADER_BITS, SCFSI_BITS_PER_SLOT,
     WORST_CASE_SCALEFACTOR_BITS_PER_SLOT,
 };
+pub use encoder_frame::alias_cancellation_guard;
 pub use encoder_frame::{
     choose_stereo_coding, encode_all_frames, encode_all_frames_js, encode_all_frames_model2,
     encode_all_frames_with_ancillary, encode_all_frames_with_smr, encode_frame, encode_frame_auto,
     encode_frame_auto_js_model2, encode_frame_auto_js_with, encode_frame_auto_model2,
     encode_frame_auto_with, encode_frame_auto_with_ancillary, encode_frame_with,
     encode_frame_with_ancillary, encode_frame_with_state_and_ancillary, EncodeError,
-    EncodeFrameState, MODEL1_WINDOW_DELAY_SAMPLES,
+    EncodeFrameState, ALIAS_GUARD_DB, MODEL1_WINDOW_DELAY_SAMPLES,
 };
 pub use encoder_samples::{
     quantize_sample, quantize_scaled, write_triplet, write_triplet_scaled, SampleWriteError,

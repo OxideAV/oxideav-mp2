@@ -574,7 +574,8 @@ fn model1_smr(
     let mut window = Vec::with_capacity(LAYER2_FFT_LEN);
     window.extend_from_slice(hist);
     window.extend_from_slice(&pcm[..head.min(pcm.len())]);
-    let smr = compute_smr_model1_frame(&window, &scf_max, fs, per_ch_kbps);
+    let mut smr = compute_smr_model1_frame(&window, &scf_max, fs, per_ch_kbps);
+    crate::encoder_frame::alias_cancellation_guard(&mut smr, &scf_max);
     let tail_at = pcm.len() - hist_len;
     hist.copy_from_slice(&pcm[tail_at..]);
     smr.to_vec()

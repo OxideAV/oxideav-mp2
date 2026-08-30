@@ -471,6 +471,7 @@ fn compute_auto_smr_table(
         let window = delayed_model1_window(&state.psy1_history[ch], &pcm[ch]);
         let ch_smr = compute_smr_model1_frame(&window, &scf_max, fs, bitrate_per_channel_kbps);
         smr[ch][..NUM_SUBBANDS].copy_from_slice(&ch_smr[..NUM_SUBBANDS]);
+        alias_cancellation_guard(&mut smr[ch][..NUM_SUBBANDS], &scf_max[..NUM_SUBBANDS]);
 
         // Advance the history: this frame's last 192 samples feed the
         // next frame's window head.
@@ -478,6 +479,56 @@ fn compute_auto_smr_table(
         state.psy1_history[ch].copy_from_slice(&pcm[ch][tail_at..]);
     }
     smr
+}
+
+/// Level window of the alias-cancellation guard
+/// ([`alias_cancellation_guard`]), in dB.
+pub const ALIAS_GUARD_DB: f64 = 12.0;
+
+/// Alias-cancellation guard for the auto-SMR tables (both Annex D
+/// models).
+///
+/// The §C.1.3 polyphase filterbank's transition bands split a
+/// component near a subband edge across two subbands whose aliases
+/// cancel only in the synthesis bank — and only when *both* are
+/// transmitted. The Annex D models judge each subband as a sound: the
+/// weaker replica (−6 dB for a tone 50 Hz above an edge) is masked by
+/// the stronger one in the same critical band and receives an SMR that
+/// starves it of bits, leaving the alias uncancelled — a level error
+/// on the component itself (measured before this guard: −2,7 dB on an
+/// 11,3 kHz line at 128–192 kbit/s, an SNR plateau at 18 dB) that no
+/// masking argument covers. Where a subband's maximum scalefactor lies
+/// within [`ALIAS_GUARD_DB`] below a neighbour's, its SMR is raised to
+/// the neighbour's SMR less the level difference, so both halves of
+/// the component are quantised to the same noise floor. Purely an
+/// encoder-side refinement (Annex C / D are informative); a no-op
+/// wherever adjacent levels differ by more than the window.
+pub fn alias_cancellation_guard(smr: &mut [f64], scf_max: &[f64]) {
+    let n = smr.len().min(scf_max.len());
+    let level = |sb: usize| 20.0 * scf_max[sb].max(f64::MIN_POSITIVE).log10();
+    let orig: Vec<f64> = smr[..n].to_vec();
+    // A band whose maximum sample sits at (or below) the smallest Table
+    // 3-B.1 multiplier carries no transmittable component — the
+    // neutral index every inactive / silent band is assigned — and a
+    // non-finite SMR is the model's own "nothing here" verdict; neither
+    // may lift a neighbour (silence must keep round-tripping to exact
+    // zero).
+    let silent = SCALEFACTORS[SCALEFACTORS.len() - 1];
+    for sb in 0..n {
+        if scf_max[sb] <= silent || !orig[sb].is_finite() {
+            continue;
+        }
+        for nb in [sb.wrapping_sub(1), sb + 1] {
+            if nb >= n {
+                continue;
+            }
+            // `sb` is the stronger (or equal) neighbour of `nb`.
+            let diff = level(sb) - level(nb);
+            if (0.0..=ALIAS_GUARD_DB).contains(&diff) {
+                smr[nb] = smr[nb].max(orig[sb] - diff);
+            }
+        }
+    }
 }
 
 /// Assemble the §D.1 Step-1 Layer II analysis window for one frame:
@@ -513,6 +564,7 @@ fn delayed_model1_window(history: &[f64], pcm: &[f64]) -> Vec<f64> {
 fn compute_auto_smr_table_model2(
     header: &FrameHeader,
     pcm: &[Vec<f64>],
+    subband_samples: &[[[f64; SUBBAND_SAMPLES_PER_FRAME]; NUM_SUBBANDS]],
     channels: usize,
     state: &mut EncodeFrameState,
 ) -> SmrTable {
@@ -530,6 +582,13 @@ fn compute_auto_smr_table_model2(
     for ch in 0..channels {
         let ch_smr = compute_smr_model2_layer2_frame(&pcm[ch], fs, &mut state.model2[ch]);
         smr[ch][..NUM_SUBBANDS].copy_from_slice(&ch_smr[..NUM_SUBBANDS]);
+        let sf = compute_scalefactors(&subband_samples[ch], NUM_SUBBANDS);
+        let mut scf_max = [0.0f64; NUM_SUBBANDS];
+        for sb in 0..NUM_SUBBANDS {
+            let min_idx = sf[0][sb].min(sf[1][sb]).min(sf[2][sb]) as usize;
+            scf_max[sb] = SCALEFACTORS[min_idx];
+        }
+        alias_cancellation_guard(&mut smr[ch][..NUM_SUBBANDS], &scf_max);
     }
     smr
 }
@@ -1226,7 +1285,8 @@ fn encode_frame_inner_impl(
             &owned_smr
         }
         SmrSource::AutoModel2 => {
-            owned_smr = compute_auto_smr_table_model2(header, pcm, channels, state);
+            owned_smr =
+                compute_auto_smr_table_model2(header, pcm, &subband_samples, channels, state);
             &owned_smr
         }
     };
@@ -2921,7 +2981,10 @@ mod tests {
         window
             .extend_from_slice(&pcm[0][..crate::psy::LAYER2_FFT_LEN - MODEL1_WINDOW_DELAY_SAMPLES]);
         let fs = annex_d_sampling_rate(header.sample_rate).unwrap();
-        let expect = compute_smr_model1_frame(&window, &scf_max, fs, 192.0);
+        let mut expect = compute_smr_model1_frame(&window, &scf_max, fs, 192.0);
+        // …followed by the alias-cancellation guard the auto path
+        // applies on top of the raw §D.1 table.
+        alias_cancellation_guard(&mut expect, &scf_max);
         assert_eq!(&smr[0][..NUM_SUBBANDS], &expect[..NUM_SUBBANDS]);
 
         // And the history advanced to the frame tail.
@@ -2929,5 +2992,29 @@ mod tests {
             &state.psy1_history[0][..],
             &pcm[0][PCM_SAMPLES_PER_CHANNEL - MODEL1_WINDOW_DELAY_SAMPLES..]
         );
+    }
+    #[test]
+    fn alias_guard_lifts_a_near_level_neighbour_and_ignores_distant_ones() {
+        // Subband 5 is the strong component (SMR 30 dB); subband 4 is
+        // its −6 dB alias replica the model starved (SMR −11 dB);
+        // subband 6 is 24 dB down (a genuinely separate, quiet band).
+        let mut scf_max = [1e-6f64; NUM_SUBBANDS];
+        scf_max[5] = 0.5;
+        scf_max[4] = 0.5 * 10f64.powf(-6.0 / 20.0);
+        scf_max[6] = 0.5 * 10f64.powf(-24.0 / 20.0);
+        let mut smr = [-40.0f64; NUM_SUBBANDS];
+        smr[5] = 30.0;
+        smr[4] = -11.0;
+        smr[6] = -11.0;
+        alias_cancellation_guard(&mut smr, &scf_max);
+        assert!(
+            (smr[4] - 24.0).abs() < 1e-9,
+            "replica lifted to 30 − 6: {}",
+            smr[4]
+        );
+        assert_eq!(smr[6], -11.0, "a −24 dB neighbour is outside the window");
+        assert_eq!(smr[5], 30.0, "the strong band itself is untouched");
+        // Silent bands next to silent bands stay silent-valued.
+        assert_eq!(smr[20], -40.0);
     }
 }

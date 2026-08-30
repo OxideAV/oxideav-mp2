@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Alias-cancellation guard on the auto-SMR tables**
+  (`alias_cancellation_guard`, both Annex D models, base and §2.5
+  encoders): a component near a subband edge is split by the §C.1.3
+  transition band into two subbands whose aliases cancel only when
+  both are transmitted; the masking models judged the weaker replica
+  masked and starved it, leaving the alias uncancelled (measured:
+  −2,7 dB on an 11,3 kHz line and an 18 dB SNR plateau at
+  128–192 kbit/s). A subband whose maximum scalefactor lies within
+  12 dB below a signal-bearing neighbour's now inherits that
+  neighbour's SMR less the level difference. Measured on the new
+  black-box equal-rate A/B (`tests/encoder_reference_ab.rs`, 48 kHz
+  stereo multitone, both chains decoded by this crate):
+  128 kbit/s 18,2 → 23,6 dB (reference 17,5), 192 kbit/s
+  18,4 → 39,5 dB (23,2), 256 kbit/s 33,5 → 48,9 dB (30,4),
+  384 kbit/s 49,5 → 79,9 dB (39,5). Silence still round-trips to
+  exact zero (silent bands never lift a neighbour).
+- **Registry encoder options** for the §2.5 remainders: `dematrix`
+  accepts `10`, `tc` (`auto` or a §2.5.2.15 row), `mc_dyncross`,
+  `mc_phantom`; illegal combinations fail at `make_encoder` time.
+- **`encode_roundtrip` fuzz target** (write-side conformance): every
+  `Ok` encode — two-channel base and §2.5 with every election — must
+  decode through the crate's own decoders with matching shapes.
+
 - **Opt-in §2.5.3.2.1.1 post-dematrix surround processing** for
   dematrixing procedure `'10'` (`surround` module): the −90° phase
   shift (item 3a) as a 193-tap linear-phase FIR Hilbert transformer
