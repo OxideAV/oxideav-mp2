@@ -68,3 +68,15 @@ name = "decode"
 path = "fuzz_targets/decode.rs"
 test = false
 doc = false
+
+# Target 2 — `encode_roundtrip`. The r453 write-side conformance
+# fuzzer: arbitrary bytes become a legal header + §2.5 configuration +
+# PCM; every Ok encode must decode through the crate's own base and
+# §2.5 decoders with matching shapes (see the target's header comment
+# for the full contract). Spec basis: ISO/IEC 11172-3 §2.4,
+# ISO/IEC 13818-3 §2.5 / §C.2.
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
