@@ -341,8 +341,10 @@ fn legal_tc_values(cfg: &McEncodeConfig) -> Vec<u8> {
 }
 
 impl McEncodeConfig {
-    /// Validate the configuration.
-    fn validate(&self) -> Result<(), McEncodeError> {
+    /// Validate the configuration — every encode entry point runs this
+    /// first; callers building a configuration from external input
+    /// (e.g. codec options) can run it early to fail fast.
+    pub fn validate(&self) -> Result<(), McEncodeError> {
         if !matches!(self.front, 2 | 3) {
             return Err(McEncodeError::BadConfig(format!(
                 "front={} (2 or 3)",

@@ -374,15 +374,16 @@ fn mc_plan_for_layout(
 
 /// Parse the `dematrix` codec option (§2.5.2.13 `dematrix_procedure`
 /// for a multichannel encode): `"0"` / `"00"` (default), `"1"` /
-/// `"01"`, or `"3"` / `"11"` (no matrixing). The `'10'`
-/// phase-mixed-surround encode is not offered.
+/// `"01"`, `"2"` / `"10"` (phase-mixed surround — 3/1 and 3/2
+/// configurations only), or `"3"` / `"11"` (no matrixing).
 fn dematrix_opt(s: Option<&str>) -> Result<u8> {
     match s {
         None | Some("0") | Some("00") => Ok(0),
         Some("1") | Some("01") => Ok(1),
+        Some("2") | Some("10") => Ok(2),
         Some("3") | Some("11") => Ok(3),
         Some(other) => Err(Error::invalid(format!(
-            "oxideav-mp2: dematrix={other:?} not recognised (00 / 01 / 11)"
+            "oxideav-mp2: dematrix={other:?} not recognised (00 / 01 / 10 / 11)"
         ))),
     }
 }
@@ -540,10 +541,14 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
 /// feed. The base pair is always a `Stereo`-mode MPEG-1 frame, so the
 /// two-channel-only options (`mode` / `bound` / `psymodel` /
 /// `freeformat` / `emphasis`) are refused rather than silently
-/// ignored; `dematrix` selects the §2.5.2.13 procedure,
-/// `mc_prediction` (`"true"` / `"false"`, default off) enables the
-/// §2.5.3.2.1.3 predictor election; `crc` and the header metadata
-/// flags apply as for the two-channel encoder.
+/// ignored; `dematrix` selects the §2.5.2.13 procedure (`'10'`
+/// included), `mc_prediction` (`"true"` / `"false"`, default off)
+/// enables the §2.5.3.2.1.3 predictor election, `mc_dyncross`
+/// (default off) the §C.2.1.7 dynamic-crosstalk election,
+/// `mc_phantom` (default off) §C.2.1.9 phantom-centre coding, and
+/// `tc` picks the §2.5.2.15 `tc_allocation` (a value, or `"auto"`
+/// for the §C.2.1.6 per-subband-group election); `crc` and the
+/// header metadata flags apply as for the two-channel encoder.
 fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn Encoder>> {
     for key in ["mode", "bound", "psymodel", "freeformat", "emphasis"] {
         if params.options.get(key).is_some() {
@@ -555,6 +560,23 @@ fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn En
     }
     let dematrix = dematrix_opt(params.options.get("dematrix"))?;
     let prediction = bool_opt(params.options.get("mc_prediction"), "mc_prediction", false)?;
+    let dyn_cross = bool_opt(params.options.get("mc_dyncross"), "mc_dyncross", false)?;
+    let phantom = bool_opt(params.options.get("mc_phantom"), "mc_phantom", false)?;
+    // `tc`: the §2.5.2.15 transmission-channel allocation — a global
+    // value (validated against the configuration below) or "auto" for
+    // the §C.2.1.6 per-subband-group election.
+    let (adaptive_tc, tc_allocation) = match params.options.get("tc") {
+        None => (false, 0u8),
+        Some("auto") => (true, 0),
+        Some(v) => match v.parse::<u8>() {
+            Ok(n) => (false, n),
+            Err(_) => {
+                return Err(Error::invalid(format!(
+                    "oxideav-mp2: tc={v:?} not recognised (a §2.5.2.15 value, or \"auto\")"
+                )))
+            }
+        },
+    };
     let crc = crc_opt(params.options.get("crc"))?;
     let copyright = bool_opt(params.options.get("copyright"), "copyright", false)?;
     let original = bool_opt(params.options.get("original"), "original", true)?;
@@ -573,6 +595,14 @@ fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn En
     let (mut cfg, chan_map, lfe_plane) = mc_plan_for_layout(layout)?;
     cfg.dematrix_procedure = dematrix;
     cfg.prediction = prediction;
+    cfg.dyn_cross = dyn_cross;
+    cfg.phantom_centre = phantom;
+    cfg.adaptive_tc = adaptive_tc;
+    cfg.tc_allocation = tc_allocation;
+    // Fail fast on an illegal combination (e.g. tc out of range for
+    // the layout, phantom without a centre, '10' without surround).
+    cfg.validate()
+        .map_err(|e| Error::invalid(format!("oxideav-mp2: {e}")))?;
 
     let Some(sample_rate) = params.sample_rate else {
         return Err(Error::invalid(
@@ -1104,12 +1134,41 @@ mod tests {
         }
         // Bad dematrix value.
         let mut p = params(48_000, 5, None);
+        p.options.insert("dematrix", "12");
+        assert!(make_encoder(&p).is_err());
+        // dematrix '11' (no matrixing) and '10' (phase-mixed surround,
+        // legal for the 3/2 layout) are accepted.
+        for v in ["11", "10", "2"] {
+            let mut p = params(48_000, 5, None);
+            p.options.insert("dematrix", v);
+            assert!(make_encoder(&p).is_ok(), "dematrix={v}");
+        }
+        // …but '10' needs a centre + surround: Quad (2/2) is refused.
+        let mut p = params(48_000, 4, None);
+        p.channel_layout = Some(oxideav_core::ChannelLayout::Quad);
         p.options.insert("dematrix", "10");
         assert!(make_encoder(&p).is_err());
-        // dematrix '11' (no matrixing) is accepted.
+        // tc: "auto", a legal row, an out-of-range row, garbage.
+        for (v, ok) in [("auto", true), ("7", true), ("8", false), ("x", false)] {
+            let mut p = params(48_000, 5, None);
+            p.options.insert("tc", v);
+            assert_eq!(make_encoder(&p).is_ok(), ok, "tc={v}");
+        }
+        // Phantom coding needs a centre (3/2 ok, Quad refused) and
+        // restricts tc to centre-carrying rows.
         let mut p = params(48_000, 5, None);
-        p.options.insert("dematrix", "11");
+        p.options.insert("mc_phantom", "true");
+        p.options.insert("mc_dyncross", "true");
+        p.options.insert("tc", "auto");
         assert!(make_encoder(&p).is_ok());
+        let mut p = params(48_000, 5, None);
+        p.options.insert("mc_phantom", "true");
+        p.options.insert("tc", "1");
+        assert!(make_encoder(&p).is_err());
+        let mut p = params(48_000, 4, None);
+        p.channel_layout = Some(oxideav_core::ChannelLayout::Quad);
+        p.options.insert("mc_phantom", "true");
+        assert!(make_encoder(&p).is_err());
     }
 
     /// One S16 plane of `n` samples of a sine at `freq_hz`.
