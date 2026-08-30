@@ -6,6 +6,62 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.9...v0.0.10) - 2026-08-30
+
+### Other
+
+- clippy 1.98: manual_slice_fill — reset loops become fill()
+- §2.5 encoder remainders closed, surround processing, alias guard + black-box A/B, encode_roundtrip fuzz
+- alias-cancellation guard on the auto-SMR tables
+- equal-rate SNR + per-tone A/B against the black-box reference encoder
+- encode_roundtrip conformance target (write side)
+- '10' dematrix, tc=auto/value, mc_dyncross, mc_phantom on the §2.5 encoder
+- opt-in §2.5.3.2.1.1 post-dematrix surround processing for '10'
+- round-trip suite for the encoder remainders
+- encoder remainders — '10' phase-mixed surround, adaptive tc_allocation, dynamic crosstalk, phantom centre, second stereo, multilingual, extension bit stream
+- tc_allocation selectability reflected in the §2.5 encode section
+- selectable global tc_allocation on the encode side
+- §2.5 multichannel encoder + ChannelLayout registry surface documented
+- §2.5.3.2.1.3 multichannel prediction on the encode side
+- §2.5 multichannel encode through the Encoder trait
+- §2.5 multichannel PCM through the Decoder trait via core channel layouts
+- §2.5 encoder oracle sweep on official 13818-4 programme material
+- ISO/IEC 13818-3 §2.5 multichannel-extension encoder
+- fuzz the §2.5 extension surface; fix n_ad_bytes overclaim underflow
+- ISO/IEC 13818-3 §2.5 multichannel-extension decoder + official 13818-4 MC conformance sweep
+- official ISO/IEC 13818-4 audio conformance sweep
+- per-frame 2.4.1.8 payloads in the batch path
+- 2.4.2.8 tail identity as a fuzzed invariant; off-ladder slot lands in the surfaced tail
+- root re-export Ancillary; document the 2.4.1.8 decode surface
+- surface the 2.4.1.8 ancillary_data() tail on decode
+- J.17 absolute-gain convention now normatively resolved (ask #256)
+- emphasis rewrite probe on the staged 44.1 kHz fixture + Table B.5 CRC pin
+- pin the resolved absolute-gain convention (ask #256) from ITU-T Rec. J.17 itself
+- retire stale flat-LSF comments in the multirate and Model-2 encode suites
+- README — LSF psychoacoustic axis complete; 43-stream conformance corpus
+- r419 fixture corpus — independent validation of psy-driven LSF + intensity streams
+- lsf_psy_conformance — drop needless mut on the SNR closure (clippy)
+- LSF psychoacoustic conformance suite — shaping + measured SNR floors
+- LSF encoding is psychoacoustically driven — both Annex D models, all six Layer II rates
+- 13818-3 Model-2 LSF calculation partitions + D.1-derived step-(l) thresholds
+- 13818-3 Annex D LSF Model-1 tables — D.1d/e/f + D.2d/e/f (16/22.05/24 kHz)
+- Step 4(c)/Step 6 fidelity — resolve D.2 boundary indices to raw FFT lines, z(i) from the D.1 column
+- D.1d/e/f full four-column transcription + D.2e band-17 errata fix
+- LSF free-format support ceiling is 160 kbit/s (13818-3 §2.4.2.3)
+- registry-encoder freeformat-guard test + free-format surfaces on the decode fuzz target
+- CHANGELOG — move r411 free-format Fixed block after the Unreleased Added items
+- free-format Annex B table is fixed by sampling frequency — decode bug found via independent reference, now 100% bit-exact
+- joint-stereo/dual-channel/CRC conformance cells vs independent reference — live intensity-bound gap closed
+- r411 whole-stream decode-conformance corpus — all Table 3-B.2 sub-tables, ladder extremes, float-domain refs
+- README robustness note — emphasis field on the fuzzed surface
+- emphasis hardening — mid-stream switch semantics, LSF-rate J.17, fuzzed emphasis field
+- CCITT J.17 de-emphasis (decode) + pre-emphasis (encode), emphasis='11' complete
+- README + CHANGELOG for §2.4.2.4 emphasis support
+- registry-encoder copyright/original/private header flags
+- registry-encoder emphasis option (emphasis=50/15)
+- §2.4.2.4 encoder pre-emphasis (50/15 µs), the decode inverse
+- §2.4.2.4 output de-emphasis (50/15 µs) on decode
+
 ### Added
 
 - **Alias-cancellation guard on the auto-SMR tables**
