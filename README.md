@@ -25,12 +25,16 @@ phantom centre, LFE, multilingual channels, extension bit streams) and
 validated against the suite's matrixed per-channel references — all
 twenty Layer II multichannel streams within 1 LSB on every channel
 (see below) — **and encoded**: `mc_encode` emits `mc_extension()`
-payloads (§2.5.3.3 matrixing for all five main configurations,
-MC allocation, scalefactors, LFE, optional §2.5.3.2.1.3 prediction)
-that round-trip through this crate's own §2.5 decoder and clear
-measured SNR floors on the official suite's programme material; both
-directions surface through the registry via oxideav-core's
-`ChannelLayout` vocabulary (5.1 / 5.0 / quad / 4.x / 3.0 / 2.1).
+payloads with every encode-side option the §2.5 syntax offers (all
+four matrixing procedures incl. the `'10'` phase-mixed surround,
+global or per-subband-group signal-adaptive `tc_allocation`, dynamic
+crosstalk, multichannel prediction, phantom-centre coding, LFE, second
+stereo programme, full-/half-rate multilingual channels, and
+§2.5.1.5 extension bit streams), each round-tripping through this
+crate's own §2.5 decoder with the base layer accepted by the black-box
+reference decoder; both directions surface through the registry via
+oxideav-core's `ChannelLayout` vocabulary (5.1 / 5.0 / quad / 4.x /
+3.0 / 2.1).
 The encoder is complete through frame assembly with **both** Annex D
 psychoacoustic models (§D.1 Model 1 and §D.2 Model 2) driving the
 §C.1.5.2.7 bit allocator automatically at **all six** Layer II
@@ -295,6 +299,24 @@ byte-for-byte and in the first-frame per-subband allocation — from the
 flat-0 dB baseline and from each other, at the MPEG-1 **and** the LSF
 rates.
 
+**Alias-cancellation guard + black-box A/B.** Both auto-SMR paths
+post-process the Annex D table with `alias_cancellation_guard`: a
+component near a subband edge is split by the §C.1.3 transition band
+into two subbands whose aliases cancel only when *both* are
+transmitted, and the masking models — judging each subband as a sound
+— starved the weaker replica, leaving the alias uncancelled (a −2,7 dB
+level error on an 11,3 kHz line and an 18 dB SNR plateau at
+128–192 kbit/s before the guard). A subband whose maximum scalefactor
+lies within 12 dB below a signal-bearing neighbour's now inherits that
+neighbour's SMR less the level difference; silent bands never lift a
+neighbour, so silence still round-trips to exact zero.
+`tests/encoder_reference_ab.rs` measures the result against the
+installed reference encoder as an opaque binary at equal signalled
+bitrate (48 kHz stereo multitone, both bitstreams decoded by this
+crate, delay-searched SNR + per-tone level table): 128 kbit/s
+**23,6 dB** vs 17,5, 192 kbit/s **39,5 dB** vs 23,2, 256 kbit/s
+**48,9 dB** vs 30,4, 384 kbit/s **79,9 dB** vs 39,5.
+
 **Registry encoder** — `make_encoder` builds an `oxideav_core::Encoder`
 (`Mp2CoreEncoder`) that adapts the auto-SMR encode path into the
 framework's frame-in / packet-out trait: it accepts planar-S16
@@ -517,55 +539,103 @@ The `mc_encode` module is the encode-side dual of `mc`: it emits a
 standard Layer II base frame whose §2.4.1.8 ancillary field carries
 the `mc_extension()` (§2.5.1.3), so a §2.5-unaware decoder plays the
 MPEG-1-compatible stereo downmix while this crate's own §2.5 decoder
-recovers the presentation channels.
+recovers the presentation channels. Every encode-side option the
+syntax offers is emittable:
 
-- **Matrixing** (§2.5.3.3): `Lo = α(L + βC + γLS)`,
-  `Ro = α(R + βC + γRS)` with the procedure-`'00'`
-  (`α = 1/(1+√2)`, `β = γ = 1/√2`), `'01'` (`α = 1/(1,5+0,5√2)`,
-  `γ = 0,5`) and `'11'` (no matrixing) constants — the α attenuation
-  is exactly what §2.5.3.2.5's de-normalisation undoes, and bounds
-  the compatible pair inside the nominal range. All five main
-  configurations are emittable (3/2, 3/1, 3/0, 2/2, 2/1, plus 2/0
-  with an LFE-only extension); the transmitted channels carry the
-  weighted signals whose inverse the decoding matrix is (unit-pinned
+- **Matrixing** (§C.2.1.5): `Lo = α(L + βC + γLS)`,
+  `Ro = α(R + βC + γRS)` for procedures `'00'` (`α = 1/(1+√2)`,
+  `β = γ = 1/√2`) and `'01'` (`α = 1/(1,5+0,5√2)`, `γ = 0,5`);
+  `Lo = α(L + βC − γ·jS)`, `Ro = α(R + βC + γ·jS)` with the
+  monophonic surround `jS = (LS + RS)/2` / `S` for the `'10'`
+  **phase-mixed surround** (3/1 and 3/2, every §2.5.3.2.1.1 `'10'`
+  arm incl. the 3/1 row-5 `tc_allocation` round-trips); `'11'`
+  unmatrixed. All five main configurations (3/2, 3/1, 3/0, 2/2, 2/1,
+  plus 2/0 with an LFE-only extension); the α attenuation is exactly
+  what §2.5.3.2.5's de-normalisation undoes (unit-pinned
   `α·denorm = 1`, `w_enc·w_dec·denorm = 1`).
-- **MC audio data** (§2.5.1.17 / §2.5.2.17): Table B.2a / B.2b
-  allocation with `msblimit = sblimit` under a §C.1.5.2.7
-  minimum-MNR greedy allocator driven by a §D.1 Model-1 SMR per
-  transmission channel, against an explicit extension bit budget
-  (default: the frame's data bits split `nmch / (2 + nmch)` to the
-  extension) with exact Table C.4 scfsi/scalefactor activation
-  pricing; the §2.5.2.14 `mc_crc_check` is computed over
-  mc_header + composite status + allocation + scfsi so the §2.5.3.1
-  detection rule fires on every emitted frame.
+- **Transmission-channel switching** (§2.5.2.15 / §C.2.1.6): the
+  weighted signals are analysed individually and the transmission
+  channels assembled in the subband domain, so `tc_allocation` is
+  either a caller-chosen global row (`tc_sbgr_select = '1'`) or
+  elected **per subband group** (`adaptive_tc`: the row whose
+  transmitted signals have the lowest maximum scalefactors —
+  `tc_sbgr_select = '0'` with twelve values when it varies).
+- **Dynamic crosstalk** (§2.5.2.15 / §C.2.1.7, `dyn_cross`): the
+  encoded base frame is re-read and, per subband group, every legal
+  `dyn_cross_mode` (plus `dyn_second_stereo` and both `dyn_cross_LR`
+  polarities) is scored against the decoder's actual substitute —
+  copied raw samples from `Lo`/`Ro` or a `Txy` carrier, re-scaled by
+  the channel's own scalefactors — and the admissible mode (≤ −10 dB
+  substitution error) dropping the most channels is signalled. `Txy`
+  carriers follow the Annex G intensity convention (sum quantised
+  against its own envelope, per-channel wire scalefactors).
+- **Multichannel prediction** (§2.5.3.2.1.3, `prediction`):
+  first-order zero-delay predictors per subband group fitted by least
+  squares against the *decoded* `T0`/`T1` (exactly what the decoder
+  predicts from), `(v − 127)/32` wire grid, enabled per group on a
+  measured ≥ 10 % residual-energy win, `npred` / predictable-channel
+  adaptation under dynamic crosstalk.
+- **Phantom-centre coding** (§2.5.2.13 / §C.2.1.9, `phantom_centre`):
+  the centre's subbands ≥ 12 are folded at −3 dB into `Lw` / `Rw`
+  (`centre = '11'`, `centre_limited` ⇒ zero allocation), with the
+  `tc_allocation` restriction to centre-carrying rows enforced and
+  honoured by the adaptive election.
+- **Second stereo programme** (`surround = '11'`, `second_stereo`):
+  `L2` / `R2` transmitted unmatrixed on the last two transmission
+  channels (3/0 + 2/0, 2/0 + 2/0).
+- **Multilingual channels** (§2.5.2.18, `multilingual` 0..=7,
+  `multilingual_fs_half`): Layer II ml channels in `ml_audio_data()`
+  at the full (Table B.2a/b, 12 granules) or half (Table B.1, 6
+  granules) sampling frequency, each with its own analysis filterbank
+  and Model-1-driven greedy allocation inside the extension budget.
 - **LFE** (§2.5.3.2.4): 12 block-companded samples per frame at
   `Fs/96` with one Table B.1 scalefactor (`lfe_allocation` 2..=15).
-- **Multichannel prediction** (§2.5.3.2.1.3, opt-in): first-order
-  zero-delay predictors per subband group fitted by least squares
-  from the encoder-side `T0`/`T1` subband signals, coefficients
-  quantized to the `(v − 127)/32` wire grid, enabled per group only
-  on a measured ≥ 10 % residual-energy win; the transmitted signal
-  is then the prediction error.
-- **`tc_allocation`** (§2.5.2.15) is selectable (global,
-  `tc_sbgr_select = '1'`): every legal value per configuration
-  places its role set on `T2..T4` and round-trips through the
-  matching §2.5.3.2.1.1 decoding-matrix arm (swept with
-  channel-separation pins). Dynamic crosstalk is declined explicitly
-  (`dyn_cross_on = '0'`); its decode side is complete.
+- **MC audio data** (§2.5.1.17 / §2.5.2.17): Table B.2a / B.2b
+  allocation with `msblimit = sblimit` under a §C.1.5.2.7 minimum-MNR
+  greedy allocator driven by a §D.1 Model-1 SMR (with the
+  alias-cancellation guard) per signal, against an explicit extension
+  bit budget (default: the frame's data bits split by channel count
+  — a half-rate multilingual channel counts one half — to the
+  extension), exact Table C.4 scfsi/scalefactor activation pricing,
+  and the §2.5.2.14 `mc_crc_check` over mc_header + composite status
+  + allocation + scfsi so the §2.5.3.1 detection rule fires on every
+  emitted frame.
+- **Extension bit stream** (§2.5.1.5, `ext_bit_stream`): the part of
+  the extension exceeding the base frame's ancillary share spills into
+  a per-frame `ext_frame()` (§2.5.1.10 header, §2.5.2.10 128-bit CRC,
+  header-only frames when everything fits) via
+  `encode_mc_frame_ext_with` / `encode_mc_all_frames_ext`
+  (`McEncodedFrame` / `McEncodedStream`).
 
 Validated by `tests/mc_encode_roundtrip.rs` (every configuration ×
 procedure with per-channel distinct-tone **channel-separation** pins,
 §2.5.1.3 backward compatibility against the downmix equations, LFE
 companding accuracy, CRC tamper detection, exact-zero silence,
-44,1 kHz padding interop) and by the env-gated
-`tests/iso13818_4_mc_encode_oracle.rs`, which feeds the official
-suite's multichannel programme material *into* the encoder and
-decodes it back with this crate's own decoder: per-channel
-delay-compensated SNR 17,9–29,1 dB / 13,1–26,4 dB (the two 3/2
-44,1 kHz programmes) and 30,4–32,2 dB (2/1 48 kHz) at 384 kbit/s,
+44,1 kHz padding interop), `tests/mc_features_roundtrip.rs` (the
+`'10'` arms, adaptive `tc_allocation` under every procedure,
+phantom-centre band limit and −3 dB fold, second stereo, full-/
+half-rate multilingual, extension-frame spill and header-only frames,
+dynamic-crosstalk firing / non-firing / second-stereo cases, the
+opt-in surround processing, a kitchen-sink per-frame-API case, and
+black-box reference-decoder acceptance of the emitted base frames),
+and by the env-gated `tests/iso13818_4_mc_encode_oracle.rs`, which
+feeds the official suite's multichannel programme material *into* the
+encoder and decodes it back with this crate's own decoder:
+per-channel delay-compensated SNR 17,9–29,1 dB / 13,1–26,4 dB (the two
+3/2 44,1 kHz programmes) and 30,4–32,2 dB (2/1 48 kHz) at 384 kbit/s,
 with the compatible base decode tracking the §2.5.3.3 downmix at
 18,4–32,8 dB — floors pinned ~3 dB under the measured values, both
 predictor elections.
+
+**Opt-in §2.5.3.2.1.1 surround processing** (`surround` module): for
+a decoded `'10'` stream, `apply_surround_processing` / the streaming
+`SurroundProcessor` apply the −90° phase shift (a 193-tap linear-phase
+FIR Hilbert transformer) to the surround channels and the matching
+delay to every other output (fronts, `Fs/96` LFE, full-/half-rate
+multilingual). The spec's "dynamic expansion" (item 3b) is named but
+not parameterised anywhere in ISO/IEC 13818-3, so it is not offered;
+both stages are optional and the suite's references decode to ≤ 1 LSB
+without them.
 
 **Registry surface.** Multichannel PCM flows through the registered
 codec in oxideav-core's canonical `ChannelLayout` order on both
@@ -584,23 +654,23 @@ sides:
   (`from_count` fallback) onto the §2.5.2.15 configuration
   (`Surround30/40/41`, `Quad`, `Surround50/51`, `Stereo21`),
   extracting and ×96-decimating the BS.775 LFE plane; options
-  `dematrix` (`00`/`01`/`11`) and `mc_prediction`.
+  `dematrix` (`00`/`01`/`10`/`11`), `tc` (`auto` or a §2.5.2.15
+  row), `mc_dyncross`, `mc_phantom`, `mc_prediction` — illegal
+  combinations fail at `make_encoder` time. Second stereo,
+  multilingual and extension bit streams stay on the direct
+  `mc_encode` API.
 
 ## Not yet supported
 
-- Encoder-side **dynamic crosstalk** and per-subband-group /
-  signal-adaptive `tc_allocation` election (§2.5.2.15 — a global
-  value is caller-selectable), the `'10'` phase-mixed-surround
-  *encode*,
-  phantom-centre coding, second stereo programme and multilingual
-  channels on the encode side, and emitting a §2.5.1.5 extension bit
-  stream (an extension that does not fit the base frame's ancillary
-  capacity is refused, not spilled) — the decode side of all of
-  these is complete and conformance-validated.
-- The optional §2.5.3.2.1.1 post-dematrix surround processing for
-  procedure `'10'` (−90° phase shift, dynamic expansion) — the spec
-  marks both "may be done ... before output"; the suite's references
-  are decoded without them to ≤ 1 LSB.
+- The §2.5.3.2.1.1 "dynamic expansion" output stage for procedure
+  `'10'` (and its encoder-side "dynamic range compression" of the
+  `'10'` surround, §C.2.1.5) — both are named as optional but carry no
+  expander law, ratio or time constants anywhere in ISO/IEC 13818-3;
+  the encoder likewise does not pre-shift the `'10'` surround by +90°
+  (optional in §C.2.1.5), so the decode-side −90° stage is offered
+  for streams that were.
+- Layer III multilingual channels (`multi_lingual_layer == '1'`) —
+  out of scope for a Layer II crate on both sides.
 
 ## Robustness
 
@@ -615,11 +685,17 @@ panic-freedom coverage for the §2.4.2.3 free-format size-measurement
 surface (`measure_base_slots` / `resolve` / `decode_free_format_stream` /
 `parse_allow_free_format`) against dense sync runs, every truncated
 prefix of a free-format frame, and a deterministic pseudo-random corpus;
-and a `cargo-fuzz` `decode` target exercises the decode attacker surface
+a `cargo-fuzz` `decode` target exercises the decode attacker surface
 for panic-freedom, with the crafted headers drawing the §2.4.2.3
 emphasis field from all three accepted codes so both de-emphasis IIRs
 (50/15 µs and CCITT J.17) and their cross-frame rebuild logic sit on
-the fuzzed surface.
+the fuzzed surface; and a second `encode_roundtrip` target fuzzes the
+**write side as a conformance contract**: arbitrary bytes become a
+legal header + §2.5 configuration + PCM, and every `Ok` encode
+(two-channel base and multichannel with every election, LFE,
+multilingual, extension bit stream) must decode through the crate's
+own decoders with matching shapes — only the declared budget
+rejections may `Err`.
 
 ## License
 
