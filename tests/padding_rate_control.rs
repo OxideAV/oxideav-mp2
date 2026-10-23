@@ -37,8 +37,8 @@
 
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{
-    decode_all_frames, encode_all_frames, make_encoder, FrameHeader, PaddingScheduler,
-    PCM_SAMPLES_PER_CHANNEL,
+    FrameHeader, PCM_SAMPLES_PER_CHANNEL, PaddingScheduler, decode_all_frames, encode_all_frames,
+    make_encoder,
 };
 
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame};

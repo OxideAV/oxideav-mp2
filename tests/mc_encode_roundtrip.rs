@@ -30,11 +30,11 @@
 //! conformance convention of `tests/roundtrip_multirate.rs`.
 
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
-use oxideav_mp2::mc::{decode_mc_frame_with, decode_mc_stream, has_mc_extension, McDecodeState};
+use oxideav_mp2::mc::{McDecodeState, decode_mc_frame_with, decode_mc_stream, has_mc_extension};
 use oxideav_mp2::mc_encode::{
-    encode_mc_all_frames, encode_mc_frame_with, McEncodeConfig, McEncodeError, McEncodeState,
+    McEncodeConfig, McEncodeError, McEncodeState, encode_mc_all_frames, encode_mc_frame_with,
 };
-use oxideav_mp2::{decode_all_frames, FrameHeader, McError, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{FrameHeader, McError, PCM_SAMPLES_PER_CHANNEL, decode_all_frames};
 
 /// Combined analysis + synthesis filterbank group delay (samples) —
 /// same constant `tests/roundtrip_multirate.rs` uses.

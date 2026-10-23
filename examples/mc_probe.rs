@@ -10,7 +10,7 @@
 //! `<stem>_<suffix>.pcm` with suffixes `l r c ls rs s l2 r2 lfe
 //! m1..m7`.
 
-use oxideav_mp2::mc::{decode_mc_stream, McChannel};
+use oxideav_mp2::mc::{McChannel, decode_mc_stream};
 use std::path::Path;
 
 fn suffix_of(ch: McChannel) -> &'static str {
@@ -30,7 +30,9 @@ fn read_ref_be(path: &Path) -> Option<Vec<i16>> {
     let bytes = std::fs::read(path).ok()?;
     Some(
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_be_bytes([c[0], c[1]]))
             .collect(),
     )

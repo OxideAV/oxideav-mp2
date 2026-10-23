@@ -37,7 +37,7 @@
 //!   sampling frequency, extension bit streams, and the VBR pair.
 
 use oxideav_mp2::header::FrameHeader;
-use oxideav_mp2::mc::{decode_mc_stream, Centre, McChannel, McDecodedStream, McError, Surround};
+use oxideav_mp2::mc::{Centre, McChannel, McDecodedStream, McError, Surround, decode_mc_stream};
 use std::path::{Path, PathBuf};
 
 const ENV_DIR: &str = "OXIDEAV_MP2_ISO13818_4_DIR";
@@ -72,7 +72,9 @@ fn stream_file(dir: &Path, name: &str, file: &str) -> Option<PathBuf> {
 fn read_ref_s16be(path: &Path) -> Vec<i16> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_be_bytes([c[0], c[1]]))
         .collect()
 }
@@ -80,7 +82,9 @@ fn read_ref_s16be(path: &Path) -> Vec<i16> {
 fn read_ref_s24be(path: &Path) -> Vec<f64> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| {
             let v = i32::from_be_bytes([c[0], c[1], c[2], 0]) >> 8;
             f64::from(v) / 8_388_608.0

@@ -9,7 +9,7 @@
 //! every single-byte prefix of a synthesized free-format frame, and a
 //! deterministic pseudo-random corpus.
 
-use oxideav_mp2::{decode_free_format_stream, measure_base_slots, resolve, FrameHeader};
+use oxideav_mp2::{FrameHeader, decode_free_format_stream, measure_base_slots, resolve};
 
 /// A 4-byte free-format header: 44.1 kHz, stereo, unpadded, no CRC.
 /// bitrate_index '0000' and sampling_frequency '00' are all-zero.

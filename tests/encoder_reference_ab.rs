@@ -22,7 +22,7 @@
 //! Skips silently when no reference binary is installed.
 
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
-use oxideav_mp2::{decode_all_frames, encode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{FrameHeader, PCM_SAMPLES_PER_CHANNEL, decode_all_frames, encode_all_frames};
 use std::process::Command;
 
 const SAMPLE_RATE: u32 = 48_000;

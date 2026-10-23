@@ -41,7 +41,7 @@
 
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{
-    decode_all_frames, encode_all_frames, FrameHeader, PaddingScheduler, PCM_SAMPLES_PER_CHANNEL,
+    FrameHeader, PCM_SAMPLES_PER_CHANNEL, PaddingScheduler, decode_all_frames, encode_all_frames,
 };
 
 /// Total byte length of an `n_frames` stream under the §2.4.2.3 padding

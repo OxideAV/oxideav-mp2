@@ -113,11 +113,7 @@ pub fn crc16_step(reg: u16, bit: bool) -> u16 {
     let input = u16::from(bit);
     let fb = ((reg >> 15) & 1) ^ input;
     let shifted = reg << 1;
-    if fb == 1 {
-        shifted ^ TAPS
-    } else {
-        shifted
-    }
+    if fb == 1 { shifted ^ TAPS } else { shifted }
 }
 
 /// Update the CRC-16 shift register with the low `nbits` of `value`,

@@ -253,7 +253,7 @@ pub(crate) fn fit_deemphasis(fs: f64) -> CascadeFit {
         fit.gain_db = target_db[0] - fit.magnitude_db(1.0);
         levenberg_marquardt(&mut fit, &cos_theta, &target_db);
         let err = max_err(&fit);
-        if best.map_or(true, |(b, _)| err < b) {
+        if best.is_none_or(|(b, _)| err < b) {
             best = Some((err, fit));
         }
     }

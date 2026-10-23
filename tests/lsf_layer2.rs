@@ -16,7 +16,7 @@
 //! No third-party MP2 implementation source was consulted.
 
 use oxideav_mp2::{
-    bitalloc::BitAllocTable, decode_frame, select_table, FrameError, FrameHeader, NUM_SUBBANDS,
+    FrameError, FrameHeader, NUM_SUBBANDS, bitalloc::BitAllocTable, decode_frame, select_table,
 };
 
 /// Build a 4-byte LSF Layer II header with the ID bit cleared per

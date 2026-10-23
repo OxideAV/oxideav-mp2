@@ -62,11 +62,11 @@ use oxideav_core::{
 };
 
 use crate::frame::{
-    decode_frame_with, decode_frame_with_known_header, DecodedFrame, FrameDecodeState,
-    PCM_SAMPLES_PER_CHANNEL,
+    DecodedFrame, FrameDecodeState, PCM_SAMPLES_PER_CHANNEL, decode_frame_with,
+    decode_frame_with_known_header,
 };
 use crate::header::FrameHeader;
-use crate::mc::{decode_mc_frame_with, McConfig, McDecodeState, McDecodedFrame, McError};
+use crate::mc::{McConfig, McDecodeState, McDecodedFrame, McError, decode_mc_frame_with};
 
 /// Codec id under which [`register_codecs`] installs this decoder.
 pub const CODEC_ID_STR: &str = "mp2";
@@ -577,11 +577,7 @@ fn probe_mp2(ctx: &ProbeContext) -> Confidence {
         return 0.1;
     }
     let layer_bits = (word >> 17) & 0x3;
-    if layer_bits == 0b10 {
-        1.0
-    } else {
-        0.0
-    }
+    if layer_bits == 0b10 { 1.0 } else { 0.0 }
 }
 
 /// Install the MPEG-1 Audio Layer II decoder factory into `reg`.
@@ -743,10 +739,10 @@ mod tests {
         // its bitrate_index nibble to '0000' (free format), and confirm the
         // trait decoder recovers the bitrate from the packet length and
         // produces the SAME PCM as the standard-bitrate packet.
+        use crate::NUM_SUBBANDS;
         use crate::encoder_bit_allocator::SmrTable;
         use crate::encoder_frame::encode_frame;
         use crate::header::{Emphasis, Mode, ModeExtension};
-        use crate::NUM_SUBBANDS;
 
         // 192 kbit/s stereo at 44,1 kHz: 96 kbit/s per channel selects
         // Table B.2b — the same table conforming decoders use for free
@@ -1024,7 +1020,7 @@ mod tests {
     /// Encode a short 3/2 (+ optional LFE) multichannel stream with the
     /// crate's own §2.5 encoder and split it into per-frame packets.
     fn mc_stream_packets(lfe: bool, n_frames: usize) -> (Vec<Packet>, Vec<Vec<f64>>) {
-        use crate::mc_encode::{encode_mc_all_frames, McEncodeConfig};
+        use crate::mc_encode::{McEncodeConfig, encode_mc_all_frames};
 
         let header = FrameHeader {
             lsf: false,
@@ -1143,7 +1139,9 @@ mod tests {
         }
         // The LFE plane repeats each native-rate sample 96×.
         let lfe_plane: Vec<i16> = planes[3]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(lfe_plane.len(), lfe_native.len() * 96);
@@ -1307,7 +1305,9 @@ mod tests {
         let bytes = Mp2CoreDecoder::float_plane_to_s16_le(&plane);
         assert_eq!(bytes.len(), plane.len() * 2);
         let words: Vec<i16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(words[0], 0);

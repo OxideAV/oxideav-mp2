@@ -58,14 +58,14 @@ use oxideav_core::{
 use crate::bitalloc::select_table;
 use crate::codec_decoder::{CODEC_ID_STR, WAVE_FORMAT_MPEG};
 use crate::encoder_frame::{
-    encode_frame_auto_js_model2, encode_frame_auto_js_with, encode_frame_auto_model2,
-    encode_frame_auto_with, EncodeFrameState,
+    EncodeFrameState, encode_frame_auto_js_model2, encode_frame_auto_js_with,
+    encode_frame_auto_model2, encode_frame_auto_with,
 };
 use crate::frame::PCM_SAMPLES_PER_CHANNEL;
 use crate::header::{
-    is_layer2_bitrate_mode_allowed, Emphasis, FrameHeader, Mode, ModeExtension, PaddingScheduler,
+    Emphasis, FrameHeader, Mode, ModeExtension, PaddingScheduler, is_layer2_bitrate_mode_allowed,
 };
-use crate::mc_encode::{encode_mc_frame_with, McEncodeConfig, McEncodeState};
+use crate::mc_encode::{McEncodeConfig, McEncodeState, encode_mc_frame_with};
 
 /// Which Annex D psychoacoustic model drives the auto-SMR allocation.
 ///
@@ -263,7 +263,7 @@ fn build_header(
             return Err(Error::invalid(format!(
                 "oxideav-mp2: encoder sample_rate {other} is not a Layer II rate \
                  (MPEG-1: 32000/44100/48000, LSF: 16000/22050/24000)"
-            )))
+            )));
         }
     };
 
@@ -357,7 +357,7 @@ fn mc_plan_for_layout(
                 return Err(Error::invalid(format!(
                     "oxideav-mp2: channel layout {other} has no ISO/IEC 13818-3 §2.5.2.15 \
                      configuration (supported: 3.0 / 4.0 / 4.1 / quad / 5.0 / 5.1 / 2.1)"
-                )))
+                )));
             }
         };
     Ok((
@@ -573,7 +573,7 @@ fn make_mc_encoder(params: &CodecParameters, channels: u16) -> Result<Box<dyn En
             Err(_) => {
                 return Err(Error::invalid(format!(
                     "oxideav-mp2: tc={v:?} not recognised (a §2.5.2.15 value, or \"auto\")"
-                )))
+                )));
             }
         },
     };
@@ -762,7 +762,9 @@ impl Mp2CoreEncoder {
     /// standard fixes only the transmitted format).
     fn decimate_lfe(plane: &[f64]) -> Vec<f64> {
         plane
-            .chunks_exact(96)
+            .as_chunks::<96>()
+            .0
+            .iter()
             .map(|block| block.iter().sum::<f64>() / block.len() as f64)
             .collect()
     }
@@ -770,7 +772,9 @@ impl Mp2CoreEncoder {
     /// Decode one planar-S16 plane into f64 `[-1, +1]` samples.
     fn s16_le_to_f64(plane: &[u8]) -> Vec<f64> {
         plane
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| f64::from(i16::from_le_bytes([b[0], b[1]])) / FULL_SCALE)
             .collect()
     }
@@ -901,7 +905,7 @@ impl Encoder for Mp2CoreEncoder {
                 Some(prev) if prev != n => {
                     return Err(Error::invalid(format!(
                         "oxideav-mp2: plane {ch} has {n} samples, expected {prev} (planar)"
-                    )))
+                    )));
                 }
                 Some(_) => {}
             }
@@ -1534,9 +1538,11 @@ mod tests {
         let h = crate::FrameHeader::parse_allow_free_format(&free).unwrap();
         assert!(h.is_free_format(), "freeformat=true → bitrate_index '0000'");
         // The standard stream's header is NOT free format.
-        assert!(!crate::FrameHeader::parse(&standard)
-            .unwrap()
-            .is_free_format());
+        assert!(
+            !crate::FrameHeader::parse(&standard)
+                .unwrap()
+                .is_free_format()
+        );
 
         // Both decode to identical PCM.
         let std_pcm = decode_all_frames(&standard).expect("standard decode");
@@ -1737,21 +1743,23 @@ mod tests {
     fn send_frame_rejects_wrong_plane_count_and_odd_lengths() {
         let mut enc = make_encoder(&params(44_100, 2, None)).unwrap();
         // 1 plane for a 2-channel encoder.
-        assert!(enc
-            .send_frame(&Frame::Audio(AudioFrame {
+        assert!(
+            enc.send_frame(&Frame::Audio(AudioFrame {
                 samples: 0,
                 pts: None,
                 data: vec![Vec::new()],
             }))
-            .is_err());
+            .is_err()
+        );
         // Odd byte length (not whole S16 samples).
-        assert!(enc
-            .send_frame(&Frame::Audio(AudioFrame {
+        assert!(
+            enc.send_frame(&Frame::Audio(AudioFrame {
                 samples: 0,
                 pts: None,
                 data: vec![vec![0u8; 3], vec![0u8; 3]],
             }))
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]

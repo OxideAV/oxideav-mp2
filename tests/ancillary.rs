@@ -11,12 +11,12 @@
 //! pinned.
 
 use oxideav_mp2::encoder_frame::{
-    encode_all_frames_with_ancillary, encode_frame, encode_frame_auto_with_ancillary,
-    encode_frame_with_ancillary, EncodeError, EncodeFrameState,
+    EncodeError, EncodeFrameState, encode_all_frames_with_ancillary, encode_frame,
+    encode_frame_auto_with_ancillary, encode_frame_with_ancillary,
 };
-use oxideav_mp2::frame::{decode_frame, decode_frame_with, FrameDecodeState};
+use oxideav_mp2::frame::{FrameDecodeState, decode_frame, decode_frame_with};
 use oxideav_mp2::header::{Emphasis, FrameHeader, Mode, ModeExtension};
-use oxideav_mp2::{PaddingScheduler, SmrTable, NUM_SUBBANDS, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{NUM_SUBBANDS, PCM_SAMPLES_PER_CHANNEL, PaddingScheduler, SmrTable};
 
 fn header(protection_bit: bool) -> FrameHeader {
     FrameHeader {
@@ -211,9 +211,11 @@ fn batch_encode_carries_per_frame_payloads_through_padding() {
             decoded.ancillary.bytes.starts_with(payload),
             "payload not recovered from frame at {pos}"
         );
-        assert!(decoded.ancillary.bytes[payload.len()..]
-            .iter()
-            .all(|&b| b == 0));
+        assert!(
+            decoded.ancillary.bytes[payload.len()..]
+                .iter()
+                .all(|&b| b == 0)
+        );
         pos += size;
     }
     assert_eq!(pos, batch.len(), "walked the whole stream");

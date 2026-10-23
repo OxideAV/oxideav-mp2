@@ -65,12 +65,12 @@
 
 use oxideav_core::bits::BitReader;
 
-use crate::audio_data::{parse_audio_data_with_section_bits, AudioDataError};
-use crate::bitalloc::{class_of_quantization, NUM_SUBBANDS};
+use crate::audio_data::{AudioDataError, parse_audio_data_with_section_bits};
+use crate::bitalloc::{NUM_SUBBANDS, class_of_quantization};
 use crate::crc::crc16_layer2;
 use crate::deemphasis::DeEmphasis;
 use crate::header::{FrameHeader, HeaderError};
-use crate::requant::{read_triplet, RequantError};
+use crate::requant::{RequantError, read_triplet};
 use crate::synthesis::SynthesisFilterbank;
 use crate::tables::SCALEFACTORS;
 
@@ -1161,10 +1161,10 @@ mod tests {
         // out-of-bounds panic found by the round-296 decode fuzzer:
         // first frame mono → accumulator width 1, second frame stereo →
         // `pcm[1]` out of bounds).
+        use crate::NUM_SUBBANDS;
         use crate::encoder_bit_allocator::SmrTable;
         use crate::encoder_frame::encode_frame;
         use crate::header::{Emphasis, ModeExtension};
-        use crate::NUM_SUBBANDS;
 
         let smr: SmrTable = [[0.0f64; NUM_SUBBANDS]; 2];
 

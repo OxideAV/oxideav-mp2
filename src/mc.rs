@@ -70,8 +70,8 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::audio_data::Scfsi;
-use crate::bitalloc::{class_of_quantization, BitAllocTable, NUM_SUBBANDS};
-use crate::crc::{crc16_step, INIT_STATE};
+use crate::bitalloc::{BitAllocTable, NUM_SUBBANDS, class_of_quantization};
+use crate::crc::{INIT_STATE, crc16_step};
 use crate::frame::PCM_SAMPLES_PER_CHANNEL;
 use crate::header::{FrameHeader, HeaderError, Mode};
 use crate::requant::{degroup, requantize_code};
@@ -2235,20 +2235,20 @@ mod tests {
         // 3-B.4 constants for the 2^nb − 1 classes.
         for nb in 2u32..=16 {
             let nlevels = (1u32 << nb) - 1;
-            if let Some(class) = class_of_quantization(nlevels) {
-                if !class.grouping {
-                    // Spot-check a few codes against requantize_code.
-                    for code in [0u32, 1, (1 << nb) - 1, 1 << (nb - 1)] {
-                        let ours = requantize_lfe(code, nb);
-                        let theirs = requantize_code(&class, code);
-                        // Table 3-B.4 prints C/D to 11 decimals; the
-                        // closed form is exact — compare at print
-                        // precision.
-                        assert!(
-                            (ours - theirs).abs() < 1e-9,
-                            "nb {nb} code {code}: {ours} vs {theirs}"
-                        );
-                    }
+            if let Some(class) = class_of_quantization(nlevels)
+                && !class.grouping
+            {
+                // Spot-check a few codes against requantize_code.
+                for code in [0u32, 1, (1 << nb) - 1, 1 << (nb - 1)] {
+                    let ours = requantize_lfe(code, nb);
+                    let theirs = requantize_code(&class, code);
+                    // Table 3-B.4 prints C/D to 11 decimals; the
+                    // closed form is exact — compare at print
+                    // precision.
+                    assert!(
+                        (ours - theirs).abs() < 1e-9,
+                        "nb {nb} code {code}: {ours} vs {theirs}"
+                    );
                 }
             }
         }

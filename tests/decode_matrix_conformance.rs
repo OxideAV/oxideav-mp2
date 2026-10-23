@@ -39,9 +39,9 @@
 
 use oxideav_core::bits::BitReader;
 use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
-use oxideav_mp2::frame::{decode_frame_with, FrameDecodeState};
+use oxideav_mp2::frame::{FrameDecodeState, decode_frame_with};
 use oxideav_mp2::header::{FrameHeader, Mode, ModeExtension};
-use oxideav_mp2::{decode_all_frames, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{PCM_SAMPLES_PER_CHANNEL, decode_all_frames};
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
 
@@ -262,13 +262,17 @@ fn wav_data(wav: &[u8]) -> (usize, RefPcm) {
             let pcm = match fmt_code {
                 1 => RefPcm::S16(
                     payload
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect(),
                 ),
                 3 => RefPcm::F32(
                     payload
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect(),
                 ),

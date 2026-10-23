@@ -57,19 +57,19 @@
 use oxideav_core::bits::BitWriter;
 
 use crate::analysis::{AnalysisFilterbank, NUM_SUBBANDS};
-use crate::audio_data::{write_audio_data_with_section_bits, AudioDataWriteError, Scfsi};
-use crate::bitalloc::{class_of_quantization, BitAllocTable};
+use crate::audio_data::{AudioDataWriteError, Scfsi, write_audio_data_with_section_bits};
+use crate::bitalloc::{BitAllocTable, class_of_quantization};
 use crate::crc::crc16_layer2;
 use crate::deemphasis::PreEmphasis;
-use crate::encoder_bit_allocator::{allocate_bits, BitAllocError, SmrTable};
-use crate::encoder_samples::{write_triplet_scaled, SampleWriteError};
-use crate::encoder_scalefactors::{compute_scalefactors, SUBBAND_SAMPLES_PER_FRAME};
+use crate::encoder_bit_allocator::{BitAllocError, SmrTable, allocate_bits};
+use crate::encoder_samples::{SampleWriteError, write_triplet_scaled};
+use crate::encoder_scalefactors::{SUBBAND_SAMPLES_PER_FRAME, compute_scalefactors};
 use crate::encoder_scfsi::select_scfsi;
-use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLES_PER_TRIPLET, SAMPLE_GRANULES_PER_FRAME};
+use crate::frame::{PCM_SAMPLES_PER_CHANNEL, SAMPLE_GRANULES_PER_FRAME, SAMPLES_PER_TRIPLET};
 use crate::header::{FrameHeader, HeaderError, PaddingScheduler};
 use crate::psy::{
-    annex_d_sampling_rate, compute_smr_model1_frame, compute_smr_model2_layer2_frame,
-    Model2Layer2State, NUM_SUBBANDS_LAYER2,
+    Model2Layer2State, NUM_SUBBANDS_LAYER2, annex_d_sampling_rate, compute_smr_model1_frame,
+    compute_smr_model2_layer2_frame,
 };
 use crate::tables::SCALEFACTORS;
 
@@ -1087,13 +1087,13 @@ fn encode_all_frames_inner(
     }
 
     let n_frames = n_frames.unwrap_or(0);
-    if let Some(list) = per_frame_ancillary {
-        if list.len() != n_frames {
-            return Err(EncodeError::AncillaryFrameCountMismatch {
-                have: list.len(),
-                need: n_frames,
-            });
-        }
+    if let Some(list) = per_frame_ancillary
+        && list.len() != n_frames
+    {
+        return Err(EncodeError::AncillaryFrameCountMismatch {
+            have: list.len(),
+            need: n_frames,
+        });
     }
     let mut state = EncodeFrameState::new();
     // Pre-size: each frame is `frame_size_bytes()` long, +1 slot on the
@@ -1651,7 +1651,7 @@ fn _walk_imports() {
 mod tests {
     use super::*;
     use crate::audio_data::parse_audio_data_with_section_bits;
-    use crate::frame::{decode_frame, FrameError};
+    use crate::frame::{FrameError, decode_frame};
     use crate::header::{Emphasis, Mode, ModeExtension};
     use oxideav_core::bits::BitReader;
 

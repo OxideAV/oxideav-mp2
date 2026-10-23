@@ -14,7 +14,7 @@
 
 use oxideav_mp2::deemphasis::DeEmphasis;
 use oxideav_mp2::encoder_frame::encode_all_frames;
-use oxideav_mp2::frame::{decode_all_frames, decode_frame, FrameError};
+use oxideav_mp2::frame::{FrameError, decode_all_frames, decode_frame};
 use oxideav_mp2::header::{Emphasis, FrameHeader, Mode, ModeExtension};
 
 fn header(emphasis: Emphasis) -> FrameHeader {

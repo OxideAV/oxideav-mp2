@@ -37,8 +37,8 @@
 //!    differs from `0xF`.
 
 use oxideav_mp2::{
-    decode_frame, find_sync, AudioDataError, Emphasis, FrameError, FrameHeader, HeaderError, Mode,
-    ModeExtension,
+    AudioDataError, Emphasis, FrameError, FrameHeader, HeaderError, Mode, ModeExtension,
+    decode_frame, find_sync,
 };
 
 /// Build a 4-byte Layer II header from explicit field values.

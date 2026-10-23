@@ -34,9 +34,9 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::mc::decode_mc_stream;
 use oxideav_mp2::mc_encode::{
-    encode_mc_all_frames_ext, McEncodeConfig, McEncodeError, LFE_SAMPLES_PER_FRAME,
+    LFE_SAMPLES_PER_FRAME, McEncodeConfig, McEncodeError, encode_mc_all_frames_ext,
 };
-use oxideav_mp2::{decode_all_frames, encode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{FrameHeader, PCM_SAMPLES_PER_CHANNEL, decode_all_frames, encode_all_frames};
 
 const RATES: [u32; 3] = [32_000, 44_100, 48_000];
 /// Bitrates with a §2.4.3.1 allocation table for a 2-ch base at every
@@ -171,10 +171,7 @@ fuzz_target!(|data: &[u8]| {
                 usize::from(cfg.multilingual),
                 "multilingual count"
             );
-            assert_eq!(
-                decoded.mc_header.dematrix_procedure,
-                cfg.dematrix_procedure
-            );
+            assert_eq!(decoded.mc_header.dematrix_procedure, cfg.dematrix_procedure);
             // …and the base bytes stay an ordinary Layer II stream.
             let base = decode_all_frames(&stream.base).expect("compatible base must decode");
             assert_eq!(base.len(), 2);

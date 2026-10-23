@@ -69,8 +69,8 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Decoder, Packet, Rational, TimeBase};
 use oxideav_mp2::frame::decode_free_format_stream;
-use oxideav_mp2::mc::{decode_mc_frame_with, decode_mc_stream, has_mc_extension, McDecodeState};
-use oxideav_mp2::{decode_all_frames, decode_frame, Ancillary, FrameHeader};
+use oxideav_mp2::mc::{McDecodeState, decode_mc_frame_with, decode_mc_stream, has_mc_extension};
+use oxideav_mp2::{Ancillary, FrameHeader, decode_all_frames, decode_frame};
 
 /// §2.4.2.8 structural identity of the surfaced `ancillary_data()`
 /// tail — must hold for every successfully decoded frame regardless of

@@ -39,10 +39,10 @@
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::mc::{decode_mc_stream, has_mc_extension};
 use oxideav_mp2::mc_encode::{
-    encode_mc_all_frames, encode_mc_all_frames_ext, encode_mc_frame_ext_with, McEncodeConfig,
-    McEncodeError, McEncodeState,
+    McEncodeConfig, McEncodeError, McEncodeState, encode_mc_all_frames, encode_mc_all_frames_ext,
+    encode_mc_frame_ext_with,
 };
-use oxideav_mp2::{Centre, FrameHeader, Surround, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{Centre, FrameHeader, PCM_SAMPLES_PER_CHANNEL, Surround};
 
 /// Combined analysis + synthesis filterbank group delay (samples).
 /// The exact cross-correlation peak is 481 (the ISO-suite harness
@@ -830,7 +830,7 @@ fn black_box_reference_decoder_accepts_the_emitted_base_frames() {
         // against this crate's own base decode of the same bytes.
         let own = oxideav_mp2::decode_all_frames(&stream).expect("own base decode");
         let mut ref_ch: Vec<Vec<f64>> = vec![Vec::new(), Vec::new()];
-        for pair in bytes.chunks_exact(16) {
+        for pair in bytes.as_chunks::<16>().0 {
             ref_ch[0].push(f64::from_le_bytes(pair[..8].try_into().unwrap()));
             ref_ch[1].push(f64::from_le_bytes(pair[8..].try_into().unwrap()));
         }
@@ -859,7 +859,7 @@ fn black_box_reference_decoder_accepts_the_emitted_base_frames() {
 
 #[test]
 fn surround_processing_shifts_surrounds_and_delays_the_rest() {
-    use oxideav_mp2::surround::{apply_surround_processing, PhaseShift90, PHASE_SHIFT_DELAY};
+    use oxideav_mp2::surround::{PHASE_SHIFT_DELAY, PhaseShift90, apply_surround_processing};
     let sample_rate = 48_000;
     let n_frames = 4;
     let header = base_header(sample_rate, 384_000);
@@ -924,8 +924,8 @@ fn surround_processing_shifts_surrounds_and_delays_the_rest() {
 
 #[test]
 fn streaming_surround_processor_matches_the_whole_stream_pass() {
-    use oxideav_mp2::mc::{decode_mc_frame_with, McDecodeState};
-    use oxideav_mp2::surround::{apply_surround_processing, SurroundProcessor};
+    use oxideav_mp2::mc::{McDecodeState, decode_mc_frame_with};
+    use oxideav_mp2::surround::{SurroundProcessor, apply_surround_processing};
     let sample_rate = 48_000;
     let n_frames = 3;
     let header = base_header(sample_rate, 384_000);

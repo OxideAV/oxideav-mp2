@@ -16,10 +16,10 @@
 
 use oxideav_mp2::encoder_frame::encode_frame;
 use oxideav_mp2::{
-    decode_all_frames, decode_frame_with_known_header, decode_free_format_stream,
-    header_with_recovered_bitrate, measure_base_slots, resolve, to_free_format, Emphasis,
-    FrameDecodeState, FrameHeader, FreeFormatError, Mode, ModeExtension, SmrTable, NUM_SUBBANDS,
-    PCM_SAMPLES_PER_CHANNEL,
+    Emphasis, FrameDecodeState, FrameHeader, FreeFormatError, Mode, ModeExtension, NUM_SUBBANDS,
+    PCM_SAMPLES_PER_CHANNEL, SmrTable, decode_all_frames, decode_frame_with_known_header,
+    decode_free_format_stream, header_with_recovered_bitrate, measure_base_slots, resolve,
+    to_free_format,
 };
 
 /// Rewrite a 4-byte Layer II header's `bitrate_index` field (bits 15..12,
@@ -189,7 +189,7 @@ fn off_ladder_free_format_stream_decodes() {
     // bit-identical to the 626-slot decode.
     let (standard, free) = build_streams(192_000, 44_100, Mode::Stereo, 4);
     let mut off_ladder = Vec::with_capacity(free.len() + 4);
-    for frame in free.chunks_exact(626) {
+    for frame in free.as_chunks::<626>().0 {
         off_ladder.extend_from_slice(frame);
         off_ladder.push(0x00); // extra ancillary slot
     }
@@ -275,7 +275,7 @@ fn padded_free_format_frames_are_sized_per_padding_bit() {
     // padding_bit is bit 9 of the 32-bit header = bit 1 of byte 2.
     free[2] |= 0x02; // set padding_bit on frame 0's header
     free.insert(626, 0x00); // grow frame 0 by one slot
-                            // Frame 0 is now 627 bytes (padded), frame 1 is 626 (unpadded).
+    // Frame 0 is now 627 bytes (padded), frame 1 is 626 (unpadded).
     let base = measure_base_slots(&free).expect("measure padded first frame");
     assert_eq!(base, 626, "padding removed from base recovery");
     // And the whole stream still decodes without panicking.
@@ -351,7 +351,7 @@ fn free_format_table_is_fixed_by_sampling_frequency() {
     // Table 3-B.2a header (PDF p. 46): free format listed at 48 kHz;
     // Table 3-B.2b header (PDF p. 47): free format listed at 44.1 and
     // 32 kHz; B.2c/B.2d carry no free-format row.
-    use oxideav_mp2::{select_table, BitAllocTable};
+    use oxideav_mp2::{BitAllocTable, select_table};
     let mk = |sample_rate: u32| FrameHeader {
         lsf: false,
         protection_bit: true,

@@ -1288,16 +1288,16 @@ pub fn list_tonal_layer2_for_rate(
     while k <= k_end {
         // `is_tonal_layer2_for_rate` enforces Step 4(a) internally; on
         // a positive result the three-line SPL is well-defined.
-        if is_tonal_layer2_for_rate(spl_db, fs, k) {
-            if let Some(x_tm) = tonal_spl_db(spl_db, k) {
-                out.push(TonalCandidate { k, spl_db: x_tm });
-                // Apply the spec's "set to −∞ dB" instruction
-                // before advancing — the next-step lines inside
-                // this neighbourhood are now ineligible for their
-                // own tonal classification, matching the spec's
-                // "examined frequency range" exclusion rule.
-                zero_tonal_neighbourhood_layer2_for_rate(spl_db, fs, k);
-            }
+        if is_tonal_layer2_for_rate(spl_db, fs, k)
+            && let Some(x_tm) = tonal_spl_db(spl_db, k)
+        {
+            out.push(TonalCandidate { k, spl_db: x_tm });
+            // Apply the spec's "set to −∞ dB" instruction
+            // before advancing — the next-step lines inside
+            // this neighbourhood are now ineligible for their
+            // own tonal classification, matching the spec's
+            // "examined frequency range" exclusion rule.
+            zero_tonal_neighbourhood_layer2_for_rate(spl_db, fs, k);
         }
         k += 1;
     }
@@ -1979,31 +1979,31 @@ pub fn decimate_below_threshold_in_quiet(
 ) -> Vec<Masker> {
     let mut out: Vec<Masker> = Vec::with_capacity(tonal.len() + non_tonal.len());
     for cand in tonal {
-        if let Some(ltq) = ltq_db_at_line(fs, cand.k, offset_db) {
-            if cand.spl_db >= ltq {
-                // The tonal candidate carries only its FFT line; the
-                // Bark position z(j) = z[k] is the critical-band rate of
-                // line k. Use the tabulated rate of the band whose top
-                // line first reaches k (the same Table D.1/D.2 mapping
-                // the spec assigns each component its index i from).
-                let z = bark_for_line_layer2(fs, cand.k);
-                out.push(Masker {
-                    kind: MaskerKind::Tonal,
-                    z_bark: z,
-                    spl_db: cand.spl_db,
-                });
-            }
+        if let Some(ltq) = ltq_db_at_line(fs, cand.k, offset_db)
+            && cand.spl_db >= ltq
+        {
+            // The tonal candidate carries only its FFT line; the
+            // Bark position z(j) = z[k] is the critical-band rate of
+            // line k. Use the tabulated rate of the band whose top
+            // line first reaches k (the same Table D.1/D.2 mapping
+            // the spec assigns each component its index i from).
+            let z = bark_for_line_layer2(fs, cand.k);
+            out.push(Masker {
+                kind: MaskerKind::Tonal,
+                z_bark: z,
+                spl_db: cand.spl_db,
+            });
         }
     }
     for cand in non_tonal {
-        if let Some(ltq) = ltq_db_at_line(fs, cand.k, offset_db) {
-            if cand.spl_db >= ltq {
-                out.push(Masker {
-                    kind: MaskerKind::NonTonal,
-                    z_bark: cand.z_bark,
-                    spl_db: cand.spl_db,
-                });
-            }
+        if let Some(ltq) = ltq_db_at_line(fs, cand.k, offset_db)
+            && cand.spl_db >= ltq
+        {
+            out.push(Masker {
+                kind: MaskerKind::NonTonal,
+                z_bark: cand.z_bark,
+                spl_db: cand.spl_db,
+            });
         }
     }
     out
@@ -2332,10 +2332,10 @@ pub fn compute_smr_model2_frame(
     predictor: &mut Model2PredictorState,
 ) -> [f64; NUM_SUBBANDS_LAYER2] {
     use crate::tables_model2::{
-        abs_threshold_table_for_rate, absolute_threshold_db_per_line,
+        CODER_PARTITION_COUNT, abs_threshold_table_for_rate, absolute_threshold_db_per_line,
         calc_partition_table_for_rate, convolve_partition_spreading, include_absolute_threshold,
         line_energy_threshold, normalize_spread_energy, renormalize_unpredictability,
-        signal_to_mask_ratio_db, CODER_PARTITION_COUNT,
+        signal_to_mask_ratio_db,
     };
 
     // ---- Step (a)/(b): polar spectrum of the windowed block ----
@@ -3158,8 +3158,8 @@ mod tests {
         let mut x = vec![0.0_f64; LAYER2_FFT_BINS];
         x[100] = 50.0;
         x[103] = 45.0; // j = +3 boundary breaker
-                       // Local-maximum precondition: X(100) > X(99) AND >= X(101).
-                       // x[99] = x[101] = 0.0 (default), so it holds.
+        // Local-maximum precondition: X(100) > X(99) AND >= X(101).
+        // x[99] = x[101] = 0.0 (default), so it holds.
         assert!(is_local_maximum(&x, 100));
         // Tonality fails because of j = +3.
         assert!(!is_tonal_layer2(&x, 100));

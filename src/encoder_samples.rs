@@ -42,7 +42,7 @@
 use oxideav_core::bits::BitWriter;
 
 use crate::bitalloc::QuantClass;
-use crate::tables::{SCALEFACTORS, SCALEFACTOR_COUNT};
+use crate::tables::{SCALEFACTOR_COUNT, SCALEFACTORS};
 
 /// Errors raised by the §2.4.3.3.4 encoder sample writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

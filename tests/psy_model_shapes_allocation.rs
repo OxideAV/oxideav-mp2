@@ -38,8 +38,8 @@
 use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{
-    decode_all_frames, encode_all_frames, encode_all_frames_model2, encode_all_frames_with_smr,
-    FrameHeader, SmrTable, NUM_SUBBANDS, PCM_SAMPLES_PER_CHANNEL,
+    FrameHeader, NUM_SUBBANDS, PCM_SAMPLES_PER_CHANNEL, SmrTable, decode_all_frames,
+    encode_all_frames, encode_all_frames_model2, encode_all_frames_with_smr,
 };
 
 use oxideav_core::bits::BitReader;

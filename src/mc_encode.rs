@@ -72,23 +72,23 @@
 
 use crate::analysis::AnalysisFilterbank;
 use crate::audio_data::Scfsi;
-use crate::bitalloc::{class_of_quantization, BitAllocTable, NUM_SUBBANDS};
-use crate::crc::{crc16_step, INIT_STATE};
-use crate::encoder_bit_allocator::{snr_db, SCFSI_BITS_PER_SLOT};
+use crate::bitalloc::{BitAllocTable, NUM_SUBBANDS, class_of_quantization};
+use crate::crc::{INIT_STATE, crc16_step};
+use crate::encoder_bit_allocator::{SCFSI_BITS_PER_SLOT, snr_db};
 use crate::encoder_frame::{
-    encode_frame_auto_with, EncodeError, EncodeFrameState, MODEL1_WINDOW_DELAY_SAMPLES,
+    EncodeError, EncodeFrameState, MODEL1_WINDOW_DELAY_SAMPLES, encode_frame_auto_with,
 };
 use crate::encoder_samples::write_triplet_scaled;
-use crate::encoder_scalefactors::{pick_scalefactor_index, SUBBAND_SAMPLES_PER_FRAME};
-use crate::encoder_scfsi::{select_scfsi, ScfsiSelection};
+use crate::encoder_scalefactors::{SUBBAND_SAMPLES_PER_FRAME, pick_scalefactor_index};
+use crate::encoder_scfsi::{ScfsiSelection, select_scfsi};
 use crate::frame::PCM_SAMPLES_PER_CHANNEL;
 use crate::header::{FrameHeader, Mode, PaddingScheduler};
 use crate::mc::{
+    BaseSubbands, Centre, McChannel, McConfig, McHeader, SBGR_BOUNDS, Surround, TcSource,
     decode_base_subbands, dyn_cross_sources, fallback_base_channel, npred_for,
-    predictable_channels, sbgr_of_subband, tc_roles, BaseSubbands, Centre, McChannel, McConfig,
-    McHeader, Surround, TcSource, SBGR_BOUNDS,
+    predictable_channels, sbgr_of_subband, tc_roles,
 };
-use crate::psy::{annex_d_sampling_rate, compute_smr_model1_frame, LAYER2_FFT_LEN};
+use crate::psy::{LAYER2_FFT_LEN, annex_d_sampling_rate, compute_smr_model1_frame};
 use crate::tables::SCALEFACTORS;
 use oxideav_core::bits::BitWriter;
 
@@ -1241,11 +1241,7 @@ fn elect_dyn_cross(
         // Try the other polarity only when a centre / mono-surround
         // fallback exists to be steered by dyn_cross_LR.
         let (plan_r, n_r) = evaluate(true);
-        if n_r > n_l {
-            plan_r
-        } else {
-            plan_l
-        }
+        if n_r > n_l { plan_r } else { plan_l }
     } else {
         plan_l
     };
@@ -2119,7 +2115,7 @@ pub fn encode_mc_all_frames_ext(
         });
     }
     let n = pcm[0].len();
-    if n % PCM_SAMPLES_PER_CHANNEL != 0 {
+    if !n.is_multiple_of(PCM_SAMPLES_PER_CHANNEL) {
         return Err(McEncodeError::BadPcmShape {
             have: n,
             need: n.next_multiple_of(PCM_SAMPLES_PER_CHANNEL),

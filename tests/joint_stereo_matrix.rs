@@ -49,11 +49,11 @@
 //! consulted.
 
 use oxideav_mp2::audio_data::parse_audio_data_with_section_bits;
-use oxideav_mp2::frame::{decode_frame, FrameError};
+use oxideav_mp2::frame::{FrameError, decode_frame};
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::{
-    decode_all_frames, encode_all_frames, encode_all_frames_js, FrameHeader, PaddingScheduler,
-    PCM_SAMPLES_PER_CHANNEL,
+    FrameHeader, PCM_SAMPLES_PER_CHANNEL, PaddingScheduler, decode_all_frames, encode_all_frames,
+    encode_all_frames_js,
 };
 
 use oxideav_core::bits::BitReader;

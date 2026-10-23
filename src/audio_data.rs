@@ -38,7 +38,7 @@ use core::fmt;
 
 use oxideav_core::bits::{BitReader, BitWriter};
 
-use crate::bitalloc::{select_table, BitAllocTable, NUM_SUBBANDS};
+use crate::bitalloc::{BitAllocTable, NUM_SUBBANDS, select_table};
 use crate::header::{FrameHeader, Mode};
 
 /// Errors that can arise while parsing the §2.4.1.6 audio-data

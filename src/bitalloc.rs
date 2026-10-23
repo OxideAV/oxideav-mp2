@@ -202,7 +202,7 @@ impl BitAllocTable {
         row.iter()
             .enumerate()
             .skip(1)
-            .find(|(_, &steps)| steps == nb_steps)
+            .find(|&(_, &steps)| steps == nb_steps)
             .map(|(idx, _)| idx as u32)
     }
 
@@ -290,7 +290,7 @@ pub fn bitrate_per_channel_kbps(header: &FrameHeader) -> Option<u32> {
     match header.mode {
         Mode::SingleChannel => Some(total_kbps),
         Mode::Stereo | Mode::JointStereo | Mode::DualChannel => {
-            if total_kbps % 2 == 0 {
+            if total_kbps.is_multiple_of(2) {
                 Some(total_kbps / 2)
             } else {
                 // No Layer II ladder rate is odd; defensive None.

@@ -23,8 +23,8 @@
 
 use oxideav_mp2::header::{Emphasis, Mode, ModeExtension};
 use oxideav_mp2::mc::{decode_mc_stream, has_mc_extension};
-use oxideav_mp2::mc_encode::{encode_mc_all_frames, McEncodeConfig};
-use oxideav_mp2::{decode_all_frames, FrameHeader, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::mc_encode::{McEncodeConfig, encode_mc_all_frames};
+use oxideav_mp2::{FrameHeader, PCM_SAMPLES_PER_CHANNEL, decode_all_frames};
 use std::path::{Path, PathBuf};
 
 const ENV_DIR: &str = "OXIDEAV_MP2_ISO13818_4_DIR";
@@ -64,7 +64,9 @@ fn stream_file(dir: &Path, name: &str, file: &str) -> Option<PathBuf> {
 fn read_ref_f64(path: &Path) -> Vec<f64> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f64::from(i16::from_be_bytes([c[0], c[1]])) / 32768.0)
         .collect()
 }

@@ -112,9 +112,9 @@
 //! choice that satisfies the §C.1.5.2.7 "adb is not less than any
 //! possible increase" termination rule.
 
-use crate::audio_data::{AudioData, Scfsi, MAX_CHANNELS};
+use crate::audio_data::{AudioData, MAX_CHANNELS, Scfsi};
 use crate::bitalloc::{
-    bitrate_per_channel_kbps, class_of_quantization, select_table, BitAllocTable, NUM_SUBBANDS,
+    BitAllocTable, NUM_SUBBANDS, bitrate_per_channel_kbps, class_of_quantization, select_table,
 };
 use crate::encoder_scalefactors::SUBBAND_SAMPLES_PER_FRAME;
 use crate::header::{FrameHeader, Mode};
@@ -290,8 +290,8 @@ pub fn fixed_bit_budget(header: &FrameHeader) -> Result<FixedBitBudget, BitAlloc
     // loop is empty.
 
     let _ = bitrate_per_channel_kbps(header); // sanity (unused, but
-                                              // verifies the per-channel arithmetic select_table
-                                              // already exercised).
+    // verifies the per-channel arithmetic select_table
+    // already exercised).
 
     Ok(FixedBitBudget {
         cb,
@@ -533,11 +533,7 @@ pub fn sample_bits_for(nb_steps: u32) -> u32 {
 /// `1 << nbal(sb)`. Used to decide eligibility for further iteration.
 fn row_width(table: BitAllocTable, sb: usize) -> u32 {
     let nbal = table.nbal(sb);
-    if nbal == 0 {
-        0
-    } else {
-        1u32 << nbal
-    }
+    if nbal == 0 { 0 } else { 1u32 << nbal }
 }
 
 /// `nb_steps` at row position `row_idx` along `(table, sb)`. The

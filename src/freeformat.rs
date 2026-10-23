@@ -47,7 +47,7 @@
 //! a measured base size implying more than 384 kbit/s is reported as
 //! [`FreeFormatError::UnsupportedBitrate`].
 
-use crate::header::{decode_bitrate, decode_bitrate_lsf, find_sync, FrameHeader, HeaderError};
+use crate::header::{FrameHeader, HeaderError, decode_bitrate, decode_bitrate_lsf, find_sync};
 
 /// Errors raised while determining a free-format frame's size.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,7 +444,7 @@ mod tests {
         // followed by a second syncword.
         let mut buf = free_format_header_bytes(0b00, 0b00, 0).to_vec();
         buf.resize(417, 0xAB); // fill payload (avoid 0xFF runs that look like sync)
-                               // append a second valid free-format header so find_sync hits it
+        // append a second valid free-format header so find_sync hits it
         buf.extend_from_slice(&free_format_header_bytes(0b00, 0b00, 0));
         let base = measure_base_slots(&buf).expect("measure");
         assert_eq!(base, 417);

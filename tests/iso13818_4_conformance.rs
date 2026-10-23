@@ -57,7 +57,7 @@
 //! of them ≥ 99,9 % bit-exactly.
 
 use oxideav_mp2::header::{FrameHeader, Mode};
-use oxideav_mp2::{decode_all_frames, PCM_SAMPLES_PER_CHANNEL};
+use oxideav_mp2::{PCM_SAMPLES_PER_CHANNEL, decode_all_frames};
 use std::path::{Path, PathBuf};
 
 const ENV_DIR: &str = "OXIDEAV_MP2_ISO13818_4_DIR";
@@ -250,11 +250,15 @@ fn read_ref_pcm(path: &Path, width: RefWidth) -> Vec<f64> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     match width {
         RefWidth::S16Be => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| f64::from(i16::from_be_bytes([c[0], c[1]])) / 32768.0)
             .collect(),
         RefWidth::S24Be => bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| {
                 let v = i32::from_be_bytes([c[0], c[1], c[2], 0]) >> 8;
                 f64::from(v) / 8_388_608.0

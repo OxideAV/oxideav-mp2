@@ -601,7 +601,7 @@ pub fn decode_sampling_frequency(index: u8) -> Result<u32, HeaderError> {
 /// are rejected as [`HeaderError::UnsupportedBitrate`] since this
 /// crate's encoder only emits the §2.4.2.3 ladder.
 pub fn encode_bitrate(bit_rate: u32) -> Result<u8, HeaderError> {
-    if bit_rate == 0 || bit_rate % 1000 != 0 {
+    if bit_rate == 0 || !bit_rate.is_multiple_of(1000) {
         return Err(HeaderError::UnsupportedBitrate(bit_rate));
     }
     let kbps = bit_rate / 1000;
@@ -707,7 +707,7 @@ pub fn decode_sampling_frequency_lsf(index: u8) -> Result<u32, HeaderError> {
 /// forbidden code (`'1111'`) are not producible — both are rejected
 /// as [`HeaderError::UnsupportedBitrate`].
 pub fn encode_bitrate_lsf(bit_rate: u32) -> Result<u8, HeaderError> {
-    if bit_rate == 0 || bit_rate % 1000 != 0 {
+    if bit_rate == 0 || !bit_rate.is_multiple_of(1000) {
         return Err(HeaderError::UnsupportedBitrate(bit_rate));
     }
     let kbps = bit_rate / 1000;
