@@ -168,13 +168,11 @@ fn phase_mixed_surround_round_trips_through_every_tc_arm() {
     let header = base_header(sample_rate, 384_000);
     for (front, surround, tc_values) in [(3u8, 2u8, 0..=7u8), (3, 1, 0..=5u8)] {
         for tc in tc_values {
-            let cfg = McEncodeConfig {
-                front,
-                surround,
-                dematrix_procedure: 2,
-                tc_allocation: tc,
-                ..McEncodeConfig::default()
-            };
+            let cfg = McEncodeConfig::default()
+                .with_front(front)
+                .with_surround(surround)
+                .with_dematrix_procedure(2)
+                .with_tc_allocation(tc);
             let channels = cfg.presentation_channels();
             let pcm = tone_streams(channels, sample_rate, n_frames, 0.28);
             let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
@@ -254,10 +252,7 @@ fn adaptive_tc_allocation_round_trips_on_band_disjoint_material() {
     let n_frames = 4;
     let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        adaptive_tc: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_adaptive_tc(true);
     // sb width = 750 Hz at 48 kHz. L/R in sb 0-1, C in sb 6, LS in
     // sb 10, RS in sb 13 — each lands in a different subband group.
     let tones = [430.0, 1_150.0, 4_900.0, 7_900.0, 10_150.0];
@@ -297,13 +292,11 @@ fn adaptive_tc_allocation_works_under_every_matrixing_procedure() {
             if proc_ == 2 && !(front == 3 && surround >= 1) {
                 continue;
             }
-            let cfg = McEncodeConfig {
-                front,
-                surround,
-                dematrix_procedure: proc_,
-                adaptive_tc: true,
-                ..McEncodeConfig::default()
-            };
+            let cfg = McEncodeConfig::default()
+                .with_front(front)
+                .with_surround(surround)
+                .with_dematrix_procedure(proc_)
+                .with_adaptive_tc(true);
             let channels = cfg.presentation_channels();
             let pcm = tone_streams(channels, sample_rate, n_frames, 0.25);
             let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
@@ -331,10 +324,7 @@ fn phantom_centre_band_limits_c_and_folds_the_high_band_into_l_r() {
     let n_frames = 4;
     let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        phantom_centre: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_phantom_centre(true);
     // Centre carries a low tone (sb 3, transmitted) AND a high tone
     // (sb 20, phantom-folded); L/R/LS/RS carry their usual tones.
     let c_low = 2_600.0; // sb 3
@@ -387,11 +377,9 @@ fn phantom_centre_survives_the_adaptive_tc_election() {
     // row would put the centre off T2 and break the band-limit rule).
     let sample_rate = 48_000;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        phantom_centre: true,
-        adaptive_tc: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_phantom_centre(true)
+        .with_adaptive_tc(true);
     let pcm = tone_streams(5, sample_rate, 3, 0.25);
     let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
     let decoded = decode_mc_stream(&stream, None).expect("decode");
@@ -412,12 +400,10 @@ fn second_stereo_programme_round_trips_unmatrixed() {
     let n_frames = 4;
     let header = base_header(sample_rate, 384_000);
     for front in [3u8, 2] {
-        let cfg = McEncodeConfig {
-            front,
-            surround: 0,
-            second_stereo: true,
-            ..McEncodeConfig::default()
-        };
+        let cfg = McEncodeConfig::default()
+            .with_front(front)
+            .with_surround(0)
+            .with_second_stereo(true);
         let channels = cfg.presentation_channels();
         assert_eq!(channels, usize::from(front) + 2);
         let pcm = tone_streams(channels, sample_rate, n_frames, 0.25);
@@ -452,13 +438,11 @@ fn multilingual_channels_round_trip_at_full_and_half_rate() {
     let n_frames = 6;
     let header = base_header(sample_rate, 384_000);
     for (fs_half, nml) in [(false, 2u8), (true, 3), (false, 1)] {
-        let cfg = McEncodeConfig {
-            front: 3,
-            surround: 0,
-            multilingual: nml,
-            multilingual_fs_half: fs_half,
-            ..McEncodeConfig::default()
-        };
+        let cfg = McEncodeConfig::default()
+            .with_front(3)
+            .with_surround(0)
+            .with_multilingual(nml)
+            .with_multilingual_fs_half(fs_half);
         let pcm = tone_streams(3, sample_rate, n_frames, 0.25);
         let ml_n = cfg.multilingual_samples_per_frame() * n_frames;
         let ml_rate = if fs_half {
@@ -517,11 +501,9 @@ fn extension_bit_stream_carries_the_spill_and_round_trips() {
     // Low base bitrate + an explicit over-capacity budget: the frame is
     // 192 kbit/s (4608 bits) but the extension asks for 6000 bits.
     let header = base_header(sample_rate, 192_000);
-    let cfg = McEncodeConfig {
-        mc_bits: Some(6_000),
-        ext_bit_stream: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_mc_bits(Some(6_000))
+        .with_ext_bit_stream(true);
     let pcm = tone_streams(5, sample_rate, n_frames, 0.25);
     let stream = encode_mc_all_frames_ext(&header, &cfg, &pcm, None, &[]).expect("encode");
     let ext = stream.ext.as_deref().expect("ext stream present");
@@ -546,10 +528,7 @@ fn extension_bit_stream_carries_the_spill_and_round_trips() {
 fn extension_bit_stream_with_headroom_emits_header_only_ext_frames() {
     let sample_rate = 48_000;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        ext_bit_stream: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_ext_bit_stream(true);
     let n_frames = 4;
     let pcm = tone_streams(5, sample_rate, n_frames, 0.25);
     let stream = encode_mc_all_frames_ext(&header, &cfg, &pcm, None, &[]).expect("encode");
@@ -568,10 +547,7 @@ fn extension_bit_stream_with_headroom_emits_header_only_ext_frames() {
 #[test]
 fn plain_entry_points_refuse_an_ext_bit_stream_config() {
     let header = base_header(48_000, 384_000);
-    let cfg = McEncodeConfig {
-        ext_bit_stream: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_ext_bit_stream(true);
     let pcm = tone_streams(5, 48_000, 1, 0.2);
     assert!(matches!(
         encode_mc_all_frames(&header, &cfg, &pcm, None),
@@ -587,10 +563,7 @@ fn plain_entry_points_refuse_an_ext_bit_stream_config() {
 #[test]
 fn over_capacity_budget_without_ext_stream_is_refused() {
     let header = base_header(48_000, 192_000);
-    let cfg = McEncodeConfig {
-        mc_bits: Some(6_000),
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_mc_bits(Some(6_000));
     let pcm = tone_streams(5, 48_000, 1, 0.2);
     assert!(matches!(
         encode_mc_all_frames(&header, &cfg, &pcm, None),
@@ -608,10 +581,7 @@ fn dynamic_crosstalk_fires_on_correlated_surround_and_round_trips() {
     let n_frames = 6;
     let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
     let header = base_header(sample_rate, 256_000);
-    let cfg = McEncodeConfig {
-        dyn_cross: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_dyn_cross(true);
     // LS and RS carry the *same* signal at slightly different levels —
     // the classic stereo-irrelevant case §C.2.1.7 describes. C is its
     // own tone.
@@ -637,10 +607,7 @@ fn dynamic_crosstalk_fires_on_correlated_surround_and_round_trips() {
 fn dynamic_crosstalk_stays_off_for_band_disjoint_channels() {
     let sample_rate = 48_000;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        dyn_cross: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_dyn_cross(true);
     // Independent full-band noise per channel: every subband group has
     // energy in every channel, and substituting any channel for
     // another fails the 10 dB bound — so no group may elect crosstalk.
@@ -670,13 +637,11 @@ fn dynamic_crosstalk_covers_the_second_stereo_programme() {
     let n_frames = 4;
     let total = n_frames * PCM_SAMPLES_PER_CHANNEL;
     let header = base_header(sample_rate, 256_000);
-    let cfg = McEncodeConfig {
-        front: 2,
-        surround: 0,
-        second_stereo: true,
-        dyn_cross: true,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_front(2)
+        .with_surround(0)
+        .with_second_stereo(true)
+        .with_dyn_cross(true);
     // L2 == R2 exactly: dyn_second_stereo substitutes R2 everywhere.
     let mut pcm = tone_streams(4, sample_rate, n_frames, 0.25);
     let programme2 = tone(2_600.0, sample_rate, total, 0.3);
@@ -705,16 +670,14 @@ fn kitchen_sink_frame_api_round_trips() {
     let sample_rate = 44_100;
     let n_frames = 3;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        lfe: true,
-        adaptive_tc: true,
-        dyn_cross: true,
-        prediction: true,
-        multilingual: 1,
-        ext_bit_stream: true,
-        mc_bits: Some(7_000),
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_lfe(true)
+        .with_adaptive_tc(true)
+        .with_dyn_cross(true)
+        .with_prediction(true)
+        .with_multilingual(1)
+        .with_ext_bit_stream(true)
+        .with_mc_bits(Some(7_000));
     let pcm = tone_streams(5, sample_rate, n_frames, 0.22);
     let lfe: Vec<f64> = (0..n_frames * 12)
         .map(|i| 0.4 * (i as f64 * 0.7).sin())
@@ -782,20 +745,12 @@ fn black_box_reference_decoder_accepts_the_emitted_base_frames() {
     let n_frames = 6;
     let header = base_header(sample_rate, 384_000);
     for cfg in [
-        McEncodeConfig {
-            adaptive_tc: true,
-            dyn_cross: true,
-            prediction: true,
-            ..McEncodeConfig::default()
-        },
-        McEncodeConfig {
-            dematrix_procedure: 2,
-            ..McEncodeConfig::default()
-        },
-        McEncodeConfig {
-            phantom_centre: true,
-            ..McEncodeConfig::default()
-        },
+        McEncodeConfig::default()
+            .with_adaptive_tc(true)
+            .with_dyn_cross(true)
+            .with_prediction(true),
+        McEncodeConfig::default().with_dematrix_procedure(2),
+        McEncodeConfig::default().with_phantom_centre(true),
     ] {
         let pcm = tone_streams(cfg.presentation_channels(), sample_rate, n_frames, 0.25);
         let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
@@ -863,10 +818,7 @@ fn surround_processing_shifts_surrounds_and_delays_the_rest() {
     let sample_rate = 48_000;
     let n_frames = 4;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        dematrix_procedure: 2,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_dematrix_procedure(2);
     let pcm = tone_streams(5, sample_rate, n_frames, 0.25);
     let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
     let plain = decode_mc_stream(&stream, None).expect("decode");
@@ -929,12 +881,10 @@ fn streaming_surround_processor_matches_the_whole_stream_pass() {
     let sample_rate = 48_000;
     let n_frames = 3;
     let header = base_header(sample_rate, 384_000);
-    let cfg = McEncodeConfig {
-        front: 3,
-        surround: 1,
-        dematrix_procedure: 2,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_front(3)
+        .with_surround(1)
+        .with_dematrix_procedure(2);
     let pcm = tone_streams(4, sample_rate, n_frames, 0.25);
     let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
     let mut whole = decode_mc_stream(&stream, None).expect("decode");

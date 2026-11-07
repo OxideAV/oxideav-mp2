@@ -117,23 +117,7 @@ fuzz_target!(|data: &[u8]| {
         _ => 0,
     };
     let phantom = c2 & 0b10 != 0 && front == 3 && dematrix != 3;
-    let cfg = McEncodeConfig {
-        front,
-        surround,
-        lfe: c2 & 0b100 != 0,
-        dematrix_procedure: dematrix,
-        lfe_allocation: 2 + (c3 % 14),
-        mc_bits: None,
-        tc_allocation: 0,
-        adaptive_tc: c2 & 0b1000 != 0 && dematrix != 3,
-        dyn_cross: c2 & 0b1_0000 != 0,
-        phantom_centre: phantom,
-        second_stereo,
-        multilingual: (c3 >> 4) % 3,
-        multilingual_fs_half: c3 & 0b1000_0000 != 0,
-        ext_bit_stream: c2 & 0b10_0000 != 0,
-        prediction: c2 & 0b100_0000 != 0,
-    };
+    let cfg = McEncodeConfig::default().with_front(front).with_surround(surround).with_lfe(c2 & 0b100 != 0).with_dematrix_procedure(dematrix).with_lfe_allocation(2 + (c3 % 14)).with_mc_bits(None).with_tc_allocation(0).with_adaptive_tc(c2 & 0b1000 != 0 && dematrix != 3).with_dyn_cross(c2 & 0b1_0000 != 0).with_phantom_centre(phantom).with_second_stereo(second_stereo).with_multilingual((c3 >> 4) % 3).with_multilingual_fs_half(c3 & 0b1000_0000 != 0).with_ext_bit_stream(c2 & 0b10_0000 != 0).with_prediction(c2 & 0b100_0000 != 0);
     if cfg.validate().is_err() {
         unreachable!("harness built an invalid configuration: {cfg:?}");
     }

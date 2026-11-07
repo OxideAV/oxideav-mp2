@@ -96,6 +96,7 @@ const SQRT2: f64 = std::f64::consts::SQRT_2;
 
 /// Errors raised by the §2.5 multichannel decode.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum McError {
     /// The base frame failed to parse.
     Header(HeaderError),
@@ -276,6 +277,7 @@ pub enum McChannel {
 /// The §2.5.2.15 multichannel configuration, derived from the
 /// `centre` / `surround` header fields and the base frame's mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct McConfig {
     /// Front channels in the *main* programme (3 or 2; 1 for a mono
     /// base).
@@ -293,6 +295,78 @@ pub struct McConfig {
     pub dyn_cross_bits: u32,
     /// Phantom-coded centre (`centre == '11'`).
     pub phantom_centre: bool,
+}
+
+impl McConfig {
+    /// Build a [`McConfig`] from all of its fields.
+    pub fn new(
+        front: u8,
+        surround: u8,
+        second_stereo: bool,
+        nmch: usize,
+        tc_allocation_bits: u32,
+        dyn_cross_bits: u32,
+        phantom_centre: bool,
+    ) -> Self {
+        Self {
+            front,
+            surround,
+            second_stereo,
+            nmch,
+            tc_allocation_bits,
+            dyn_cross_bits,
+            phantom_centre,
+        }
+    }
+
+    /// Set [`McConfig::front`].
+    #[must_use]
+    pub fn with_front(mut self, v: u8) -> Self {
+        self.front = v;
+        self
+    }
+
+    /// Set [`McConfig::surround`].
+    #[must_use]
+    pub fn with_surround(mut self, v: u8) -> Self {
+        self.surround = v;
+        self
+    }
+
+    /// Set [`McConfig::second_stereo`].
+    #[must_use]
+    pub fn with_second_stereo(mut self, v: bool) -> Self {
+        self.second_stereo = v;
+        self
+    }
+
+    /// Set [`McConfig::nmch`].
+    #[must_use]
+    pub fn with_nmch(mut self, v: usize) -> Self {
+        self.nmch = v;
+        self
+    }
+
+    /// Set [`McConfig::tc_allocation_bits`].
+    #[must_use]
+    pub fn with_tc_allocation_bits(mut self, v: u32) -> Self {
+        self.tc_allocation_bits = v;
+        self
+    }
+
+    /// Set [`McConfig::dyn_cross_bits`].
+    #[must_use]
+    pub fn with_dyn_cross_bits(mut self, v: u32) -> Self {
+        self.dyn_cross_bits = v;
+        self
+    }
+
+    /// Set [`McConfig::phantom_centre`].
+    #[must_use]
+    pub fn with_phantom_centre(mut self, v: bool) -> Self {
+        self.phantom_centre = v;
+        self
+    }
 }
 
 impl McConfig {
@@ -758,6 +832,7 @@ fn crc_feed_bits(mut reg: u16, packed: &[u8], from: u64, to: u64) -> u16 {
 
 /// One decoded multichannel frame.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct McDecodedFrame {
     /// The base frame header.
     pub base_header: FrameHeader,
@@ -780,6 +855,34 @@ pub struct McDecodedFrame {
     pub dyn_cross_on: bool,
     /// This frame's §2.5.1.15 `mc_prediction_on` flag.
     pub mc_prediction_on: bool,
+}
+
+impl McDecodedFrame {
+    /// Build a [`McDecodedFrame`] from all of its fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        base_header: FrameHeader,
+        mc_header: McHeader,
+        config: McConfig,
+        layout: Vec<McChannel>,
+        channels: Vec<Vec<f64>>,
+        lfe: Option<Vec<f64>>,
+        multilingual: Vec<Vec<f64>>,
+        dyn_cross_on: bool,
+        mc_prediction_on: bool,
+    ) -> Self {
+        Self {
+            base_header,
+            mc_header,
+            config,
+            layout,
+            channels,
+            lfe,
+            multilingual,
+            dyn_cross_on,
+            mc_prediction_on,
+        }
+    }
 }
 
 /// Cross-frame decode state: per-presentation-channel synthesis
@@ -1816,6 +1919,7 @@ fn dematrix(
 
 /// Decoded multichannel stream: concatenated per-channel PCM.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct McDecodedStream {
     /// The first frame's `mc_header()`.
     pub mc_header: McHeader,
@@ -1835,6 +1939,34 @@ pub struct McDecodedStream {
     pub dyn_cross_frames: usize,
     /// Frames whose §2.5.1.15 `mc_prediction_on` flag was set.
     pub prediction_frames: usize,
+}
+
+impl McDecodedStream {
+    /// Build a [`McDecodedStream`] from all of its fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        mc_header: McHeader,
+        config: McConfig,
+        layout: Vec<McChannel>,
+        channels: Vec<Vec<f64>>,
+        lfe: Option<Vec<f64>>,
+        multilingual: Vec<Vec<f64>>,
+        frames: usize,
+        dyn_cross_frames: usize,
+        prediction_frames: usize,
+    ) -> Self {
+        Self {
+            mc_header,
+            config,
+            layout,
+            channels,
+            lfe,
+            multilingual,
+            frames,
+            dyn_cross_frames,
+            prediction_frames,
+        }
+    }
 }
 
 /// Decode a whole Layer II multichannel stream: `base` is the

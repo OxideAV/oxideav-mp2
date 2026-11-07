@@ -177,12 +177,10 @@ fn mc_encoder_round_trips_official_programme_material() {
         // Both predictor elections must clear the same floors — the
         // §2.5.3.2.1.3 encode is exercised on real material too.
         for prediction in [false, true] {
-            let cfg = McEncodeConfig {
-                front: case.front,
-                surround: case.surround,
-                prediction,
-                ..McEncodeConfig::default()
-            };
+            let cfg = McEncodeConfig::default()
+                .with_front(case.front)
+                .with_surround(case.surround)
+                .with_prediction(prediction);
             let header = base_header(case.sample_rate, case.bit_rate);
             let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
                 .unwrap_or_else(|e| panic!("{}: encode: {e}", case.name));

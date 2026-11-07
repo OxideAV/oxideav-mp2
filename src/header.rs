@@ -96,6 +96,7 @@ pub const SYNCWORD: u16 = 0xFFF;
 
 /// MPEG-1 Layer II frame header parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HeaderError {
     /// Buffer too short to contain a 4-byte header.
     BufferTooShort,

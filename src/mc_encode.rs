@@ -119,6 +119,7 @@ const SQRT2: f64 = std::f64::consts::SQRT_2;
 
 /// Errors raised by the §2.5 multichannel encode.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum McEncodeError {
     /// The [`McEncodeConfig`] is not one this encoder can emit (see the
     /// field docs for the legal combinations).
@@ -203,6 +204,7 @@ impl From<EncodeError> for McEncodeError {
 /// Multichannel encode configuration: which §2.5.2.15 channel
 /// configuration to emit and how.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct McEncodeConfig {
     /// Front channels: `2` (L, R) or `3` (L, R, C).
     pub front: u8,
@@ -287,6 +289,113 @@ pub struct McEncodeConfig {
     /// transmits the prediction *error* in the subbands whose group
     /// the fit measurably wins (≥ 10 % residual-energy reduction).
     pub prediction: bool,
+}
+
+impl McEncodeConfig {
+    /// Set [`McEncodeConfig::front`].
+    #[must_use]
+    pub fn with_front(mut self, v: u8) -> Self {
+        self.front = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::surround`].
+    #[must_use]
+    pub fn with_surround(mut self, v: u8) -> Self {
+        self.surround = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::lfe`].
+    #[must_use]
+    pub fn with_lfe(mut self, v: bool) -> Self {
+        self.lfe = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::dematrix_procedure`].
+    #[must_use]
+    pub fn with_dematrix_procedure(mut self, v: u8) -> Self {
+        self.dematrix_procedure = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::lfe_allocation`].
+    #[must_use]
+    pub fn with_lfe_allocation(mut self, v: u8) -> Self {
+        self.lfe_allocation = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::mc_bits`].
+    #[must_use]
+    pub fn with_mc_bits(mut self, v: Option<u32>) -> Self {
+        self.mc_bits = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::tc_allocation`].
+    #[must_use]
+    pub fn with_tc_allocation(mut self, v: u8) -> Self {
+        self.tc_allocation = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::adaptive_tc`].
+    #[must_use]
+    pub fn with_adaptive_tc(mut self, v: bool) -> Self {
+        self.adaptive_tc = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::dyn_cross`].
+    #[must_use]
+    pub fn with_dyn_cross(mut self, v: bool) -> Self {
+        self.dyn_cross = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::phantom_centre`].
+    #[must_use]
+    pub fn with_phantom_centre(mut self, v: bool) -> Self {
+        self.phantom_centre = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::second_stereo`].
+    #[must_use]
+    pub fn with_second_stereo(mut self, v: bool) -> Self {
+        self.second_stereo = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::multilingual`].
+    #[must_use]
+    pub fn with_multilingual(mut self, v: u8) -> Self {
+        self.multilingual = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::multilingual_fs_half`].
+    #[must_use]
+    pub fn with_multilingual_fs_half(mut self, v: bool) -> Self {
+        self.multilingual_fs_half = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::ext_bit_stream`].
+    #[must_use]
+    pub fn with_ext_bit_stream(mut self, v: bool) -> Self {
+        self.ext_bit_stream = v;
+        self
+    }
+
+    /// Set [`McEncodeConfig::prediction`].
+    #[must_use]
+    pub fn with_prediction(mut self, v: bool) -> Self {
+        self.prediction = v;
+        self
+    }
 }
 
 impl Default for McEncodeConfig {
@@ -460,11 +569,19 @@ impl McEncodeConfig {
 /// into its ancillary field) and, when the configuration uses an
 /// extension bit stream, the paired §2.5.1.5 `ext_frame()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct McEncodedFrame {
     /// The MPEG-1-compatible base frame.
     pub base: Vec<u8>,
     /// The extension frame (`Some` iff `cfg.ext_bit_stream`).
     pub ext: Option<Vec<u8>>,
+}
+
+impl McEncodedFrame {
+    /// Build a [`McEncodedFrame`] from all of its fields.
+    pub fn new(base: Vec<u8>, ext: Option<Vec<u8>>) -> Self {
+        Self { base, ext }
+    }
 }
 
 /// Cross-frame encode state: the base pair's [`EncodeFrameState`]
@@ -2087,11 +2204,19 @@ pub fn encode_mc_all_frames(
 /// the configuration uses one, the concatenated §2.5.1.1.2 extension
 /// bit stream (one `ext_frame()` per base frame).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct McEncodedStream {
     /// The MPEG-1-compatible base bit stream.
     pub base: Vec<u8>,
     /// The extension bit stream (`Some` iff `cfg.ext_bit_stream`).
     pub ext: Option<Vec<u8>>,
+}
+
+impl McEncodedStream {
+    /// Build a [`McEncodedStream`] from all of its fields.
+    pub fn new(base: Vec<u8>, ext: Option<Vec<u8>>) -> Self {
+        Self { base, ext }
+    }
 }
 
 /// Batch multichannel encode with multilingual input and

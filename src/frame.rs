@@ -89,6 +89,7 @@ pub const PCM_SAMPLES_PER_CHANNEL: usize = 1152;
 
 /// Errors raised by the Layer II frame-level decode loop.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FrameError {
     /// Header parse / validation failed.
     Header(HeaderError),
@@ -183,6 +184,7 @@ impl From<RequantError> for FrameError {
 /// `pcm.len()` equals [`FrameHeader::channels`]; `pcm[ch].len()` equals
 /// [`PCM_SAMPLES_PER_CHANNEL`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DecodedFrame {
     /// The parsed Layer II frame header.
     pub header: FrameHeader,
@@ -191,6 +193,17 @@ pub struct DecodedFrame {
     pub pcm: Vec<Vec<f64>>,
     /// The §2.4.1.8 `ancillary_data()` tail of the frame.
     pub ancillary: Ancillary,
+}
+
+impl DecodedFrame {
+    /// Build a [`DecodedFrame`] from all of its fields.
+    pub fn new(header: FrameHeader, pcm: Vec<Vec<f64>>, ancillary: Ancillary) -> Self {
+        Self {
+            header,
+            pcm,
+            ancillary,
+        }
+    }
 }
 
 /// The §2.4.1.8 `ancillary_data()` tail of a decoded Layer II frame.
@@ -213,6 +226,7 @@ pub struct DecodedFrame {
 /// byte-aligned (see
 /// [`encode_frame_with_ancillary`](crate::encoder_frame::encode_frame_with_ancillary)).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Ancillary {
     /// Exact §2.4.2.8 `no_of_ancillary_bits` on the wire — always
     /// `usize::from(residue_bits) + 8 * bytes.len()` (the frame end is
@@ -227,6 +241,36 @@ pub struct Ancillary {
     /// The whole tail bytes, from the first frame byte boundary after
     /// the sample loop to the end of the frame.
     pub bytes: Vec<u8>,
+}
+
+impl Ancillary {
+    /// Set [`Ancillary::bits`].
+    #[must_use]
+    pub fn with_bits(mut self, v: usize) -> Self {
+        self.bits = v;
+        self
+    }
+
+    /// Set [`Ancillary::residue_bits`].
+    #[must_use]
+    pub fn with_residue_bits(mut self, v: u8) -> Self {
+        self.residue_bits = v;
+        self
+    }
+
+    /// Set [`Ancillary::residue`].
+    #[must_use]
+    pub fn with_residue(mut self, v: u8) -> Self {
+        self.residue = v;
+        self
+    }
+
+    /// Set [`Ancillary::bytes`].
+    #[must_use]
+    pub fn with_bytes(mut self, v: Vec<u8>) -> Self {
+        self.bytes = v;
+        self
+    }
 }
 
 impl Ancillary {

@@ -499,9 +499,9 @@ fn assert_decode_graceful(frame: &[u8], channels: usize, label: &str) {
                 }
             }
         }
-        // Exhaustive match (no wildcard): a new FrameError variant added
-        // without updating this test fails to compile, keeping the
-        // documented-error contract honest.
+        // `FrameError` is `#[non_exhaustive]`, so the documented
+        // variants are listed explicitly and anything else fails the
+        // test, keeping the documented-error contract honest.
         Err(err) => match err {
             FrameError::Header(_)
             | FrameError::AudioData(_)
@@ -510,6 +510,7 @@ fn assert_decode_graceful(frame: &[u8], channels: usize, label: &str) {
             | FrameError::CrcMismatch { .. }
             | FrameError::UnknownQuantClass { .. }
             | FrameError::FreeFormat(_) => {}
+            other => panic!("undocumented FrameError variant: {other:?}"),
         },
     }
 }

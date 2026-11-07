@@ -6,9 +6,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `with_*` setters for every field of `mc_encode::McEncodeConfig` and
+  `frame::Ancillary` (start from `Default`); `mc::McConfig::new(..)` plus
+  `with_*`; all-field `new(..)` constructors for `frame::DecodedFrame`,
+  `mc::McDecodedFrame`, `mc::McDecodedStream`, `mc_encode::McEncodedFrame`
+  and `mc_encode::McEncodedStream`.
+
+
 ### Changed
 
 - edition 2024, MSRV 1.95
+- API hygiene: `#[non_exhaustive]` on the error enums `Error`,
+  `header::HeaderError`, `frame::FrameError`, `mc::McError`,
+  `mc_encode::McEncodeError` and on the records listed under Added.
+  The spec-fixed header fields (`FrameHeader`, `McHeader`, `Mode`,
+  `ModeExtension`, `Emphasis`, `Centre`, `Surround`, `McChannel`) stay
+  exhaustive.
+- The bitstream, DSP and table modules are now `#[doc(hidden)]` together
+  with their crate-root re-exports: `analysis`, `audio_data`, `bitalloc`,
+  `crc`, `deemphasis`, `encoder_bit_allocator`, `encoder_frame`,
+  `encoder_samples`, `encoder_scalefactors`, `encoder_scfsi`,
+  `freeformat`, `j17`, `psy`, `requant`, `surround`, `synthesis`,
+  `tables`, `tables_analysis`, `tables_d2`, `tables_lsf`,
+  `tables_model2`, `tables_synthesis`. The documented surface is
+  `codec_decoder`, `codec_encoder`, `header`, `frame`, `mc` and
+  `mc_encode`.
 
 ## [0.0.10](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.9...v0.0.10) - 2026-08-30
 

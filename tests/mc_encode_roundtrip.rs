@@ -109,12 +109,10 @@ fn every_configuration_round_trips_with_channel_separation() {
     let header = base_header(sample_rate, 384_000);
     for (front, surround) in [(3u8, 2u8), (3, 1), (3, 0), (2, 2), (2, 1)] {
         for proc_ in [0u8, 1, 3] {
-            let cfg = McEncodeConfig {
-                front,
-                surround,
-                dematrix_procedure: proc_,
-                ..McEncodeConfig::default()
-            };
+            let cfg = McEncodeConfig::default()
+                .with_front(front)
+                .with_surround(surround)
+                .with_dematrix_procedure(proc_);
             let channels = cfg.presentation_channels();
             let pcm = tone_streams(channels, sample_rate, n_frames, 0.30);
             let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
@@ -202,12 +200,10 @@ fn lfe_round_trips_within_the_companding_step() {
     let n_frames = 4;
     let header = base_header(48_000, 384_000);
     for (front, surround) in [(2u8, 0u8), (3, 2)] {
-        let cfg = McEncodeConfig {
-            front,
-            surround,
-            lfe: true,
-            ..McEncodeConfig::default()
-        };
+        let cfg = McEncodeConfig::default()
+            .with_front(front)
+            .with_surround(surround)
+            .with_lfe(true);
         let channels = cfg.presentation_channels();
         let pcm = tone_streams(channels, 48_000, n_frames, 0.25);
         // A slow ramp across the LFE's own ±(near full scale) range.
@@ -235,13 +231,11 @@ fn lfe_round_trips_within_the_companding_step() {
 #[test]
 fn wire_premises_hold_and_the_crc_protects_the_header() {
     let header = base_header(48_000, 384_000);
-    let cfg = McEncodeConfig {
-        front: 3,
-        surround: 2,
-        lfe: true,
-        dematrix_procedure: 1,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_front(3)
+        .with_surround(2)
+        .with_lfe(true)
+        .with_dematrix_procedure(1);
     let pcm = tone_streams(5, 48_000, 1, 0.30);
     let lfe = vec![0.1f64; oxideav_mp2::LFE_SAMPLES_PER_FRAME];
     let mut state = McEncodeState::new();
@@ -298,10 +292,7 @@ fn silence_round_trips_to_exact_zero() {
 #[test]
 fn undersized_budget_is_refused_not_truncated() {
     let header = base_header(48_000, 384_000);
-    let cfg = McEncodeConfig {
-        mc_bits: Some(64),
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default().with_mc_bits(Some(64));
     let pcm = tone_streams(5, 48_000, 1, 0.3);
     let mut state = McEncodeState::new();
     match encode_mc_frame_with(&header, &cfg, &pcm, None, &mut state) {
@@ -344,13 +335,11 @@ fn every_tc_allocation_round_trips_through_its_dematrix_arm() {
     for (front, surround, tc_max) in [(3u8, 2u8, 7u8), (3, 1, 4), (3, 0, 2), (2, 2, 3), (2, 1, 2)] {
         for proc_ in [0u8, 1] {
             for tc in 0..=tc_max {
-                let cfg = McEncodeConfig {
-                    front,
-                    surround,
-                    dematrix_procedure: proc_,
-                    tc_allocation: tc,
-                    ..McEncodeConfig::default()
-                };
+                let cfg = McEncodeConfig::default()
+                    .with_front(front)
+                    .with_surround(surround)
+                    .with_dematrix_procedure(proc_)
+                    .with_tc_allocation(tc);
                 let channels = cfg.presentation_channels();
                 let pcm = tone_streams(channels, sample_rate, n_frames, 0.30);
                 let stream = encode_mc_all_frames(&header, &cfg, &pcm, None)
@@ -389,12 +378,10 @@ fn out_of_range_tc_allocation_is_rejected() {
     let header = base_header(48_000, 384_000);
     let mut state = McEncodeState::new();
     for (front, surround, bad_tc) in [(3u8, 2u8, 8u8), (3, 1, 5), (3, 0, 3), (2, 2, 4), (2, 1, 3)] {
-        let cfg = McEncodeConfig {
-            front,
-            surround,
-            tc_allocation: bad_tc,
-            ..McEncodeConfig::default()
-        };
+        let cfg = McEncodeConfig::default()
+            .with_front(front)
+            .with_surround(surround)
+            .with_tc_allocation(bad_tc);
         let pcm = tone_streams(cfg.presentation_channels(), 48_000, 1, 0.3);
         assert!(
             matches!(
@@ -405,11 +392,9 @@ fn out_of_range_tc_allocation_is_rejected() {
         );
     }
     // Procedure '11' forces tc_allocation 0 (§2.5.2.15).
-    let cfg = McEncodeConfig {
-        dematrix_procedure: 3,
-        tc_allocation: 1,
-        ..McEncodeConfig::default()
-    };
+    let cfg = McEncodeConfig::default()
+        .with_dematrix_procedure(3)
+        .with_tc_allocation(1);
     let pcm = tone_streams(5, 48_000, 1, 0.3);
     assert!(matches!(
         encode_mc_frame_with(&header, &cfg, &pcm, None, &mut state),
@@ -438,10 +423,7 @@ fn prediction_engages_on_correlated_material_and_still_round_trips() {
     let pcm = vec![l, r, c, ls, rs];
 
     for prediction in [false, true] {
-        let cfg = McEncodeConfig {
-            prediction,
-            ..McEncodeConfig::default()
-        };
+        let cfg = McEncodeConfig::default().with_prediction(prediction);
         let stream = encode_mc_all_frames(&header, &cfg, &pcm, None).expect("encode");
         let decoded = decode_mc_stream(&stream, None).expect("decode");
         assert_eq!(decoded.frames, n_frames);
