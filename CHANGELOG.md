@@ -6,6 +6,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.10...v0.0.11) - 2026-11-07
+
+### Other
+
+- API hygiene: #[non_exhaustive] growable types, #[doc(hidden)] internals
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - `with_*` setters for every field of `mc_encode::McEncodeConfig` and
