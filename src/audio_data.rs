@@ -280,7 +280,7 @@ fn parse_allocation(
 
     for sb in 0..data.bound {
         let nbal = table.nbal(sb);
-        for ch in 0..channels {
+        for per_channel in data.nb_steps.iter_mut().take(channels) {
             let idx = read_bits(reader, nbal)?;
             let nb = table
                 .nb_steps(sb, idx)
@@ -289,7 +289,7 @@ fn parse_allocation(
                     sb,
                     index: idx,
                 })?;
-            data.nb_steps[ch][sb] = nb;
+            per_channel[sb] = nb;
         }
     }
     for sb in data.bound..data.sblimit {
@@ -303,8 +303,8 @@ fn parse_allocation(
                 index: idx,
             })?;
         // Intensity-stereo subbands: same allocation for both channels.
-        for ch in 0..channels {
-            data.nb_steps[ch][sb] = nb;
+        for per_channel in data.nb_steps.iter_mut().take(channels) {
+            per_channel[sb] = nb;
         }
     }
     Ok(())
@@ -632,8 +632,8 @@ fn write_allocation(data: &AudioData, writer: &mut BitWriter) -> Result<(), Audi
 
     for sb in 0..bound {
         let nbal = table.nbal(sb);
-        for ch in 0..channels {
-            let nb = data.nb_steps[ch][sb];
+        for (ch, per_channel) in data.nb_steps.iter().enumerate().take(channels) {
+            let nb = per_channel[sb];
             let idx =
                 table
                     .allocation_index(sb, nb)
@@ -883,9 +883,7 @@ mod tests {
                 assert_eq!(data.scalefactor[ch][sb], [0, 0, 0]);
             }
             // Subbands past sblimit untouched.
-            for sb in data.sblimit..NUM_SUBBANDS {
-                assert_eq!(data.nb_steps[ch][sb], 0);
-            }
+            assert!(data.nb_steps[ch][data.sblimit..].iter().all(|&nb| nb == 0));
         }
     }
 
@@ -1403,11 +1401,10 @@ mod tests {
             // Allocate every subband to its index = 1 (always a valid
             // allocation since index 0 = "no bits" sentinel and the
             // tables guarantee nb_steps(sb, 1) is defined for every sb).
-            for sb in 0..table.sblimit() {
-                let nb = table
+            for (sb, slot) in data.nb_steps[0][..table.sblimit()].iter_mut().enumerate() {
+                *slot = table
                     .nb_steps(sb, 1)
                     .unwrap_or_else(|| panic!("table {table:?} sb={sb} has no idx=1"));
-                data.nb_steps[0][sb] = nb;
             }
 
             for scfsi in scfsis {

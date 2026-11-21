@@ -892,14 +892,14 @@ mod tests {
             "fixture is unprotected (wire protection_bit == '1' = no CRC)"
         );
         assert_eq!(frame.pcm.len(), 2, "stereo");
-        for ch in 0..2 {
-            assert_eq!(frame.pcm[ch].len(), PCM_SAMPLES_PER_CHANNEL);
+        for (ch, plane) in frame.pcm.iter().enumerate() {
+            assert_eq!(plane.len(), PCM_SAMPLES_PER_CHANNEL);
             // Every sample is finite and within a generous bound. The
             // physically realisable §2.4.3.4.7.1 nominal range is
             // `[-1, +1]`; the matrix step of Annex A Figure A.2 can in
             // theory exceed it for adversarial inputs, but typical
             // material lands well within ±2.
-            for (n, &v) in frame.pcm[ch].iter().enumerate() {
+            for (n, &v) in plane.iter().enumerate() {
                 assert!(v.is_finite(), "ch={ch} n={n} non-finite: {v}");
                 assert!(v.abs() < 4.0, "ch={ch} n={n} exceeded ±4: {v}");
             }
