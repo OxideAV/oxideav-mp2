@@ -242,11 +242,35 @@ impl BitAllocTable {
 /// bitrate of the stream — ladder or off-ladder — never enters the
 /// selection.
 ///
-/// For MPEG-1 headers returns `None` if the (Fs, per-channel bitrate)
-/// pair is not covered by any of the four B.2 sub-tables. With
-/// [`crate::header::is_layer2_bitrate_mode_allowed`] enforced at parse
-/// time, every header that survives [`FrameHeader::parse`] is covered;
-/// callers may treat `None` as an internal-consistency failure.
+/// # Per-channel rates outside the table headers
+///
+/// §2.4.3.3.1 keys the choice on the **bitrate per channel** (total
+/// rate, halved when the mode is not single_channel), and the four
+/// Table 3-B.2 headers (PDF pages 46–49) enumerate the per-channel
+/// rates 32 … 192 kbit/s that the §2.4.2.3 mode matrix can produce. A
+/// stream that ignores that matrix reaches per-channel rates the
+/// headers do not name: 16 / 24 / 28 / 40 kbit/s (32 / 48 / 56 / 80
+/// kbit/s in a two-channel mode) and 224 / 256 / 320 / 384 kbit/s
+/// (those totals in single_channel mode). The headers partition the
+/// per-channel axis into three contiguous ranges at every sampling
+/// frequency — {32, 48}, {56, 64, 80}, {96 … 192} — so this function
+/// extends §2.4.3.3.1 by treating each header as the range it spans:
+///
+/// * per-channel rate **≤ 48** kbit/s → the low-rate table (B.2c at
+///   48 / 44,1 kHz, B.2d at 32 kHz); this covers 40 (between the two
+///   listed rates) and everything below the lowest listed rate;
+/// * **56 … 80** kbit/s → B.2a;
+/// * **≥ 96** kbit/s → B.2a at 48 kHz, B.2b at 44,1 / 32 kHz; this
+///   covers everything above the highest listed rate.
+///
+/// The extension is observable only on frames the strict
+/// [`FrameHeader::parse`] rejects; black-box decoders' PCM output on
+/// such streams agrees with it (see `tests/nonconformant_rate_mode.rs`).
+/// The encoder never writes these combinations.
+///
+/// Returns `None` only for a header whose two-channel total is odd or
+/// whose sampling frequency is not an MPEG-1 one — neither can come out
+/// of a header parse.
 pub fn select_table(header: &FrameHeader) -> Option<BitAllocTable> {
     if header.lsf {
         return Some(BitAllocTable::B1Lsf);
@@ -259,24 +283,12 @@ pub fn select_table(header: &FrameHeader) -> Option<BitAllocTable> {
         };
     }
     let per_ch = bitrate_per_channel_kbps(header)?;
-    match header.sample_rate {
-        48_000 => match per_ch {
-            32 | 48 => Some(BitAllocTable::B2c),
-            56 | 64 | 80 | 96 | 112 | 128 | 160 | 192 => Some(BitAllocTable::B2a),
-            _ => None,
-        },
-        44_100 => match per_ch {
-            32 | 48 => Some(BitAllocTable::B2c),
-            56 | 64 | 80 => Some(BitAllocTable::B2a),
-            96 | 112 | 128 | 160 | 192 => Some(BitAllocTable::B2b),
-            _ => None,
-        },
-        32_000 => match per_ch {
-            32 | 48 => Some(BitAllocTable::B2d),
-            56 | 64 | 80 => Some(BitAllocTable::B2a),
-            96 | 112 | 128 | 160 | 192 => Some(BitAllocTable::B2b),
-            _ => None,
-        },
+    match (header.sample_rate, per_ch) {
+        (48_000 | 44_100, ..=48) => Some(BitAllocTable::B2c),
+        (32_000, ..=48) => Some(BitAllocTable::B2d),
+        (48_000 | 44_100 | 32_000, 49..=95) => Some(BitAllocTable::B2a),
+        (48_000, _) => Some(BitAllocTable::B2a),
+        (44_100 | 32_000, _) => Some(BitAllocTable::B2b),
         _ => None,
     }
 }

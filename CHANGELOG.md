@@ -6,8 +6,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- MPEG-1 streams whose (bitrate, mode) pair lies outside the §2.4.2.3
+  matrix — e.g. mono at 384 kbit/s, stereo at 32 kbit/s — produced no
+  audio: every frame failed in the header parse. The decode entry
+  points (`decode_frame`, `decode_frame_with`, `decode_all_frames`,
+  the multichannel decoder and the registry decoder) now accept every
+  ladder bitrate with every mode. `bitalloc::select_table` extends
+  §2.4.3.3.1 to per-channel rates the Table 3-B.2 headers do not list
+  (≤ 48 kbit/s → B.2c / B.2d, 56 … 80 → B.2a, ≥ 96 → B.2a at 48 kHz /
+  B.2b at 44,1 and 32 kHz); output matches two black-box decoders on
+  all 24 such cells a black-box encoder writes. The encoder still
+  refuses these combinations and `FrameHeader::parse` /
+  `FrameHeader::emit_bytes` stay strict.
+
 ### Added
 
+- `FrameHeader::parse_tolerant`, `parse_tolerant_allow_free_format`
+  (header parse without the §2.4.2.3 mode matrix) and
+  `FrameHeader::is_bitrate_mode_conformant`;
+  `FrameDecodeState::with_strict_bitrate_mode` / `strict_bitrate_mode`
+  to restore the conformance-checking decode.
+- `tests/nonconformant_rate_mode.rs`: bit-exact pins for all 48
+  out-of-matrix cells and a runtime-skipped black-box matrix over every
+  MPEG-1 and MPEG-2 LSF (rate, channels, bitrate) cell.
 - `with_*` setters for every field of `mc_encode::McEncodeConfig` and
   `frame::Ancillary` (start from `Default`); `mc::McConfig::new(..)` plus
   `with_*`; all-field `new(..)` constructors for `frame::DecodedFrame`,

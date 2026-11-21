@@ -53,6 +53,28 @@ wired into the runtime registry** (frame-in / packet-out
   bitrate / sampling-frequency ladders (MPEG-1 and the LSF 8–160 kbit/s
   / 16 / 22.05 / 24 kHz tables), the §2.4.2.3 disallowed (bitrate, mode)
   matrix (MPEG-1 only), and reserved-code rejection.
+- **Streams outside the §2.4.2.3 (bitrate, mode) matrix decode by
+  default.** The matrix (32 / 48 / 56 / 80 kbit/s single-channel only,
+  224 … 384 kbit/s two-channel only) restricts encoders; a frame that
+  ignores it — mono at 384 kbit/s, stereo at 32 kbit/s — is still
+  self-describing, and such streams exist in the field. Every decode
+  entry point (`decode_frame*`, `decode_all_frames`, the multichannel
+  decoder, the registry decoder) accepts any ladder bitrate with any
+  mode via `FrameHeader::parse_tolerant`; the Table 3-B.2 choice
+  extends §2.4.3.3.1 by range (≤ 48 kbit/s per channel → B.2c / B.2d,
+  56 … 80 → B.2a, ≥ 96 → B.2a at 48 kHz / B.2b otherwise). Conformance
+  checking stays available: `FrameHeader::parse` is strict,
+  `FrameHeader::is_bitrate_mode_conformant` reports it, and
+  `FrameDecodeState::with_strict_bitrate_mode(true)` makes the frame
+  decoder refuse such frames. The encoder never writes them.
+  `tests/nonconformant_rate_mode.rs` pins all 48 such cells (3 rates ×
+  {4 low rates × 3 two-channel modes + 4 high rates mono}) bit-exactly
+  against their conformant twins, and — when the tools are installed —
+  decodes every cell a black-box encoder writes (84 MPEG-1 cells, 24 of
+  them outside the matrix, plus 84 MPEG-2 LSF cells) and compares with
+  two black-box decoders: 168 / 168 within the ISO/IEC 11172-4 accuracy
+  criterion (worst 0.025 LSB peak / 0.006 LSB rms against the
+  floating-point reference; ≤ 1 LSB against the 16-bit one).
 - **Frame sizing** (`floor(144 · bitrate / Fs) + padding`) and cold
   sync search (`find_sync`).
 - **Free format** (§2.4.2.3, `bitrate_index == '0000'`): free-format

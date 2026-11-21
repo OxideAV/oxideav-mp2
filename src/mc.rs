@@ -692,7 +692,7 @@ pub(crate) struct BaseSubbands {
 /// keeps the scalefactor application separable and stops before the
 /// synthesis filterbank).
 pub(crate) fn decode_base_subbands(buf: &[u8]) -> Result<BaseSubbands, McError> {
-    let header = FrameHeader::parse(buf)?;
+    let header = FrameHeader::parse_tolerant(buf)?;
     if header.lsf {
         return Err(McError::LsfBase);
     }
@@ -1985,7 +1985,7 @@ pub fn decode_mc_stream(base: &[u8], ext: Option<&[u8]>) -> Result<McDecodedStre
         let remaining = &base[offset..];
         // Stop at a trailing partial frame (mirror of
         // `decode_all_frames`' chaining).
-        let header = FrameHeader::parse(remaining)?;
+        let header = FrameHeader::parse_tolerant(remaining)?;
         if remaining.len() < header.frame_size_bytes() {
             break;
         }

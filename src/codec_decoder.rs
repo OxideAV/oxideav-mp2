@@ -352,7 +352,7 @@ impl Mp2CoreDecoder {
     /// [`decode_frame_with`] path unchanged.
     fn decode_one_packet(&mut self, data: &[u8]) -> Result<DecodedFrame> {
         // Peek the header in free-format-tolerant mode.
-        let header = FrameHeader::parse_allow_free_format(data)
+        let header = FrameHeader::parse_tolerant_allow_free_format(data)
             .map_err(|e| Error::other(format!("oxideav-mp2: header parse: {e}")))?;
         if !header.is_free_format() {
             return decode_frame_with(data, &mut self.state)

@@ -321,6 +321,11 @@ fn extract_ancillary(frame: &[u8], reader: &mut BitReader<'_>) -> Ancillary {
 /// When `header.protection_bit == false` the §2.4.3.1 CRC-16 over the
 /// protected fields is verified; mismatches raise
 /// [`FrameError::CrcMismatch`].
+///
+/// The MPEG-1 §2.4.2.3 (bitrate, mode) matrix is not enforced: any
+/// ladder bitrate decodes with any mode. For the conformance-checking
+/// behaviour use [`decode_frame_with`] with
+/// [`FrameDecodeState::with_strict_bitrate_mode`].
 pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame, FrameError> {
     decode_frame_with(buf, &mut FrameDecodeState::new())
 }
@@ -340,6 +345,9 @@ pub struct FrameDecodeState {
     /// frames so the IIR has no per-frame discontinuity. `None` per
     /// channel means "deliver unfiltered" (`emphasis == '00'`).
     deemphasis: Vec<Option<DeEmphasis>>,
+    /// When set, [`decode_frame_with`] applies the §2.4.2.3 Layer II
+    /// (bitrate, mode) matrix and refuses non-conformant frames.
+    strict_bitrate_mode: bool,
 }
 
 impl FrameDecodeState {
@@ -349,7 +357,28 @@ impl FrameDecodeState {
         FrameDecodeState {
             filterbank: Vec::new(),
             deemphasis: Vec::new(),
+            strict_bitrate_mode: false,
         }
+    }
+
+    /// Choose whether [`decode_frame_with`] enforces the MPEG-1
+    /// §2.4.2.3 "allowed modes" matrix (PDF page 21).
+    ///
+    /// The default (`false`) decodes every ladder bitrate with every
+    /// mode: the matrix restricts what an encoder may write, the frame
+    /// itself stays decodable, and such streams exist in the field.
+    /// With `true` a frame outside the matrix fails with
+    /// [`crate::header::HeaderError::DisallowedBitrateModeCombination`]
+    /// — the conformance-checking behaviour.
+    pub fn with_strict_bitrate_mode(mut self, strict: bool) -> Self {
+        self.strict_bitrate_mode = strict;
+        self
+    }
+
+    /// Whether the §2.4.2.3 matrix is enforced (see
+    /// [`Self::with_strict_bitrate_mode`]).
+    pub fn strict_bitrate_mode(&self) -> bool {
+        self.strict_bitrate_mode
     }
 
     /// Re-zero every filterbank's V ring buffer per Annex A Figure
@@ -409,7 +438,14 @@ pub fn decode_frame_with(
     buf: &[u8],
     state: &mut FrameDecodeState,
 ) -> Result<DecodedFrame, FrameError> {
-    let header = FrameHeader::parse(buf)?;
+    // Tolerant by default: the §2.4.2.3 (bitrate, mode) matrix is an
+    // encoder constraint, not a syntax dependency (see
+    // `FrameHeader::parse_tolerant`).
+    let header = if state.strict_bitrate_mode {
+        FrameHeader::parse(buf)?
+    } else {
+        FrameHeader::parse_tolerant(buf)?
+    };
     let frame_size = header.frame_size_bytes();
     if buf.len() < frame_size {
         return Err(FrameError::Truncated {

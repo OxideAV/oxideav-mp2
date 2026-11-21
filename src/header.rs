@@ -298,7 +298,42 @@ impl FrameHeader {
     /// `lsf` flag on the returned [`FrameHeader`] selects the LSF
     /// bitrate ladder and sampling-frequency table.
     pub fn parse(buf: &[u8]) -> Result<Self, HeaderError> {
-        Self::parse_inner(buf, false)
+        Self::parse_inner(buf, false, true)
+    }
+
+    /// Decoder-side parse: identical to [`FrameHeader::parse`] except
+    /// that the MPEG-1 §2.4.2.3 "allowed modes" matrix is **not**
+    /// applied, so every ladder `bitrate_index` is accepted with every
+    /// `mode`.
+    ///
+    /// The matrix (PDF page 21) is a constraint on what an encoder may
+    /// write; nothing in the frame syntax depends on it. A frame that
+    /// carries, say, 384 kbit/s with `single_channel` is still fully
+    /// self-describing: its length follows from §2.4.3.1 and its
+    /// allocation table from the per-channel rate (see
+    /// [`crate::bitalloc::select_table`] for the out-of-list rule).
+    /// Streams of this kind exist in the field, so the decode entry
+    /// points use this parse by default; use
+    /// [`FrameHeader::is_bitrate_mode_conformant`] (or the strict
+    /// [`FrameHeader::parse`]) to check conformance.
+    pub fn parse_tolerant(buf: &[u8]) -> Result<Self, HeaderError> {
+        Self::parse_inner(buf, false, false)
+    }
+
+    /// [`FrameHeader::parse_tolerant`] that additionally accepts the
+    /// free-format code, as [`FrameHeader::parse_allow_free_format`]
+    /// does.
+    pub fn parse_tolerant_allow_free_format(buf: &[u8]) -> Result<Self, HeaderError> {
+        Self::parse_inner(buf, true, false)
+    }
+
+    /// `true` when this header's `(bit_rate, mode)` pair satisfies the
+    /// §2.4.2.3 Layer II matrix. LSF and free-format headers are always
+    /// conformant (the matrix is MPEG-1 only and keyed on ladder rates).
+    pub fn is_bitrate_mode_conformant(&self) -> bool {
+        self.lsf
+            || self.is_free_format()
+            || is_layer2_bitrate_mode_allowed(self.bit_rate, self.mode)
     }
 
     /// Like [`FrameHeader::parse`] but accepts the §2.4.2.3 free-format
@@ -321,10 +356,14 @@ impl FrameHeader {
     /// applied for a free-format frame because that matrix is keyed on the
     /// ladder bitrates, none of which a free-format frame names.
     pub fn parse_allow_free_format(buf: &[u8]) -> Result<Self, HeaderError> {
-        Self::parse_inner(buf, true)
+        Self::parse_inner(buf, true, true)
     }
 
-    fn parse_inner(buf: &[u8], allow_free_format: bool) -> Result<Self, HeaderError> {
+    fn parse_inner(
+        buf: &[u8],
+        allow_free_format: bool,
+        enforce_mode_matrix: bool,
+    ) -> Result<Self, HeaderError> {
         if buf.len() < 4 {
             return Err(HeaderError::BufferTooShort);
         }
@@ -406,7 +445,13 @@ impl FrameHeader {
         // accepted for every mode. Free-format frames carry no ladder
         // bitrate, so the matrix (which is keyed on ladder values) does
         // not apply — the (bitrate, mode) check is skipped for them.
-        if !free_format && !lsf && !is_layer2_bitrate_mode_allowed(bit_rate, mode) {
+        // The matrix is skipped altogether for the tolerant (decoder)
+        // parse.
+        if enforce_mode_matrix
+            && !free_format
+            && !lsf
+            && !is_layer2_bitrate_mode_allowed(bit_rate, mode)
+        {
             return Err(HeaderError::DisallowedBitrateModeCombination { bit_rate, mode });
         }
 
