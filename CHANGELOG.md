@@ -6,6 +6,15 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/OxideAV/oxideav-mp2/compare/v0.0.10...v0.0.11) - 2026-11-21
+
+### Other
+
+- Decode Layer II frames outside the §2.4.2.3 (bitrate, mode) matrix
+- clippy 1.100: needless_range_loop — iterate allocation rows directly
+- API hygiene: #[non_exhaustive] growable types, #[doc(hidden)] internals
+- edition 2024, MSRV 1.95
+
 ### Fixed
 
 - MPEG-1 streams whose (bitrate, mode) pair lies outside the §2.4.2.3
